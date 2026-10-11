@@ -10,11 +10,11 @@
 
 **适合谁**：电商卖家做主图和场景图、工业设计师出方案效果图、品牌做一款产品多种场景的广告图、3D 艺术家省掉搭场景和打灯的时间。
 
-**海外正式版**：[Gumroad · $29.90](https://tiandao1.gumroad.com/l/wondful)（含 1 年更新）｜源码在本仓库开源。
+**付费版**：[Gumroad · $29.90](https://tiandao1.gumroad.com/l/wondful)（含 1 年更新）。**付费版比免费版早三个月拿到每个新功能**；本仓库的免费开源版在新版发布三个月后同步更新。
 
 Wondful AI Renderer 是一个开源的 Blender 插件。它把 Blender 当作“构图与结构的唯一真相”：先从你的相机渲出白模底图和结构图（Depth / Normal / 部件 ID），再调用本机已登录的 **Codex CLI** 或 **Antigravity CLI** 生图，最后按结构做验收和纠偏。
 
-English: an open-source Blender add-on for **shape-locked AI product rendering**. Shoes, watches, lamps, cameras, furniture, cars — any product with a 3D model. One camera setup becomes many photoreal commercial scenes, while silhouette, scale, colour and position stay locked to your Blender render. Pro version on [Gumroad](https://tiandao1.gumroad.com/l/wondful).
+English: an open-source Blender add-on for **shape-locked AI product rendering**. Shoes, watches, lamps, cameras, furniture, cars — any product with a 3D model. One camera setup becomes many photoreal commercial scenes, while silhouette, scale, colour and position stay locked to your Blender render. The paid version on [Gumroad](https://tiandao1.gumroad.com/l/wondful) gets every new feature three months before this free open-source repo.
 
 ---
 
