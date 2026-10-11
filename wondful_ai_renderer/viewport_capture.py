@@ -378,7 +378,320 @@ def _product_forward(pts, up):
     return best, best_len
 
 
-def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0) -> bool:
+_VEHICLE_RE = None
+
+
+def _collection_roots(collection):
+    """Objects of the collection whose parent is outside it (cameras/lights excluded)."""
+    if not collection:
+        return []
+    objs = list(collection.all_objects)
+    members = set(objs)
+    return [o for o in objs if (o.parent is None or o.parent not in members) and o.type not in {"CAMERA", "LIGHT"}]
+
+
+def _product_vertices(context, collection):
+    """World-space vertices (N×3 numpy array) of the product's evaluated, renderable meshes."""
+    import numpy as np
+    depsgraph = context.evaluated_depsgraph_get()
+    chunks = []
+    objs = list(collection.all_objects) if collection else list(context.scene.objects)
+    for obj in objs:
+        if obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_"):
+            continue
+        ev = obj.evaluated_get(depsgraph)
+        try:
+            me = ev.to_mesh()
+        except Exception:
+            continue
+        try:
+            n = len(me.vertices)
+            if not n:
+                continue
+            co = np.empty(n * 3, dtype=np.float32)
+            me.vertices.foreach_get("co", co)
+            m = np.array(ev.matrix_world, dtype=np.float64)
+            chunks.append(co.reshape(-1, 3).astype(np.float64) @ m[:3, :3].T + m[:3, 3])
+        finally:
+            ev.to_mesh_clear()
+    return np.concatenate(chunks) if chunks else None
+
+
+def _looks_like_vehicle(collection) -> bool:
+    import re
+    global _VEHICLE_RE
+    if _VEHICLE_RE is None:
+        _VEHICLE_RE = re.compile(r"(wheel|tire|tyre|vehicle|brake|caliper|license|plate_num|(^|[^a-z])car([^a-z]|$)"
+                                 r"|车|轮胎|轮毂|轮子)")
+    if not collection:
+        return False
+    names = [collection.name]
+    for o in collection.all_objects:
+        names.append(o.name)
+        if o.type == "MESH" and o.data:
+            names.append(o.data.name)
+            names += [m.name for m in o.data.materials if m]
+    return any(_VEHICLE_RE.search(n.lower()) for n in names if n)
+
+
+_LOCAL_AXES = {"NEG_Y": (0.0, -1.0, 0.0), "POS_Y": (0.0, 1.0, 0.0), "NEG_X": (-1.0, 0.0, 0.0), "POS_X": (1.0, 0.0, 0.0)}
+
+
+def _terrain_forward(scene, collection, P, axis_mode="AUTO"):
+    """Horizontal forward of the product and how it was chosen.
+
+    Manual: the chosen local axis of the collection root(s).  AUTO: Blender/glTF convention
+    (front faces local -Y); for a vehicle whose -Y is across its length, the long axis is used,
+    pointing to the camera's side (3/4 front shots)."""
+    import numpy as np
+    from mathutils import Vector
+    up = Vector((0.0, 0.0, 1.0))
+    roots = _collection_roots(collection)
+
+    def horiz(v):
+        v = Vector((v.x, v.y, 0.0))
+        return v.normalized() if v.length > 1e-6 else None
+
+    local = Vector(_LOCAL_AXES.get(axis_mode, _LOCAL_AXES["NEG_Y"]))
+    cands = [horiz(r.matrix_world.to_3x3() @ local) for r in roots]
+    cands = [c for c in cands if c is not None]
+    cand = (sum(cands, Vector()) / len(cands)) if cands else horiz(local)
+    cand = horiz(cand) if cand is not None and cand.length > 1e-6 else Vector((0.0, -1.0, 0.0))
+    if axis_mode in _LOCAL_AXES:
+        return cand, "manual:" + axis_mode
+    xy = P[:, :2]
+    # Minimum-area footprint rectangle (1° steps over 90°): its long side is the length axis.
+    # (The longest projection would point along the footprint diagonal instead.)
+    best, best_len, width, best_area = None, -1.0, 0.0, None
+    for k in range(90):
+        a = math.pi * k / 180
+        ax, pe = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
+        pa, pp = xy @ ax, xy @ pe
+        la, lp = float(pa.max() - pa.min()), float(pp.max() - pp.min())
+        if best_area is None or la * lp < best_area - 1e-12:
+            best_area = la * lp
+            if la >= lp:
+                best, best_len, width = Vector((ax[0], ax[1], 0.0)), la, lp
+            else:
+                best, best_len, width = Vector((pe[0], pe[1], 0.0)), lp, la
+    if abs(cand.dot(best)) > 0.7:
+        return (best if cand.dot(best) > 0 else -best), "auto:-Y"
+    if best_len > 1.3 * max(width, 1e-6) and _looks_like_vehicle(collection):
+        # vehicles are longest front-to-back; furniture is often widest side-to-side, so only
+        # vehicles use the long axis
+        cam = scene.camera
+        if cam is not None:
+            centre = Vector((float(xy[:, 0].mean()), float(xy[:, 1].mean()), 0.0))
+            to_cam = Vector((cam.matrix_world.translation.x, cam.matrix_world.translation.y, 0.0)) - centre
+            return (best if best.dot(to_cam) >= 0 else -best), "auto:long-axis-to-camera"
+        return best, "auto:long-axis"
+    return cand, "auto:-Y"
+
+
+def _basis_snapshot(obj):
+    if obj is None:
+        return None
+    return (obj.location.copy(), obj.rotation_mode, obj.rotation_euler.copy(), obj.rotation_quaternion.copy(),
+            tuple(obj.rotation_axis_angle), obj.scale.copy())
+
+
+def _basis_restore(obj, snap):
+    if obj is None or snap is None:
+        return
+    loc, mode, eul, quat, aa, scale = snap
+    obj.rotation_mode = mode
+    obj.location = loc
+    obj.rotation_euler = eul
+    obj.rotation_quaternion = quat
+    obj.rotation_axis_angle = aa
+    obj.scale = scale
+
+
+def _pose_product(context, collection, W, created, restore):
+    """Apply world matrix ``W`` to the product temporarily without touching its transforms.
+
+    Each root is re-parented under a temporary empty that carries the tilt, so the user's
+    location/rotation/scale (even animated ones) stay untouched; ``restore`` puts the original
+    parent and parent-inverse back.  The scene camera never moves."""
+    from mathutils import Matrix
+    scene = context.scene
+    cam = scene.camera
+    cam_world = cam.matrix_world.copy() if cam else None
+    cam_snap = _basis_snapshot(cam)
+    for r in _collection_roots(collection):
+        parent = r.parent
+        if parent is not None and r.parent_type != "OBJECT":
+            snap = _basis_snapshot(r)
+            restore.append(lambda r=r, snap=snap: _basis_restore(r, snap))
+            r.matrix_world = W @ r.matrix_world
+            continue
+        mpi = r.matrix_parent_inverse.copy()
+        e = bpy.data.objects.new("_wondful_terrain_pose", None)
+        scene.collection.objects.link(e)
+        created.append(("obj", e))
+        if parent is not None:
+            e.parent = parent
+            e.matrix_parent_inverse = mpi
+            base = parent.matrix_world @ mpi
+        else:
+            base = Matrix.Identity(4)
+        e.matrix_basis = base.inverted() @ W @ base
+        restore.append(lambda r=r, parent=parent, mpi=mpi: (setattr(r, "parent", parent),
+                                                            setattr(r, "matrix_parent_inverse", mpi)))
+        r.parent = e
+        r.matrix_parent_inverse = Matrix.Identity(4)
+    context.view_layer.update()
+    if cam is not None:
+        diff = max(abs(a - b) for ra, rb in zip(cam.matrix_world, cam_world) for a, b in zip(ra, rb))
+        if diff > 1e-7:  # camera was parented inside the product: keep the shot fixed
+            restore.append(lambda: _basis_restore(cam, cam_snap))
+            cam.matrix_world = cam_world
+            context.view_layer.update()
+
+
+def _custom_terrain(context, collection, settings, created, restore):
+    """Build the 自定义 terrain mesh and (temporarily) pose the product on it.
+
+    Returns (mesh, info) or (None, info) when there is nothing to do."""
+    import numpy as np
+    from mathutils import Matrix, Vector
+    from . import terrain as TR
+    s = TR.normalize(settings)
+    info = {"mode": "CUSTOM"}
+    if TR.is_flat(s):
+        info["flat"] = True
+        return None, info
+    P = _product_vertices(context, collection)
+    if P is None or not len(P):
+        return None, info
+    scene = context.scene
+    up = Vector((0.0, 0.0, 1.0))
+    fwd, how = _terrain_forward(scene, collection, P, s["front_axis"])
+    side = fwd.cross(up).normalized()
+    F, S = np.array(fwd), np.array(side)
+    u, v, z = P @ F, P @ S, P[:, 2]
+    zmin, height = float(z.min()), float(z.max() - z.min())
+    uc, vc = float(u.max() + u.min()) / 2.0, float(v.max() + v.min()) / 2.0
+    half_len, half_wid = float(u.max() - u.min()) / 2.0, float(v.max() - v.min()) / 2.0
+    C = fwd * uc + side * vc
+    C.z = zmin
+    span = max(2 * half_len, 2 * half_wid, height, 1e-3)
+    margin = 0.06 * max(2 * half_len, 2 * half_wid)
+    U, V = half_len + margin, half_wid + margin
+    shoulder = 0.5 * max(U, V)
+    hf = TR.HeightField(s, U, V, shoulder)
+    normal = (up - fwd * hf.gu - side * hf.gv).normalized()
+    q = up.rotation_difference(normal)
+    Q = np.array(q.to_matrix(), dtype=np.float64)
+    rel = (P - np.array(C)) @ Q.T
+    uu, vv, zz = rel @ F, rel @ S, rel[:, 2]
+    clearance = zz - hf.height(uu, vv)
+    lift = float(-clearance.min())
+    clearance = clearance + lift
+    eps = max(0.004 * span, 1e-4)
+    touch = clearance < eps
+    quads = sorted({("F" if a >= 0 else "B") + ("R" if b >= 0 else "L") for a, b in zip(uu[touch], vv[touch])})
+    pitch, roll = TR.pose_angles(hf.gu, hf.gv)
+    W = Matrix.Translation(up * lift) @ Matrix.Translation(C) @ q.to_matrix().to_4x4() @ Matrix.Translation(-C)
+    posed = bool(s["follow"] and (abs(pitch) > 0.05 or abs(roll) > 0.05)) or abs(lift) > 1e-5
+    if posed:
+        _pose_product(context, collection, W, created, restore)
+    us = TR.grid_offsets(U, shoulder, span)
+    vs = TR.grid_offsets(V, shoulder, span)
+    ug, vg = np.meshgrid(np.array(us), np.array(vs), indexing="ij")
+    hg = hf.height(ug, vg)
+    cap = None
+    carved = 0.0
+    cam = scene.camera
+    if cam is not None:
+        # The camera never moves: if rising ground would bury it, level the terrain off just
+        # below the lens (outside the pad only), like a slope that flattens out where the
+        # photographer stands.
+        rel_cam = np.array(cam.matrix_world.translation) - np.array(C)
+        cu, cv, cz = float(rel_cam @ F), float(rel_cam @ S), float(rel_cam[2])
+        room = max(0.15 * height, 0.05 * span)
+        outside = (np.abs(ug) > U) | (np.abs(vg) > V)
+        if float(hf.height(cu, cv)) > cz - room:
+            cap = cz - room
+            band = 0.1 * span
+            soft = hg - np.square(np.clip(hg - cap + band, 0.0, 2 * band)) / (4.0 * band)
+            capped = np.where(hg >= cap + band, cap, np.where(hg > cap - band, soft, hg))
+            hg = np.where(outside, capped, hg)
+        # Keep the line of sight from the lens to the product's base clear: ground between the
+        # camera and the product (within the product's bearing, eased at the edges) is kept just
+        # under the sight line, so an uphill toward the camera reads as a crest instead of a
+        # wall that hides the product.
+        near_u, near_v = max(-U, min(U, cu)), max(-V, min(V, cv))
+        d_t = math.hypot(cu - near_u, cv - near_v)
+        if d_t > 1e-3:
+            z_t = float(hf.height(near_u, near_v))
+            du, dv = ug - cu, vg - cv
+            dist = np.hypot(du, dv)
+            to_c = math.atan2(-cv, -cu)
+            corners = [math.atan2(sv * V - cv, su * U - cu) for su in (-1, 1) for sv in (-1, 1)]
+            wrap = lambda a: (a + math.pi) % (2 * math.pi) - math.pi
+            half = max(abs(wrap(a - to_c)) for a in corners)
+            ang = np.abs(np.angle(np.exp(1j * (np.arctan2(dv, du) - to_c))))
+            fall = math.radians(15.0)
+            wa = np.clip(1.0 - (ang - half) / fall, 0.0, 1.0)
+            wd = np.clip((d_t - dist) / (0.2 * d_t), 0.0, 1.0)
+            w = wa * wd
+            w = w * w * (3 - 2 * w)  # smoothstep
+            sight = cz + (z_t - cz) * dist / d_t - 0.02 * span
+            excess = np.clip(hg - sight, 0.0, None)
+            carve = np.where(outside, w * excess, 0.0)
+            if float(carve.max()) > 1e-4:
+                hg = hg - carve
+                carved = round(float(carve.max()), 4)
+    pts = (np.array(C)[None, None, :] + ug[..., None] * F + vg[..., None] * S
+           + hg[..., None] * np.array((0.0, 0.0, 1.0)))
+    nu, nv = len(us), len(vs)
+    verts = [tuple(map(float, p)) for p in pts.reshape(-1, 3)]
+    faces = []
+    for i in range(nu - 1):
+        for j in range(nv - 1):
+            a = i * nv + j
+            faces.append((a, a + nv, a + nv + 1, a + 1))
+    mesh = bpy.data.meshes.new("_wondful_clay_floor")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    for poly in mesh.polygons:
+        poly.use_smooth = True
+    vehicle = s.get("vehicle")
+    if vehicle is None:
+        vehicle = _looks_like_vehicle(collection)
+    hints = {}
+    cam = scene.camera
+    if cam is not None:
+        inv = cam.matrix_world.to_3x3().inverted()
+        for d, vec in (("front", fwd), ("right", side)):
+            c = inv @ vec
+            opp = {"front": "back", "right": "left"}[d]
+            if abs(c.x) >= 0.35:
+                a, b = ("画面右侧", "画面左侧") if c.x > 0 else ("画面左侧", "画面右侧")
+                if d == "front":
+                    a, b = "朝" + a, "朝" + b
+            else:
+                if d == "front":
+                    a, b = ("朝向镜头", "背向镜头") if c.z > 0 else ("背向镜头", "朝向镜头")
+                else:
+                    a, b = ("靠近镜头一侧", "远离镜头一侧") if c.z > 0 else ("远离镜头一侧", "靠近镜头一侧")
+            hints[d], hints[opp] = a, b
+    text = TR.describe(s, vehicle=bool(vehicle), hints=hints)
+    info.update({
+        "forward": [round(x, 4) for x in fwd], "forward_how": how, "pitch_deg": round(pitch, 2),
+        "roll_deg": round(roll, 2), "lift": round(lift, 5), "posed": posed, "follow": s["follow"],
+        "contact_points": int(touch.sum()), "contact_quadrants": quads, "contact_eps": round(eps, 5),
+        "min_clearance": round(float(clearance.min()), 6), "pivot": [round(x, 4) for x in C],
+        "vehicle": bool(vehicle), "hints": hints, "camera_cap": None if cap is None else round(cap, 4),
+        "sightline_carve": carved, "settings": {d: list(s[d]) for d in TR.DIRECTIONS},
+        "text": text,
+    })
+    return mesh, info
+
+
+def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
+                     terrain=None) -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -397,6 +710,7 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     }
     frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
     created = []
+    restore = []  # undo steps for the temporary product pose (自定义地形), run before cleanup
     try:
         from mathutils import Vector
         pts = _product_bounds(collection)
@@ -443,6 +757,18 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             bpy.data.meshes.remove(old_mesh)
             mesh = crest
             LAST_CLAY_INFO["crest_deg"] = round(float(crest_angle), 1)
+        elif ground_mode == "CUSTOM" and pts:
+            terrain_mesh, tinfo = _custom_terrain(context, collection, terrain, created, restore)
+            LAST_CLAY_INFO["terrain"] = tinfo
+            LAST_CLAY_INFO["terrain_text"] = tinfo.get("text", "")
+            if terrain_mesh is not None:
+                old_mesh = floor.data
+                floor.data = terrain_mesh
+                floor.rotation_mode = "QUATERNION"
+                floor.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+                floor.location = (0.0, 0.0, 0.0)
+                bpy.data.meshes.remove(old_mesh)
+                mesh = terrain_mesh
         mat = bpy.data.materials.new("_wondful_clay_floor_mat")
         mat.use_nodes = True
         bsdf = mat.node_tree.nodes.get("Principled BSDF")
@@ -525,6 +851,16 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         bpy.ops.render.render(write_still=True)
         return Path(filepath).exists() and image_dimensions(filepath) == (width, height)
     finally:
+        for undo in reversed(restore):
+            try:
+                undo()
+            except Exception as exc:
+                print(f"[Wondful] 恢复产品姿态失败：{exc}")
+        if restore:
+            try:
+                context.view_layer.update()
+            except Exception:
+                pass
         if "cm" in snap:
             try:
                 scene.view_settings.view_transform, scene.view_settings.look, scene.view_settings.exposure = snap["cm"]

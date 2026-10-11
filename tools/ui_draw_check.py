@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -177,6 +177,17 @@ def main():
     props.ui_show_prompt = True
     props.ui_show_advanced = True
     draw("connected_refs")
+    # 1.1.0: 高级 › 地面 › 自定义 terrain box (presets, four directions, pose toggle)
+    props.clay_ground = "CUSTOM"
+    bpy.ops.wondful.terrain_preset(preset="SIDE")
+    if (props.clay_terrain_left, props.clay_terrain_right) != ("UP", "DOWN"):
+        problems.append("terrain_preset SIDE did not fill left/right")
+    log = draw("terrain_custom")
+    if not any("wondful.terrain_preset" in line for line in log):
+        problems.append("terrain_custom: preset buttons missing")
+    props.clay_terrain_follow = False
+    draw("terrain_custom_level")
+    props.clay_ground = "AUTO"
 
     # 3. generating: polishing then rendering
     props.status = "POLISHING"

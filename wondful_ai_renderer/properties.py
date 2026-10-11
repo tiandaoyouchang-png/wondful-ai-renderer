@@ -17,6 +17,12 @@ def reference_limit(kind):
 
 _PROMPT_SYNCING = False
 
+_TERRAIN_MODES = [
+    ("FLAT", "平", "这个方向保持平地"),
+    ("UP", "上坡", "这个方向地面向上抬升"),
+    ("DOWN", "下坡", "这个方向地面向下倾斜"),
+]
+
 
 def _split_prompt_for_editor(text: str, width: int = 22) -> list[tuple[str, bool]]:
     """Split one logical prompt into visual editor rows without changing content.
@@ -425,6 +431,33 @@ class WONDFUL_AISettings(PropertyGroup):
         items=[
             ("AUTO", "自动", "平地；车身倾斜时自动铺成同坡度的斜坡"),
             ("CREST", "山头", "车停在山头最高处：四周地面向下倾斜，配合低机位仰拍效果最好"),
+            ("CUSTOM", "自定义", "前/后/左/右四个方向分别设为平地、上坡或下坡；产品可随坡面倾斜"),
+        ],
+        default="AUTO",
+    )
+    # 1.1.0 custom terrain (高级 › 地面 › 自定义). Directions are the product's own front/back/left/right.
+    clay_terrain_front: EnumProperty(name="前", items=_TERRAIN_MODES, default="UP")
+    clay_terrain_back: EnumProperty(name="后", items=_TERRAIN_MODES, default="DOWN")
+    clay_terrain_left: EnumProperty(name="左", items=_TERRAIN_MODES, default="FLAT")
+    clay_terrain_right: EnumProperty(name="右", items=_TERRAIN_MODES, default="FLAT")
+    clay_terrain_front_angle: FloatProperty(name="前坡度", description="产品正前方地面的坡度", default=15.0, min=0.0, max=35.0)
+    clay_terrain_back_angle: FloatProperty(name="后坡度", description="产品正后方地面的坡度", default=15.0, min=0.0, max=35.0)
+    clay_terrain_left_angle: FloatProperty(name="左坡度", description="产品左侧地面的坡度", default=15.0, min=0.0, max=35.0)
+    clay_terrain_right_angle: FloatProperty(name="右坡度", description="产品右侧地面的坡度", default=15.0, min=0.0, max=35.0)
+    clay_terrain_follow: BoolProperty(
+        name="姿态跟随地形",
+        description="白模渲染时产品临时随坡面前后俯仰、左右侧倾，底部贴地；渲染完立即恢复你的原始变换。关闭则产品保持水平",
+        default=True,
+    )
+    clay_terrain_front_axis: EnumProperty(
+        name="产品正面",
+        description="产品的“前”是哪个方向（按产品根物体的本地轴）。自动：-Y 为正面；识别为车辆且 -Y 不在车长方向时取车长方向",
+        items=[
+            ("AUTO", "自动", "-Y 为正面（Blender / glTF 惯例）；车辆取车长方向并朝向相机一侧"),
+            ("NEG_Y", "-Y", "本地 -Y 是正面"),
+            ("POS_Y", "+Y", "本地 +Y 是正面"),
+            ("NEG_X", "-X", "本地 -X 是正面"),
+            ("POS_X", "+X", "本地 +X 是正面"),
         ],
         default="AUTO",
     )

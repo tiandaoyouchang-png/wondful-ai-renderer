@@ -367,6 +367,26 @@ def _draw_progress_bar(layout, props, text):
         bar.prop(props, "progress", text=text, slider=True)
 
 
+def _draw_terrain(layout, props):
+    """1.1.0 自定义地形: presets + four product-relative directions + pose toggle."""
+    box = layout.box()
+    box.label(text="自定义地形（相对产品自身的前后左右）", icon="MOD_DISPLACE")
+    presets = box.row(align=True)
+    for key, label in (("CLIMB", "爬坡"), ("DESCENT", "下坡"), ("SIDE", "侧坡"), ("RIDGE", "山脊"), ("VALLEY", "山谷")):
+        presets.operator("wondful.terrain_preset", text=label).preset = key
+    for key, label in (("front", "前"), ("back", "后"), ("left", "左"), ("right", "右")):
+        row = box.row(align=True)
+        row.label(text=label)
+        row.prop(props, f"clay_terrain_{key}", expand=True)
+        angle = row.row(align=True)
+        angle.enabled = getattr(props, f"clay_terrain_{key}", "FLAT") != "FLAT"
+        angle.prop(props, f"clay_terrain_{key}_angle", text="°")
+    box.prop(props, "clay_terrain_follow", text="姿态跟随地形")
+    axis = box.row(align=True)
+    axis.label(text="产品正面")
+    axis.prop(props, "clay_terrain_front_axis", text="")
+
+
 class WONDFUL_PT_main(Panel):
     bl_label = "Wondful AI 渲染器 · 3.2.2"
     bl_idname = "WONDFUL_PT_main"
@@ -650,6 +670,8 @@ class WONDFUL_PT_main(Panel):
                     ground.prop(props, "clay_ground", expand=True)
                     if getattr(props, "clay_ground", "AUTO") == "CREST":
                         ground.prop(props, "clay_crest_angle", text="下坡°")
+                    elif getattr(props, "clay_ground", "AUTO") == "CUSTOM":
+                        _draw_terrain(ai, props)
             ai.label(text=("生图：Codex 图像编辑（直连，失败自动改用 CLI）" if getattr(prefs, "codex_direct_edit", True)
                            else "生图：Codex ImageGen（由 CLI 管理）"))
         acct = ai.row(align=True)

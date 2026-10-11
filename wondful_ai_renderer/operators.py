@@ -829,6 +829,26 @@ class WONDFUL_OT_model_default(Operator):
         return {"FINISHED"}
 
 
+class WONDFUL_OT_terrain_preset(Operator):
+    bl_idname = "wondful.terrain_preset"
+    bl_label = "地形预设"
+    bl_description = "把前/后/左/右四个方向填成预设地形（爬坡、下坡、侧坡、山脊、山谷）"
+    bl_options = {"REGISTER", "UNDO"}
+
+    preset: bpy.props.EnumProperty(
+        items=[("CLIMB", "爬坡", ""), ("DESCENT", "下坡", ""), ("SIDE", "侧坡", ""),
+               ("RIDGE", "山脊", ""), ("VALLEY", "山谷", "")],
+        default="CLIMB",
+    )
+
+    def execute(self, context):
+        from .terrain import apply_preset_to_props
+        props = context.scene.wondful_ai
+        apply_preset_to_props(props, self.preset)
+        props.clay_ground = "CUSTOM"
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_codex_check(_BaseAsyncOperator):
     bl_idname = "wondful.codex_check"
     bl_label = "检测 Codex"
@@ -1977,14 +1997,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             exec_generate = generate_fn
             direct_simple_base = ""
             direct_simple_brief = None
+            direct_terrain_text = ""
             if bool(getattr(prefs, "codex_direct_simple", True)):
                 clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
                 try:
-                    from .viewport_capture import render_clay_base
+                    from .viewport_capture import render_clay_base, LAST_CLAY_INFO
+                    from .terrain import settings_from_props
                     if render_clay_base(context, clay_path, getattr(props, "product_collection", None),
                                         ground=getattr(props, "clay_ground", "AUTO"),
-                                        crest_angle=float(getattr(props, "clay_crest_angle", 18.0))):
+                                        crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
+                                        terrain=settings_from_props(props)):
                         direct_simple_base = clay_path
+                        direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
                         direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
                 except Exception as exc:
                     print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
@@ -2002,6 +2026,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     manifest=direct_manifest, bundle_note=direct_note, client_version=direct_version,
                     on_status=_direct_status, cancel_check=_cancel_requested,
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
+                    terrain_text=direct_terrain_text,
                 )
         provider_cli_path = provider["cli_path"]
         provider_model = provider["model"]

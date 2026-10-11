@@ -486,7 +486,7 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
-def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text=""):
+def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
@@ -499,6 +499,8 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text=""):
                  "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
     lines.append("地面的坡度、倾斜方向、起伏以及与车轮的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；山头/坡顶时车停在山的最高处，四周地面向下掉落，车身后方不出现更高的地面，远处只露出低于车的远山、天空或城市），"
                  "新环境的路面材质贴合这块地面铺设，不要把地面改平、改坡度或让车悬空；相机的俯仰和倾斜也保持不变。")
+    if (terrain_text or "").strip():
+        lines.append((terrain_text or "").strip())
     lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
                  "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
     if env_text:
@@ -823,7 +825,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
-               cancel_check=None, correction="", simple_brief=None):
+               cancel_check=None, correction="", simple_brief=None, terrain_text=""):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -870,7 +872,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                 raise
             env_note = "环境描述失败：" + str(exc)[:160]
     if simple:
-        text = build_simple_prompt(simple_brief, prompt, env_text=env_text)
+        text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -971,7 +973,7 @@ def short_reason(exc) -> str:
 
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
-                           simple_base="", simple_brief=None):
+                           simple_base="", simple_brief=None, terrain_text=""):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1000,6 +1002,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 client_version=client_version, timeout=max(60, int(kwargs.get("timeout") or 900) or 900),
                 log_dir=kwargs.get("cwd", ""), tag=out.stem, cancel_check=cancel_check,
                 simple_brief=simple_brief if use_simple else None,
+                terrain_text=terrain_text if use_simple else "",
             )
             state["direct_ok"] += 1
             return result
