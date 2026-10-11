@@ -50,7 +50,7 @@ English: an open-source Blender add-on that turns one camera setup into multiple
 
 ### 更多案例：球鞋 · 腕表 · 复古相机 · 台灯
 
-每个案例的**完整提示词（产品外观 + 环境/风格）、参考图、插件参数和逐张轮廓数据**见 [docs/CASES.md](docs/CASES.md)，单独的提示词文件在 `docs/cases/<案例>/prompt.md`。数据如实标注，未达标的场景也写明了原因。
+每个案例的**完整提示词（产品外观 + 环境/风格）、参考图、插件参数和逐张轮廓数据**见 [docs/CASES.md](docs/CASES.md)（English: [docs/CASES.en.md](docs/CASES.en.md)），单独的提示词文件在 `docs/cases/<案例>/prompt.md`。数据如实标注，未达标的场景也写明了原因。
 
 | 跑鞋 · 运动场晨光 | 跑鞋 · 城市雨夜 | 腕表 · 黑色大理石 |
 |---|---|---|
