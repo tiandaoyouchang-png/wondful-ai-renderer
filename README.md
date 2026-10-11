@@ -163,6 +163,8 @@ docs/showcase/             README 展示图
 
 欢迎提 Issue 和 PR：新场景预设、更多 Provider、更好的验收算法、其他品类的案例都非常欢迎。觉得有用请点个 ⭐ Star。
 
+Contributing guide (English): [CONTRIBUTING.md](CONTRIBUTING.md)
+
 ## License
 
 [MIT](LICENSE)
