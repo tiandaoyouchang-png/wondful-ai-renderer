@@ -14,6 +14,10 @@ from .prompt_engine import needs_reference_policy_refresh
 from .viewport_capture import camera_output_dimensions
 from .operators import render_variant_count
 
+# Text built from several parts is not a single key in Blender's translation table,
+# so it is translated here (see i18n.py).
+_t = bpy.app.translations.pgettext_iface
+
 
 def _prefs(context):
     return context.preferences.addons[__package__].preferences
@@ -222,7 +226,7 @@ def _step_card(layout, number, title, *, done, ready=True):
     if done:
         title_col.label(text=title, icon="CHECKMARK")
     else:
-        title_col.label(text=f"{STEP_NUMBERS[number - 1]}  {title}")
+        title_col.label(text=f"{STEP_NUMBERS[number - 1]}  {_t(title)}")
     tools = header.row(align=True)
     tools.alignment = "RIGHT"
     return card, tools
@@ -410,7 +414,7 @@ class WONDFUL_PT_main(Panel):
         else:
             account_text = {
                 "UNKNOWN": "未检测",
-                "NOT_INSTALLED": f"找不到 {provider_label}",
+                "NOT_INSTALLED": _t("找不到 {provider}").format(provider=provider_label),
                 "LOGGED_OUT": "未登录",
                 "ERROR": "异常",
             }.get(state, state)

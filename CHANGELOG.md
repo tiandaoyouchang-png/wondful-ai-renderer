@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- English UI translations (`wondful_ai_renderer/i18n.py`, registered with `bpy.app.translations`) for the connect step (step ①): its labels, buttons and tooltips. English shows when Blender's interface language is English; Chinese stays the default for zh_HANS. Other steps are not translated yet.
+
 ## 3.2.2 · Env Text Lock（2026-10-10）
 
 ### 变更

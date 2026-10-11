@@ -16,6 +16,7 @@ except Exception:
     def persistent(fn):
         return fn
 
+from .i18n import TRANSLATIONS
 from .prompt_editor import reset_prompt_editors, draw_prompt_editor_header
 
 from .comparison_view import (
@@ -161,6 +162,7 @@ def _wondful_save_pre(_dummy):
 
 
 def register():
+    bpy.app.translations.register(__name__, TRANSLATIONS)
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.WindowManager.wondful_auth_code = bpy.props.StringProperty(
@@ -202,3 +204,4 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
+    bpy.app.translations.unregister(__name__)
