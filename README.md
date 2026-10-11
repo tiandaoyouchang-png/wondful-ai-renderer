@@ -1,18 +1,55 @@
-# Wondful AI Renderer · Blender AI 渲染器
+# Wondful AI Renderer · 任何产品的 AI 场景渲染（Blender 插件）
 
-> 在 Blender 里打好一个机位，一键生成多张商业级场景大片，**产品的轮廓、比例和位置不跑偏**。
+> **任何有 3D 模型的产品**——鞋、表、灯、相机、家具、汽车——在 Blender 里打好一个机位，一键生成多张商业级场景图，**形状、比例、颜色和位置锁死，AI 不改你的产品**。
 
-![YU7 四场景](docs/showcase/yu7_grass.jpg)
+| 跑鞋 · 城市雨夜 | 腕表 · 黑色大理石 | 单椅 · 北欧客厅 |
+|---|---|---|
+| ![](docs/showcase/shoe_rain.jpg) | ![](docs/showcase/watch_marble.jpg) | ![](docs/showcase/chair_nordic.jpg) |
+| **台灯 · 咖啡馆** | **复古相机 · 街头胶片** | **小米 YU7 · 草地** |
+| ![](docs/showcase/lamp_cafe.jpg) | ![](docs/showcase/camera_street.jpg) | ![](docs/showcase/yu7_grass.jpg) |
 
-Wondful AI Renderer 是一个开源的 Blender 插件。它把 Blender 当作“构图与结构的唯一真相”：先从你的相机渲出白模底图和结构图（Depth / Normal / 部件 ID），再调用本机已登录的 **Codex CLI** 或 **Antigravity CLI** 生图，最后按结构做验收和纠偏。适合汽车、家具、家电、鞋包等任何有 3D 模型的产品。
+**适合谁**：电商卖家做主图和场景图、工业设计师出方案效果图、品牌做一款产品多种场景的广告图、3D 艺术家省掉搭场景和打灯的时间。
 
-English: an open-source Blender add-on that turns one camera setup into multiple photoreal commercial scenes with AI, while keeping the product's silhouette, scale and position locked to the Blender render. Works with any product that has a 3D model.
+**海外正式版**：[Gumroad · $29.90](https://tiandao1.gumroad.com/l/wondful)（含 1 年更新）｜源码在本仓库开源。
+
+Wondful AI Renderer 是一个开源的 Blender 插件。它把 Blender 当作“构图与结构的唯一真相”：先从你的相机渲出白模底图和结构图（Depth / Normal / 部件 ID），再调用本机已登录的 **Codex CLI** 或 **Antigravity CLI** 生图，最后按结构做验收和纠偏。
+
+English: an open-source Blender add-on for **shape-locked AI product rendering**. Shoes, watches, lamps, cameras, furniture, cars — any product with a 3D model. One camera setup becomes many photoreal commercial scenes, while silhouette, scale, colour and position stay locked to your Blender render. Pro version on [Gumroad](https://tiandao1.gumroad.com/l/wondful).
 
 ---
 
 ## 效果展示
 
-### 案例一：小米 YU7 · 一个底图，四种户外场景
+每个案例的**完整提示词、参考图、插件参数和逐张轮廓数据**见 [docs/CASES.md](docs/CASES.md)（English: [docs/CASES.en.md](docs/CASES.en.md)）。数据如实标注，未达标的场景也写明了原因。
+
+### 球鞋 · 腕表 · 复古相机 · 台灯
+
+| 跑鞋 · 运动场晨光 | 跑鞋 · 城市雨夜 | 腕表 · 黑色大理石 |
+|---|---|---|
+| ![](docs/showcase/shoe_track.jpg) | ![](docs/showcase/shoe_rain.jpg) | ![](docs/showcase/watch_marble.jpg) |
+| **腕表 · 岩石登山** | **台灯 · 咖啡馆** | **台灯 · 极简卧室** |
+| ![](docs/showcase/watch_rock.jpg) | ![](docs/showcase/lamp_cafe.jpg) | ![](docs/showcase/lamp_bedroom.jpg) |
+| **复古相机 · 街头胶片** | **复古相机 · 复古书房** | |
+| ![](docs/showcase/camera_street.jpg) | ![](docs/showcase/camera_study.jpg) | |
+
+模型均来自 [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)：MaterialsVariantsShoe（© 2021 Shopify, CC BY 4.0）、ChronographWatch（© 2025 Darmstadt Graphics Group, CC BY 4.0，表盘 Logo 为商标）、AntiqueCamera（© 2018 UX3D, CC0）、IridescenceLamp（© 2022 Wayfair, CC BY 4.0）。参考图均为 AI 生成。
+
+### 家具：设计单椅 · 四种家居风格
+
+| Blender 白模 | Blender 底图 | 北欧客厅 |
+|---|---|---|
+| ![](docs/showcase/chair_clay.jpg) | ![](docs/showcase/chair_base.jpg) | ![](docs/showcase/chair_nordic.jpg) |
+| **侘寂茶室** | **工业 Loft** | **地中海露台** |
+| ![](docs/showcase/chair_wabi.jpg) | ![](docs/showcase/chair_loft.jpg) | ![](docs/showcase/chair_terrace.jpg) |
+
+| 场景 | 轮廓 IoU | 外轮廓 ≤3 px | 底部偏差 |
+|---|---|---|---|
+| 北欧客厅 | 99.2% | 100% | 0 px |
+| 侘寂茶室 | 97.9% | 92% | 0 px |
+| 工业 Loft | 99.0% | 99% | +1 px |
+| 地中海露台 | 98.4% | 99% | 0 px |
+
+### 汽车：小米 YU7 · 一个底图，四种户外场景
 
 | Blender 白模 | 雪坡 | 草地 |
 |---|---|---|
@@ -29,48 +66,19 @@ English: an open-source Blender add-on that turns one camera setup into multiple
 | 沙漠 | 96.7% | 86% | +4 px |
 | 泥地 | 96.2% | 86% | +1 px |
 
-### 案例二：设计单椅 · 四种家居风格
-
-| Blender 白模 | Blender 底图 | 北欧客厅 |
-|---|---|---|
-| ![](docs/showcase/chair_clay.jpg) | ![](docs/showcase/chair_base.jpg) | ![](docs/showcase/chair_nordic.jpg) |
-| **侘寂茶室** | **工业 Loft** | **地中海露台** |
-| ![](docs/showcase/chair_wabi.jpg) | ![](docs/showcase/chair_loft.jpg) | ![](docs/showcase/chair_terrace.jpg) |
-
-| 场景 | 轮廓 IoU | 外轮廓 ≤3 px | 底部偏差 |
-|---|---|---|---|
-| 北欧客厅 | 99.2% | 100% | 0 px |
-| 侘寂茶室 | 97.9% | 92% | 0 px |
-| 工业 Loft | 99.0% | 99% | +1 px |
-| 地中海露台 | 98.4% | 99% | 0 px |
-
 > 指标用 GrabCut 分割生成图中的产品，再与 Blender 渲染的产品 Mask 对比，属于近似测量。
 
 ---
-
-### 更多案例：球鞋 · 腕表 · 复古相机 · 台灯
-
-每个案例的**完整提示词（产品外观 + 环境/风格）、参考图、插件参数和逐张轮廓数据**见 [docs/CASES.md](docs/CASES.md)（English: [docs/CASES.en.md](docs/CASES.en.md)），单独的提示词文件在 `docs/cases/<案例>/prompt.md`。数据如实标注，未达标的场景也写明了原因。
-
-| 跑鞋 · 运动场晨光 | 跑鞋 · 城市雨夜 | 腕表 · 黑色大理石 |
-|---|---|---|
-| ![](docs/showcase/shoe_track.jpg) | ![](docs/showcase/shoe_rain.jpg) | ![](docs/showcase/watch_marble.jpg) |
-| **腕表 · 岩石登山** | **台灯 · 咖啡馆** | **台灯 · 极简卧室** |
-| ![](docs/showcase/watch_rock.jpg) | ![](docs/showcase/lamp_cafe.jpg) | ![](docs/showcase/lamp_bedroom.jpg) |
-| **复古相机 · 街头胶片** | **复古相机 · 复古书房** | |
-| ![](docs/showcase/camera_street.jpg) | ![](docs/showcase/camera_study.jpg) | |
-
-模型均来自 [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets)：MaterialsVariantsShoe（© 2021 Shopify, CC BY 4.0）、ChronographWatch（© 2025 Darmstadt Graphics Group, CC BY 4.0，表盘 Logo 为商标）、AntiqueCamera（© 2018 UX3D, CC0）、IridescenceLamp（© 2022 Wayfair, CC BY 4.0）。参考图均为 AI 生成。
 
 ## 核心能力
 
 - **白模相机即构图权威**：输出与 Blender Camera 完全同机位；比例不一致时等比缩放、透明留边，不裁切、不拉伸。
 - **结构图约束**：自动渲出 Camera Base、Depth、Normal、部件 ID（Object Index），作为生图的结构参考。
-- **Identity Preserve Mask**：按部件锁定产品身份区域（车标、灯组、轮毂、Logo 等），只放开环境、光影与材质质感。
+- **Identity Preserve Mask**：按部件锁定产品身份区域（Logo、表盘、灯组、鞋标、车标等），只放开环境、光影与材质质感。
 - **严格模式验收 + 纠偏**：每张候选图按比例、位置、轮廓检查，不合格自动用 Mask 局部修复重试。
-- **环境图读成文字，构图零漂移**（3.2.2）：只把带地面灯光的白模底图发给图像编辑模型，环境参考图先读成精准文字描述再参与生成，车辆位置、大小、轮廓不再漂移；支持斜坡和改视角。
-- **坡顶地面**（3.2.3）：高级 → 简洁输入下可选「地面：自动 / 坡顶」，坡顶会自动铺一块前后向下倾斜的临时地形（下坡角度可调），适合山顶、观景台、坡顶停车的画面；场景里已有自己的地形时始终用你的。
-- **1.0 正式版 · 广告级车身质感**：环境参考图如果是专业汽车广告图，插件会额外读出「车身质感」（清漆光泽、天空和山体倒影、顶部高光带、暗部过渡），只把这套质感用到你的产品上，车型、比例和颜色仍以白模为准。这是第一个正式版，之前的 3.x 均为测试版。
+- **环境图读成文字，构图零漂移**（3.2.2）：只把带地面灯光的白模底图发给图像编辑模型，环境参考图先读成精准文字描述再参与生成，产品位置、大小、轮廓不再漂移；支持斜坡和改视角。
+- **坡顶地面**（3.2.3）：高级 → 简洁输入下可选「地面：自动 / 坡顶」，坡顶会自动铺一块前后向下倾斜的临时地形（下坡角度可调），适合山顶、观景台、坡顶陈列的画面；场景里已有自己的地形时始终用你的。
+- **1.0 正式版 · 广告级质感**：环境参考图如果是专业广告图（如汽车广告），插件会额外读出「表面质感」（清漆光泽、天空和山体倒影、顶部高光带、暗部过渡），只把这套质感用到你的产品上，造型、比例和颜色仍以白模为准。这是第一个正式版，之前的 3.x 均为测试版。
 - **山头 + 车漆质感**（3.2.4）：「坡顶」升级为「山头」——车停在圆顶小山最高处，四周地面下落（默认 18°，5–35° 可调），配合低机位仰拍；白模底图改用户外天空渐变 + 两条柔光灯带，车漆出生图更有清漆分量感、倒影和高光带。
 - **在白模上直接编辑**（3.2.1）：Codex 默认直连托管图像编辑（gpt-image-2，复用 Codex 的 ChatGPT 登录），以白模底图为画布只改材质、灯光和环境；修复轮次把修复范围作为编辑 Mask 发送。失败时自动回退到 Codex CLI 代理生成。
 - **双 Provider**：Codex 每次独立生成 4 张，Antigravity 每次 2 张；模型列表来自本机官方 CLI，不做跨模型静默回退。
