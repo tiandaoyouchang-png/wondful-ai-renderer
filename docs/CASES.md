@@ -1,3 +1,5 @@
+English version: [CASES.en.md](CASES.en.md)
+
 # Wondful AI Renderer · 案例集（CASES）
 
 同一个 Blender 机位渲出一张底图，换环境参考和环境提示词，批量出多场景。每张结果都和 Blender 渲染的产品 Mask 做轮廓比对。
