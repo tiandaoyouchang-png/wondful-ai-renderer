@@ -378,7 +378,6 @@ def _product_forward(pts, up):
     return best, best_len
 
 
-_VEHICLE_RE = None
 
 
 def _collection_roots(collection):
@@ -418,20 +417,8 @@ def _product_vertices(context, collection):
 
 
 def _looks_like_vehicle(collection) -> bool:
-    import re
-    global _VEHICLE_RE
-    if _VEHICLE_RE is None:
-        _VEHICLE_RE = re.compile(r"(wheel|tire|tyre|vehicle|brake|caliper|license|plate_num|(^|[^a-z])car([^a-z]|$)"
-                                 r"|车|轮胎|轮毂|轮子)")
-    if not collection:
-        return False
-    names = [collection.name]
-    for o in collection.all_objects:
-        names.append(o.name)
-        if o.type == "MESH" and o.data:
-            names.append(o.data.name)
-            names += [m.name for m in o.data.materials if m]
-    return any(_VEHICLE_RE.search(n.lower()) for n in names if n)
+    from .product_kind import names_look_like_vehicle, collection_names
+    return names_look_like_vehicle(collection_names(collection))
 
 
 _LOCAL_AXES = {"NEG_Y": (0.0, -1.0, 0.0), "POS_Y": (0.0, 1.0, 0.0), "NEG_X": (-1.0, 0.0, 0.0), "POS_X": (1.0, 0.0, 0.0)}

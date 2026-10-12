@@ -156,7 +156,7 @@ def _system_one(state: Any, questions: dict[str, Any], timeout: float = 10.0) ->
             "Authorization": f"Bearer {key}",
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "wondful-ai-renderer/3.1.4",
+            "User-Agent": "wondful-ai-renderer/1.1.0",
         },
     )
     last = ""
@@ -437,7 +437,7 @@ def _appearance_text(result: dict[str, Any]) -> str:
     structural = result.get("structural_change_probability")
     lines = [f"本轮修改范围判断：{scope}。"]
     if isinstance(preserve, (int, float)) and preserve >= IDENTITY_PROTECT_THRESHOLD:
-        lines.append("除非用户明确要求替换，车标、字标、车型文字、车牌和可读屏幕文字必须保持原始身份。")
+        lines.append("除非用户明确要求替换，品牌标志、字标、型号文字、铭牌/车牌和可读屏幕文字必须保持原始身份。")
     elif isinstance(preserve, (int, float)) and preserve <= 0.20:
         lines.append("用户明确要求修改身份资产；不要应用默认身份保护到被明确指定的目标。")
     if isinstance(structural, (int, float)) and structural >= 0.80:
@@ -758,7 +758,7 @@ def semantic_prompt_block(
         "下面的 Part-ID RGB 对应 Blender 的 Part-ID 控制图；伪彩色只用于定位，绝不能复制到最终渲染。\n"
         + "\n".join(lines)
         + identity_rule
-        + "\n材质类别只用于区分车漆、橡胶、金属、塑料、光学件和发光件；不得因此改变 Blender 已锁定的几何边界。"
+        + "\n材质类别只用于区分漆面、橡胶、金属、塑料、织物、皮革、木材、光学件和发光件；不得因此改变 Blender 已锁定的几何边界。"
     )
 
 

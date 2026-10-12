@@ -63,8 +63,8 @@ def settings_from_props(props) -> dict:
         s[d] = (getattr(props, f"clay_terrain_{d}", "FLAT"), getattr(props, f"clay_terrain_{d}_angle", 0.0))
     s["follow"] = getattr(props, "clay_terrain_follow", True)
     s["front_axis"] = getattr(props, "clay_terrain_front_axis", "AUTO")
-    hint = " ".join(str(getattr(props, k, "") or "") for k in ("identity_details", "product_look_prompt", "scene_brief"))
-    if any(w in hint for w in ("车", "轮毂", "轮胎")):
+    from .product_kind import hint_says_vehicle, props_hint
+    if hint_says_vehicle(props_hint(props)):
         s["vehicle"] = True  # otherwise detected from object / material names
     return normalize(s)
 

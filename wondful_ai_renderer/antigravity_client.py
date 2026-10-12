@@ -697,12 +697,12 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
 {structure_note}
 
 如果存在 Edit Base：必须使用本轮指定的图像编辑底图。它与 Reference 1 相同时，直接从原始白模重渲染；否则在候选结果上按修复范围纠偏。不能沿用其他轮次的底图或错误视角。
-如果存在 Edit Mask：只在 Mask 对应的产品/车辆区域纠正位置、尺度、轮廓、轮心和视角，外部区域尽量不变。
+如果存在 Edit Mask：只在 Mask 对应的产品区域纠正位置、尺度、轮廓、接地点和视角，外部区域尽量不变。
 
 最终生成要求：
 {prompt.strip()}
 
-禁止：zoom、pan、crop、reframe、换机位、改变焦段观感、改变主体数量、重新安排车辆位置。
+禁止：zoom、pan、crop、reframe、换机位、改变焦段观感、改变主体数量、重新安排产品位置。
 完成后请确保 generate_image 真正产生一个位图 Artifact。不要只回复文字描述。
 不要在调用 generate_image 之前读取或列出任何文件；本轮不需要额外的文件操作。
 最后只回复 `WONDFUL_ANTIGRAVITY_IMAGEGEN_OK`；如果 generate_image 不可用/被策略拒绝/失败，则以 `WONDFUL_ANTIGRAVITY_IMAGEGEN_UNAVAILABLE:` 开头说明原因。
@@ -925,9 +925,9 @@ Reference 2 = AI 渲染候选图。
 Reference 3（若存在）= Blender 产品轮廓 / 投影参考。
 {numeric_targets}{identity_check}
 只评估“几何与摄影机对齐”，不要因为候选图材质、灯光、画质更好就给高分。重点比较：
-- 车辆/产品二维包围框中心位置、左右上下边界与占画面比例
+- 产品二维包围框中心位置、左右上下边界与占画面比例
 - 前轮和后轮轮心在画面中的位置
-- 车头/车尾朝向、可见侧面比例、俯仰/偏航/滚转观感
+- 产品正面/背面朝向（车辆即车头/车尾）、可见侧面比例、俯仰/偏航/滚转观感
 - 相机高度、视角、焦段/透视压缩感
 - 地平线、主要消失方向、道路/地面透视
 - 前后遮挡与主体数量
@@ -948,7 +948,7 @@ Reference 3（若存在）= Blender 产品轮廓 / 投影参考。
   "correction": "给下一次 image edit 用的一句中文纠偏指令，具体说明移动方向/百分比、缩放百分比、视角或轮心如何恢复；若已经高度对齐则写保持当前构图"
 }}
 observed_bbox 必须独立观察 Reference 2 中主体可见边界，坐标以其整幅画布归一化、原点左上，不包含影子，不要照抄 Blender 目标数值。不确定时返回 null，bbox_confidence 设为 0。该框只是视觉估计，不能声称是逐像素测量。轮部件锚点来自命名 Mesh 的包围盒中心估计，仅辅助观察，不能当作精确轮轴。
-评分要严格：明显的车辆位置、尺度或视角偏差不应超过 80 分。
+评分要严格：明显的产品位置、尺度或视角偏差不应超过 80 分。
 """.strip()
     images = [camera_reference, generated_image]
     if structure_guide_path and Path(structure_guide_path).exists():

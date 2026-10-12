@@ -1998,6 +1998,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_simple_base = ""
             direct_simple_brief = None
             direct_terrain_text = ""
+            from .product_kind import is_vehicle as _is_vehicle
+            try:
+                direct_vehicle = _is_vehicle(props)
+            except Exception:
+                direct_vehicle = False
+            direct_state["vehicle"] = direct_vehicle
             if bool(getattr(prefs, "codex_direct_simple", True)):
                 clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
                 try:
@@ -2026,7 +2032,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     manifest=direct_manifest, bundle_note=direct_note, client_version=direct_version,
                     on_status=_direct_status, cancel_check=_cancel_requested,
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
-                    terrain_text=direct_terrain_text,
+                    terrain_text=direct_terrain_text, vehicle=direct_vehicle,
                 )
         provider_cli_path = provider["cli_path"]
         provider_model = provider["model"]
@@ -2111,7 +2117,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     )
                     effective_render_prompt += (
                         "\n\n【Identity Preserve Mask｜最高优先级身份保护】\n"
-                        "本轮编辑 Mask 中的不透明区域是 Logo、品牌/车型字标、车牌文字或可读 UI 等身份资产。"
+                        "本轮编辑 Mask 中的不透明区域是 Logo、品牌/型号字标、铭牌/车牌文字或可读 UI 等身份资产。"
                         "这些区域不得重新绘制、改字、改形、改比例或风格化；仅透明区域允许外观编辑。"
                     )
             semantic_meta["identity_mask"] = identity_meta
@@ -2283,7 +2289,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     if score >= alignment_threshold:
                         break
                     correction = (audit or {}).get("correction", "") or (
-                        "严格恢复 Reference 1 的车辆二维位置、尺度、轮心、相机高度、视角和地平线；不要重新构图。"
+                        "严格恢复 Reference 1 的产品二维位置、尺度、接地点、相机高度、视角和地平线；不要重新构图。"
                     )
 
                 if variant_best_path is None or not variant_best_path.exists():

@@ -37,7 +37,7 @@ IMAGE_MODEL = "gpt-image-2"
 ORIGINATOR = "codex_cli_rs"
 MAX_EDIT_IMAGES = 5
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
-ADDON_UA = "wondful-ai-renderer/3.2.2"
+ADDON_UA = "wondful-ai-renderer/1.1.0"
 BASE_URL_ENV = "WONDFUL_CODEX_IMAGE_BASE_URL"
 REFRESH_URL_ENV = "WONDFUL_CODEX_REFRESH_URL"
 
@@ -472,7 +472,7 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
                  "禁止平移、缩放、裁切、旋转、换机位或重新设计产品造型。")
     lines.append("只允许改变：材质与表面质感、灯光与阴影、反射、环境与背景、摄影质感——依据后面的参考图和要求。")
     if mask:
-        lines.append("本次附带编辑 Mask：Mask 透明区域允许修改，不透明区域保持原样（Logo、字标、车牌等身份资产，或修复范围之外的画面）。")
+        lines.append("本次附带编辑 Mask：Mask 透明区域允许修改，不透明区域保持原样（Logo、字标、铭牌/车牌等身份资产，或修复范围之外的画面）。")
     lines.append("各图职责：")
     for index, (_p, _role, label) in enumerate(images, start=1):
         lines.append(f"- 图 {index}：{label}")
@@ -486,28 +486,48 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
-def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text=""):
+def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
     (``env_text``), so its camera and layout can never pull the composition.
+    ``vehicle`` picks car wording (车身、车轮、车漆、车牌); anything else gets
+    generic product wording with the same product-lock rules.
     """
+    from .product_kind import words
+    w = words(bool(vehicle))
     scene = (brief or "").strip()
     env_text = (env_text or "").strip()
-    lines = ["把这张 Blender 白模渲染图直接编辑成一张写实的商业广告摄影照片，车与环境自然融合。"]
-    lines.append("产品与构图严格保持原图：车在画面中的位置、大小、角度、透视、轮廓、车轮、灯组、Logo、字标和车牌都不变；"
+    subj = w["subj"]
+    lines = [f"把这张 Blender 白模渲染图直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
+    lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
+                 "不增减、不改形任何部件，不重新设计造型；"
                  "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
-    lines.append("地面的坡度、倾斜方向、起伏以及与车轮的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；山头/坡顶时车停在山的最高处，四周地面向下掉落，车身后方不出现更高的地面，远处只露出低于车的远山、天空或城市），"
-                 "新环境的路面材质贴合这块地面铺设，不要把地面改平、改坡度或让车悬空；相机的俯仰和倾斜也保持不变。")
+    lines.append(f"地面的坡度、倾斜方向、起伏以及与{w['contact']}的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；"
+                 f"山头/坡顶时{subj}停在山的最高处，四周地面向下掉落，{subj}后方不出现更高的地面，远处只露出低于{subj}的远山、天空或城市），"
+                 f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
     if (terrain_text or "").strip():
         lines.append((terrain_text or "").strip())
-    lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
-                 "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
+    if vehicle:
+        lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
+                     "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
+    else:
+        lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
+                     "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
+                     "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
+                     "木材有木纹，金属有清晰高光和环境倒影，塑料和涂层有对应的光泽），明暗过渡自然；不要平涂、不要塑料感或玩具模型感。")
+    if env_text and not vehicle:
+        # a cached / hand-written description may still carry a car paragraph: drop it
+        env_text = "\n".join(p for p in env_text.splitlines() if not p.strip().startswith("车身质感")).strip()
     if env_text:
         lines.append("目标环境（来自环境参考图的文字描述，只用于环境、地面、天气、光线方向、色温和氛围）：" + env_text)
-        if "车身质感" in env_text:
-            lines.append("描述里的「车身质感」只用来决定我们这台车的漆面光泽、反射、高光和明暗方式：车型、比例、颜色色相、"
+        tag = next((t for t in ("车身质感", "表面质感") if t in env_text), "")
+        if tag and vehicle:
+            lines.append(f"描述里的「{tag}」只用来决定我们这台车的漆面光泽、反射、高光和明暗方式：车型、比例、颜色色相、"
                          "车门状态、灯组、Logo 和车牌全部以白模原图为准，不要照搬参考图里的车。")
+        elif tag:
+            lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
+                         "部件和 Logo 全部以白模原图为准，不要照搬参考图里的任何物体。")
         lines.append("环境严格按上面的描述还原：只出现描述里写到的元素，不额外添加建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
                      "光线方向、太阳高度、色温和反差与描述一致，不要做得比描述更戏剧化。")
     if scene:
@@ -746,6 +766,23 @@ ENV_DESCRIBE_PROMPT = (
     "最后单独一句写「不要出现：」列出这张图里没有、但同类场景常被加上的元素（例如画面内的太阳、眩光、古堡遗迹、云海）。"
     "只输出描述本身，不要标题。"
 )
+# 1.1.0: products that are not vehicles (chairs, sofas, lamps…) get a describer that never
+# talks about cars, so no 车 wording can leak into their image prompt.
+ENV_DESCRIBE_PROMPT_PRODUCT = (
+    "你是产品广告摄影的灯光与美术指导。请只阅读这张环境参考图，写一段 150–220 字的中文环境描述，"
+    "供另一张图严格按此重建环境（之后会把一件产品放进这个环境里）。要求精准、克制，只写图中确实可见的内容，不推测、不美化、不补充。依次写清：\n"
+    "1. 场景与背景元素：逐项列出可见的山体、建筑、植被、路牌、护栏等，并写明数量级和远近；\n"
+    "2. 地面：材质、颜色、干湿、积雪或积水情况；\n"
+    "3. 天气与天空：晴/阴/雾/雪，云量，天空颜色；\n"
+    "4. 光线：主光方向（画面左/右/前/后/顶）、太阳高度、太阳是否出现在画面内、光质软硬、阴影长短；\n"
+    "5. 色温与主色调、反差、大气通透度与氛围。\n"
+    "6. 若图中有一个明显的主体物品：另起一段以「表面质感：」开头，写 40–100 字，只写它表面的光泽、高光位置和形状、"
+    "环境在表面上的倒影、暗部深浅和明暗过渡；不要写它是什么物品、品牌、颜色、造型或位置。没有就省略这一段。\n"
+    "不要描述构图、机位、视角、焦段、画面布局或物体在画面中的位置；不要提到参考图里的车辆、交通工具或人物，"
+    "也不要使用“车”“车身”“车轮”“车漆”等词——道路只写成“路面”或“地面”。"
+    "最后单独一句写「不要出现：」列出这张图里没有、但同类场景常被加上的元素（例如画面内的太阳、眩光、古堡遗迹、云海）。"
+    "只输出描述本身，不要标题。"
+)
 _ENV_LOCK = threading.Lock()
 
 
@@ -759,7 +796,7 @@ def _file_md5(path):
 
 
 def describe_environment(env_paths, *, auth, auth_path, client_version="", model="", cache_dir="",
-                         timeout=180, cancel_check=None, log=None):
+                         timeout=180, cancel_check=None, log=None, vehicle=True):
     """Read the environment reference(s) with a text-only call; return one Chinese description.
 
     The reference images are never sent to the image model: only this text is.
@@ -780,7 +817,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
             except (OSError, ValueError):
                 cache = {}
         for path in paths:
-            key = _file_md5(path) + ":v2"
+            key = _file_md5(path) + (":v2" if vehicle else ":p1")
             if cache.get(key):
                 texts.append(cache[key])
                 continue
@@ -789,7 +826,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
                 "model": (model or "").strip() or DEFAULT_MODEL,
                 "instructions": "Describe the environment in the image as asked. Do not use any tool.",
                 "input": [{"type": "message", "role": "user", "content": [
-                    {"type": "input_text", "text": ENV_DESCRIBE_PROMPT},
+                    {"type": "input_text", "text": ENV_DESCRIBE_PROMPT if vehicle else ENV_DESCRIBE_PROMPT_PRODUCT},
                     {"type": "input_image", "image_url": url_img}]}],
                 "tools": [], "parallel_tool_calls": False, "store": False, "stream": True, "include": [],
             }
@@ -825,7 +862,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
-               cancel_check=None, correction="", simple_brief=None, terrain_text=""):
+               cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -866,20 +903,22 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         try:
             env_text, auth = describe_environment(env_paths, auth=auth, auth_path=auth_path,
                                                   client_version=client_version, model=model,
-                                                  cache_dir=str(log_root), cancel_check=cancel_check)
+                                                  cache_dir=str(log_root), cancel_check=cancel_check,
+                                                  vehicle=bool(vehicle))
         except DirectEditError as exc:
             if exc.kind == "cancelled":
                 raise
             env_note = "环境描述失败：" + str(exc)[:160]
     if simple:
-        text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text)
+        text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
+                                   vehicle=bool(vehicle))
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
     url = base.rstrip("/") + "/responses"
     log = {"tag": tag, "url_host": re.sub(r"^(https?://[^/]+).*$", r"\1", url), "size": size,
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
-           "attempts": [], "simple": simple, "prompt": text[:4000],
+           "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note}
     model_used = (model or "").strip() or DEFAULT_MODEL
     variants = [dict(compat=False, model=model_used)]
@@ -973,7 +1012,7 @@ def short_reason(exc) -> str:
 
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
-                           simple_base="", simple_brief=None, terrain_text=""):
+                           simple_base="", simple_brief=None, terrain_text="", vehicle=False):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1003,6 +1042,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 log_dir=kwargs.get("cwd", ""), tag=out.stem, cancel_check=cancel_check,
                 simple_brief=simple_brief if use_simple else None,
                 terrain_text=terrain_text if use_simple else "",
+                vehicle=bool(vehicle),
             )
             state["direct_ok"] += 1
             return result

@@ -371,14 +371,14 @@ Reference 2 = AI 渲染候选图。
 Reference 3（若存在）= Blender 产品轮廓 / 投影参考。
 {numeric_targets}{identity_check}
 只评估“几何与摄影机对齐”，不要因为候选图材质、灯光、画质更好就给高分。重点比较：
-- 车辆/产品二维包围框中心位置、左右上下边界与占画面比例
+- 产品二维包围框中心位置、左右上下边界与占画面比例
 - 前轮和后轮轮心在画面中的位置
-- 车头/车尾朝向、可见侧面比例、俯仰/偏航/滚转观感
+- 产品正面/背面朝向（车辆即车头/车尾）、可见侧面比例、俯仰/偏航/滚转观感
 - 相机高度、视角、焦段/透视压缩感
 - 地平线、主要消失方向、道路/地面透视
 - 前后遮挡与主体数量
 
-如果存在 target_bbox/target_center/target_wheel_anchors，纠偏必须尽量量化，例如“车辆中心向右移动约 2.5% 画宽、整体缩小约 4%、前轮轮心向下约 1.5% 画高”。不要只写“更接近参考图”。
+如果存在 target_bbox/target_center/target_wheel_anchors，纠偏必须尽量量化，例如“产品中心向右移动约 2.5% 画宽、整体缩小约 4%、前侧接地点（车辆为前轮轮心）向下约 1.5% 画高”。不要只写“更接近参考图”。
 
 返回且只返回一个 JSON 对象，不要 Markdown，不要解释：
 {{
@@ -394,7 +394,7 @@ Reference 3（若存在）= Blender 产品轮廓 / 投影参考。
   "correction": "给下一次 image edit 用的一句中文纠偏指令；必须具体说明移动方向/百分比、缩放百分比、视角或轮心如何恢复；若已经高度对齐则写保持当前构图"
 }}
 observed_bbox 必须独立观察 Reference 2 中主体可见边界，坐标以其整幅画布归一化、原点左上，不包含影子，不要照抄 Blender 目标数值。不确定时返回 null，bbox_confidence 设为 0。该框只是视觉估计，不能声称是逐像素测量。轮部件锚点来自命名 Mesh 的包围盒中心估计，仅辅助观察，不能当作精确轮轴。
-评分要严格：明显的车辆位置、尺度或视角偏差不应超过 80 分。
+评分要严格：明显的产品位置、尺度或视角偏差不应超过 80 分。
 """.strip()
     suffix = f"_{tag}" if tag else ""
     images = [camera_reference, generated_image]
@@ -518,8 +518,8 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 - 编辑底图：{edit_base}
 - Blender 产品编辑 Mask：{edit_mask}
 必须优先使用 image edit / edit existing image 工作流，以编辑底图保留已经满意的材质、灯光和背景。
-如果当前 image generation 工具 schema 支持 input_image_mask / mask，必须把上述 product_edit_mask 作为编辑 Mask；Mask 的透明区域是允许修复的车辆/产品区域，外部区域应尽量保持不变。
-如果工具没有暴露显式 mask 参数，也必须把该 Mask 作为视觉区域约束，只修复车辆位置、尺度、视角、轮廓和轮心，不要整张重新构图。
+如果当前 image generation 工具 schema 支持 input_image_mask / mask，必须把上述 product_edit_mask 作为编辑 Mask；Mask 的透明区域是允许修复的产品区域，外部区域应尽量保持不变。
+如果工具没有暴露显式 mask 参数，也必须把该 Mask 作为视觉区域约束，只修复产品位置、尺度、视角、轮廓和接地点，不要整张重新构图。
 """
     elif edit_base:
         edit_note = f"""
@@ -549,7 +549,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 
 {structure_note}
 {edit_note}
-你不是在重新设计一张更好看的构图，而是在 Blender 原位置上替换 Appearance。禁止 zoom、pan、crop、reframe、换机位、改变焦段观感或重新安排车辆。
+你不是在重新设计一张更好看的构图，而是在 Blender 原位置上替换 Appearance。禁止 zoom、pan、crop、reframe、换机位、改变焦段观感或重新安排产品。
 
 最终生成要求：
 {prompt.strip()}
@@ -558,7 +558,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 - 使用内置 image generation 工具真正生成/编辑图片。
 - 最终只生成一张图。
 - 严格保持 Blender Camera Output 的宽高方向和构图比例。
-- 产品身份参考只决定“车长什么样”；camera_reference + structure guide/mask 决定“车在哪里、占多大、什么视角”。
+- 产品身份参考只决定“产品长什么样”；camera_reference + structure guide/mask 决定“产品在哪里、占多大、什么视角”。
 - 生成完成后，将最终位图复制或保存到这个绝对路径：
   {target}
 - 在结束前必须检查该路径确实存在且是 PNG/JPG/WEBP 位图。
