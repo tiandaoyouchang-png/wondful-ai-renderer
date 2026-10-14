@@ -536,10 +536,24 @@ def _pose_product(context, collection, W, created, restore):
             context.view_layer.update()
 
 
-def _custom_terrain(context, collection, settings, created, restore):
-    """Build the 自定义 terrain mesh and (temporarily) pose the product on it.
+def _mass_centre(P, cells=24):
+    """Centre of the occupied voxels of the product's vertices: a centre-of-mass stand-in that a
+    densely tessellated part (wheel spokes, stitching) cannot drag toward itself."""
+    import numpy as np
+    lo, hi = P.min(0), P.max(0)
+    ext = np.maximum(hi - lo, 1e-9)
+    idx = np.clip(((P - lo) / ext * cells).astype(int), 0, cells - 1)
+    occ = np.unique(idx[:, 0] * cells * cells + idx[:, 1] * cells + idx[:, 2])
+    ijk = np.stack([occ // (cells * cells), (occ // cells) % cells, occ % cells], axis=1)
+    return lo + (ijk.mean(0) + 0.5) / cells * ext
 
-    Returns (mesh, info) or (None, info) when there is nothing to do."""
+
+def _custom_terrain(context, collection, settings, created, restore):
+    """Build the 自定义 terrain mesh and (temporarily) rest the product on it.
+
+    The product is rigid: its stable pose (pitch, roll, height) on the height field comes from
+    terrain.rest_pose (lowest centre of mass with nothing below the ground: usually three support
+    points, the fourth corner of a twisted ground lifted).  Returns (mesh, info) or (None, info)."""
     import numpy as np
     from mathutils import Matrix, Vector
     from . import terrain as TR
@@ -562,25 +576,29 @@ def _custom_terrain(context, collection, settings, created, restore):
     half_len, half_wid = float(u.max() - u.min()) / 2.0, float(v.max() - v.min()) / 2.0
     C = fwd * uc + side * vc
     C.z = zmin
-    span = max(2 * half_len, 2 * half_wid, height, 1e-3)
-    margin = 0.06 * max(2 * half_len, 2 * half_wid)
+    Cn = np.array(C)
+    footprint = max(2 * half_len, 2 * half_wid, 1e-3)
+    span = max(footprint, height, 1e-3)
+    margin = 0.06 * footprint
     U, V = half_len + margin, half_wid + margin
     shoulder = 0.5 * max(U, V)
-    hf = TR.HeightField(s, U, V, shoulder)
-    normal = (up - fwd * hf.gu - side * hf.gv).normalized()
-    q = up.rotation_difference(normal)
-    Q = np.array(q.to_matrix(), dtype=np.float64)
-    rel = (P - np.array(C)) @ Q.T
-    uu, vv, zz = rel @ F, rel @ S, rel[:, 2]
-    clearance = zz - hf.height(uu, vv)
-    lift = float(-clearance.min())
-    clearance = clearance + lift
+    hf = TR.HeightField(s, U, V, shoulder, prod_height=max(height, 1e-3))
+    rel = P - Cn
+    com = _mass_centre(rel)
+    sup = TR.support_points(rel, F, S)
+    Rn, tn, pitch, roll = TR.rest_pose(sup, com, hf, F, S, follow=s["follow"])
+    Q = rel @ Rn.T + tn
+    extra = float(np.max(hf.height(Q @ F, Q @ S) - Q[:, 2]))  # every vertex, not just the underside
+    Q[:, 2] += extra
+    tn = tn + np.array((0.0, 0.0, extra))
+    lift = float(tn[2])
     eps = max(0.004 * span, 1e-4)
-    touch = clearance < eps
-    quads = sorted({("F" if a >= 0 else "B") + ("R" if b >= 0 else "L") for a, b in zip(uu[touch], vv[touch])})
-    pitch, roll = TR.pose_angles(hf.gu, hf.gv)
-    W = Matrix.Translation(up * lift) @ Matrix.Translation(C) @ q.to_matrix().to_4x4() @ Matrix.Translation(-C)
-    posed = bool(s["follow"] and (abs(pitch) > 0.05 or abs(roll) > 0.05)) or abs(lift) > 1e-5
+    rep = TR.contact_report(Q, Rn @ com + tn, hf, F, S, eps, footprint)
+    lifted, gap = TR.lifted_corner(rep, footprint)
+    M4 = Matrix([list(map(float, Rn[0])) + [float(tn[0])], list(map(float, Rn[1])) + [float(tn[1])],
+                 list(map(float, Rn[2])) + [float(tn[2])], [0.0, 0.0, 0.0, 1.0]])
+    W = Matrix.Translation(C) @ M4 @ Matrix.Translation(-C)
+    posed = bool(np.abs(Rn - np.eye(3)).max() > 1e-7 or np.abs(tn).max() > 1e-6)
     if posed:
         _pose_product(context, collection, W, created, restore)
     us = TR.grid_offsets(U, shoulder, span)
@@ -594,19 +612,21 @@ def _custom_terrain(context, collection, settings, created, restore):
         # The camera never moves: if rising ground would bury it, level the terrain off just
         # below the lens (outside the pad only), like a slope that flattens out where the
         # photographer stands.
-        rel_cam = np.array(cam.matrix_world.translation) - np.array(C)
+        rel_cam = np.array(cam.matrix_world.translation) - Cn
         cu, cv, cz = float(rel_cam @ F), float(rel_cam @ S), float(rel_cam[2])
         room = max(0.15 * height, 0.05 * span)
         outside = (np.abs(ug) > U) | (np.abs(vg) > V)
-        if float(hf.height(cu, cv)) > cz - room:
-            cap = cz - room
-            band = 0.1 * span
-            soft = hg - np.square(np.clip(hg - cap + band, 0.0, 2 * band)) / (4.0 * band)
-            capped = np.where(hg >= cap + band, cap, np.where(hg > cap - band, soft, hg))
-            hg = np.where(outside, capped, hg)
+        if float(hf.height(cu, cv)) > cz - room or float(hg.max()) > cz - room:
+            near_cam = np.hypot(ug - cu, vg - cv) < 2.0 * span
+            if float(hf.height(cu, cv)) > cz - room or bool((hg[near_cam] > cz - room).any()):
+                cap = cz - room
+                band = 0.1 * span
+                soft = hg - np.square(np.clip(hg - cap + band, 0.0, 2 * band)) / (4.0 * band)
+                capped = np.where(hg >= cap + band, cap, np.where(hg > cap - band, soft, hg))
+                hg = np.where(outside, capped, hg)
         # Keep the line of sight from the lens to the product's base clear: ground between the
         # camera and the product (within the product's bearing, eased at the edges) is kept just
-        # under the sight line, so an uphill toward the camera reads as a crest instead of a
+        # under the sight line, so rising ground toward the camera reads as a crest instead of a
         # wall that hides the product.
         near_u, near_v = max(-U, min(U, cu)), max(-V, min(V, cv))
         d_t = math.hypot(cu - near_u, cv - near_v)
@@ -630,48 +650,74 @@ def _custom_terrain(context, collection, settings, created, restore):
             if float(carve.max()) > 1e-4:
                 hg = hg - carve
                 carved = round(float(carve.max()), 4)
-    pts = (np.array(C)[None, None, :] + ug[..., None] * F + vg[..., None] * S
-           + hg[..., None] * np.array((0.0, 0.0, 1.0)))
+    pts = Cn[None, None, :] + ug[..., None] * F + vg[..., None] * S + hg[..., None] * np.array((0.0, 0.0, 1.0))
     nu, nv = len(us), len(vs)
-    verts = [tuple(map(float, p)) for p in pts.reshape(-1, 3)]
-    faces = []
-    for i in range(nu - 1):
-        for j in range(nv - 1):
-            a = i * nv + j
-            faces.append((a, a + nv, a + nv + 1, a + 1))
+    verts = pts.reshape(-1, 3)
+    ii, jj = np.meshgrid(np.arange(nu - 1), np.arange(nv - 1), indexing="ij")
+    a = (ii * nv + jj).ravel()
+    quads = np.stack([a, a + nv, a + nv + 1, a + 1], axis=1)
     mesh = bpy.data.meshes.new("_wondful_clay_floor")
-    mesh.from_pydata(verts, [], faces)
-    mesh.update()
-    for poly in mesh.polygons:
-        poly.use_smooth = True
+    mesh.vertices.add(len(verts))
+    mesh.vertices.foreach_set("co", verts.astype(np.float32).ravel())
+    mesh.loops.add(quads.size)
+    mesh.loops.foreach_set("vertex_index", quads.astype(np.int32).ravel())
+    mesh.polygons.add(len(quads))
+    mesh.polygons.foreach_set("loop_start", (np.arange(len(quads)) * 4).astype(np.int32))
+    mesh.polygons.foreach_set("loop_total", np.full(len(quads), 4, np.int32))
+    mesh.update(calc_edges=True)
+    mesh.validate()
+    mesh.polygons.foreach_set("use_smooth", np.ones(len(mesh.polygons), bool))
     vehicle = s.get("vehicle")
     if vehicle is None:
         vehicle = _looks_like_vehicle(collection)
     hints = {}
-    cam = scene.camera
     if cam is not None:
         inv = cam.matrix_world.to_3x3().inverted()
         for d, vec in (("front", fwd), ("right", side)):
             c = inv @ vec
             opp = {"front": "back", "right": "left"}[d]
             if abs(c.x) >= 0.35:
-                a, b = ("画面右侧", "画面左侧") if c.x > 0 else ("画面左侧", "画面右侧")
+                a1, b1 = ("画面右侧", "画面左侧") if c.x > 0 else ("画面左侧", "画面右侧")
                 if d == "front":
-                    a, b = "朝" + a, "朝" + b
+                    a1, b1 = "朝" + a1, "朝" + b1
             else:
                 if d == "front":
-                    a, b = ("朝向镜头", "背向镜头") if c.z > 0 else ("背向镜头", "朝向镜头")
+                    a1, b1 = ("朝向镜头", "背向镜头") if c.z > 0 else ("背向镜头", "朝向镜头")
                 else:
-                    a, b = ("靠近镜头一侧", "远离镜头一侧") if c.z > 0 else ("远离镜头一侧", "靠近镜头一侧")
-            hints[d], hints[opp] = a, b
-    text = TR.describe(s, vehicle=bool(vehicle), hints=hints)
+                    a1, b1 = ("靠近镜头一侧", "远离镜头一侧") if c.z > 0 else ("远离镜头一侧", "靠近镜头一侧")
+            hints[d], hints[opp] = a1, b1
+        try:
+            from bpy_extras.object_utils import world_to_camera_view
+            proj = {}
+            for k in TR.CORNERS:
+                su = 1.0 if k[0] == "f" else -1.0
+                sv = 1.0 if k[1] == "r" else -1.0
+                p = C + fwd * (su * U) + side * (sv * V)
+                p.z += float(hf.height(su * U, sv * V))
+                proj[k] = world_to_camera_view(scene, cam, p)
+            # four distinct labels: nearest / farthest from the lens, the other two by picture side
+            by_depth = sorted(TR.CORNERS, key=lambda k: proj[k].z)
+            hints[by_depth[0]] = "离镜头最近"
+            hints[by_depth[-1]] = "离镜头最远"
+            mid = sorted(by_depth[1:3], key=lambda k: proj[k].x)
+            hints[mid[0]], hints[mid[1]] = "画面左侧", "画面右侧"
+        except Exception:
+            pass
+    pose = {"pitch": pitch, "roll": roll, "lifted": lifted}
+    text = TR.describe(s, vehicle=bool(vehicle), hints=hints, pose=pose)
+    comp = TR.components(s)
     info.update({
         "forward": [round(x, 4) for x in fwd], "forward_how": how, "pitch_deg": round(pitch, 2),
         "roll_deg": round(roll, 2), "lift": round(lift, 5), "posed": posed, "follow": s["follow"],
-        "contact_points": int(touch.sum()), "contact_quadrants": quads, "contact_eps": round(eps, 5),
-        "min_clearance": round(float(clearance.min()), 6), "pivot": [round(x, 4) for x in C],
+        "contact_points": rep["contact_points"], "contact_groups": rep["contact_groups"],
+        "group_corners": rep["group_corners"], "com_inside": rep["com_inside"],
+        "corner_clearance": {k: round(x, 5) for k, x in rep["corner_clearance"].items()},
+        "lifted_corner": lifted, "lifted_gap": round(gap, 5), "contact_eps": round(eps, 5),
+        "min_clearance": round(rep["min_clearance"], 6), "pivot": [round(x, 4) for x in C],
         "vehicle": bool(vehicle), "hints": hints, "camera_cap": None if cap is None else round(cap, 4),
-        "sightline_carve": carved, "settings": {d: list(s[d]) for d in TR.DIRECTIONS},
+        "sightline_carve": carved, "support_points": int(len(sup)),
+        "settings": {k: s[k] for k in TR.CORNERS + ("crest", "bump")},
+        "components": {k: round(x, 3) for k, x in comp.items()},
         "text": text,
     })
     return mesh, info

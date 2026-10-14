@@ -177,14 +177,30 @@ def main():
     props.ui_show_prompt = True
     props.ui_show_advanced = True
     draw("connected_refs")
-    # 1.1.0: 高级 › 地面 › 自定义 terrain box (presets, four directions, pose toggle)
+    # 1.1.0: 高级 › 地面 › 自定义 terrain box (presets, four corners, 坡顶 / 凹凸, pose toggle)
     props.clay_ground = "CUSTOM"
-    bpy.ops.wondful.terrain_preset(preset="SIDE")
-    if (props.clay_terrain_left, props.clay_terrain_right) != ("UP", "DOWN"):
-        problems.append("terrain_preset SIDE did not fill left/right")
-    log = draw("terrain_custom")
-    if not any("wondful.terrain_preset" in line for line in log):
-        problems.append("terrain_custom: preset buttons missing")
+    for preset in ("CREST", "TWIST", "TWIST_MIRROR", "BUMPY", "CLIMB", "DESCENT", "SIDE"):
+        bpy.ops.wondful.terrain_preset(preset=preset)
+        log = draw("terrain_" + preset.lower())
+        if not any("wondful.terrain_preset" in line for line in log):
+            problems.append(f"terrain_{preset}: preset buttons missing")
+        if not any("clay_terrain_bump" in line for line in log):
+            problems.append(f"terrain_{preset}: 凹凸 slider missing")
+    bpy.ops.wondful.terrain_preset(preset="TWIST")
+    if (props.clay_terrain_fl, props.clay_terrain_fr, props.clay_terrain_bl, props.clay_terrain_br) != (12.0, -12.0, -12.0, 12.0):
+        problems.append("terrain_preset TWIST did not fill the corners")
+    bpy.ops.wondful.terrain_preset(preset="CREST")
+    if not props.clay_terrain_crest > 0.3 or props.clay_terrain_fl != 0.0:
+        problems.append("terrain_preset CREST did not set 坡顶")
+    # a file saved with the old 前/后/左/右 controls: raw ID props are migrated to corners
+    props["clay_terrain_front"] = 1
+    props["clay_terrain_front_angle"] = 10.0
+    props["clay_terrain_back"] = 2
+    props["clay_terrain_back_angle"] = 10.0
+    from wondful_ai_renderer.terrain import migrate_legacy_props
+    if not migrate_legacy_props(props) or (props.clay_terrain_fl, props.clay_terrain_bl) != (10.0, -10.0) \
+            or props.get("clay_terrain_front") is not None:
+        problems.append("legacy terrain props were not migrated")
     props.clay_terrain_follow = False
     draw("terrain_custom_level")
     props.clay_ground = "AUTO"

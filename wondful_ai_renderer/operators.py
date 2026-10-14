@@ -832,13 +832,16 @@ class WONDFUL_OT_model_default(Operator):
 class WONDFUL_OT_terrain_preset(Operator):
     bl_idname = "wondful.terrain_preset"
     bl_label = "地形预设"
-    bl_description = "把前/后/左/右四个方向填成预设地形（爬坡、下坡、侧坡、山脊、山谷）"
+    bl_description = "把四个角的地面坡度、坡顶和凹凸填成预设地形（坡顶、对角扭曲、颠簸路面、爬坡、下坡、侧坡）"
     bl_options = {"REGISTER", "UNDO"}
 
     preset: bpy.props.EnumProperty(
-        items=[("CLIMB", "爬坡", ""), ("DESCENT", "下坡", ""), ("SIDE", "侧坡", ""),
-               ("RIDGE", "山脊", ""), ("VALLEY", "山谷", "")],
-        default="CLIMB",
+        items=[("CREST", "坡顶", "产品停在坡顶最高处，四周地面向下掉落"),
+               ("TWIST", "对角扭曲", "左前、右后地面高，右前、左后地面低；产品三点着地、一角略微悬空"),
+               ("TWIST_MIRROR", "镜像扭曲", "右前、左后地面高，左前、右后地面低"),
+               ("BUMPY", "颠簸路面", "地面高低起伏、凹凸不平"),
+               ("CLIMB", "爬坡", "前高后低"), ("DESCENT", "下坡", "前低后高"), ("SIDE", "侧坡", "左高右低")],
+        default="CREST",
     )
 
     def execute(self, context):

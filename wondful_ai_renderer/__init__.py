@@ -150,6 +150,19 @@ def _wondful_load_post(_dummy):
     reset_prompt_editors()
     _initialize_prompt_editors()
     _recover_stale_task_states()
+    _migrate_terrain_props()
+
+
+def _migrate_terrain_props():
+    """1.1.0: files saved with the old 前/后/左/右 terrain controls get the matching corner slopes."""
+    try:
+        from .terrain import migrate_legacy_props
+        for scene in getattr(bpy.data, "scenes", []):
+            props = getattr(scene, "wondful_ai", None)
+            if props is not None and migrate_legacy_props(props):
+                print(f"[Wondful] 场景 {scene.name}：旧版前/后/左/右地形设置已换算为四角坡度。")
+    except Exception as exc:
+        print(f"[Wondful] 地形设置迁移跳过：{exc}")
 
 
 @persistent

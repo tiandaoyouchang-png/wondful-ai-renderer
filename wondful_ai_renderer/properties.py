@@ -17,11 +17,6 @@ def reference_limit(kind):
 
 _PROMPT_SYNCING = False
 
-_TERRAIN_MODES = [
-    ("FLAT", "平", "这个方向保持平地"),
-    ("UP", "上坡", "这个方向地面向上抬升"),
-    ("DOWN", "下坡", "这个方向地面向下倾斜"),
-]
 
 
 def _split_prompt_for_editor(text: str, width: int = 22) -> list[tuple[str, bool]]:
@@ -431,22 +426,31 @@ class WONDFUL_AISettings(PropertyGroup):
         items=[
             ("AUTO", "自动", "平地；车身倾斜时自动铺成同坡度的斜坡"),
             ("CREST", "山头", "车停在山头最高处：四周地面向下倾斜，配合低机位仰拍效果最好"),
-            ("CUSTOM", "自定义", "前/后/左/右四个方向分别设为平地、上坡或下坡；产品可随坡面倾斜"),
+            ("CUSTOM", "自定义", "四个角（左前/右前/左后/右后）分别设地面高低，可加坡顶和凹凸；产品像刚体一样稳稳落在地面上"),
         ],
         default="AUTO",
     )
-    # 1.1.0 custom terrain (高级 › 地面 › 自定义). Directions are the product's own front/back/left/right.
-    clay_terrain_front: EnumProperty(name="前", items=_TERRAIN_MODES, default="UP")
-    clay_terrain_back: EnumProperty(name="后", items=_TERRAIN_MODES, default="DOWN")
-    clay_terrain_left: EnumProperty(name="左", items=_TERRAIN_MODES, default="FLAT")
-    clay_terrain_right: EnumProperty(name="右", items=_TERRAIN_MODES, default="FLAT")
-    clay_terrain_front_angle: FloatProperty(name="前坡度", description="产品正前方地面的坡度", default=15.0, min=0.0, max=35.0)
-    clay_terrain_back_angle: FloatProperty(name="后坡度", description="产品正后方地面的坡度", default=15.0, min=0.0, max=35.0)
-    clay_terrain_left_angle: FloatProperty(name="左坡度", description="产品左侧地面的坡度", default=15.0, min=0.0, max=35.0)
-    clay_terrain_right_angle: FloatProperty(name="右坡度", description="产品右侧地面的坡度", default=15.0, min=0.0, max=35.0)
+    # 1.1.0 custom terrain (高级 › 地面 › 自定义). Four corners of the product's own footprint:
+    # signed slope (°) of the ground toward that corner, + rises, - falls.  Plus 坡顶 / 凹凸 strengths.
+    clay_terrain_fl: FloatProperty(name="左前", description="产品左前角方向的地面坡度：正值=该角地面抬高，负值=降低（°）",
+                                   default=15.0, min=-35.0, max=35.0, step=100, precision=0)
+    clay_terrain_fr: FloatProperty(name="右前", description="产品右前角方向的地面坡度：正值=该角地面抬高，负值=降低（°）",
+                                   default=15.0, min=-35.0, max=35.0, step=100, precision=0)
+    clay_terrain_bl: FloatProperty(name="左后", description="产品左后角方向的地面坡度：正值=该角地面抬高，负值=降低（°）",
+                                   default=-15.0, min=-35.0, max=35.0, step=100, precision=0)
+    clay_terrain_br: FloatProperty(name="右后", description="产品右后角方向的地面坡度：正值=该角地面抬高，负值=降低（°）",
+                                   default=-15.0, min=-35.0, max=35.0, step=100, precision=0)
+    clay_terrain_crest: FloatProperty(
+        name="坡顶", description="产品停在坡顶：四周地面从产品脚下向外掉落（0 = 无，1 = 约30°）。可与四角坡度叠加",
+        default=0.0, min=0.0, max=1.0, subtype="FACTOR",
+    )
+    clay_terrain_bump: FloatProperty(
+        name="凹凸", description="地面高低起伏、坑洼颠簸的强度（0 = 平整，1 = 强烈）。起伏平缓、每次相同",
+        default=0.0, min=0.0, max=1.0, subtype="FACTOR",
+    )
     clay_terrain_follow: BoolProperty(
         name="姿态跟随地形",
-        description="白模渲染时产品临时随坡面前后俯仰、左右侧倾，底部贴地；渲染完立即恢复你的原始变换。关闭则产品保持水平",
+        description="白模渲染时产品像刚体一样落在地面上：随坡俯仰、侧倾，扭曲或颠簸的地面上三点着地、一角可能略微悬空；渲染完立即恢复你的原始变换。关闭则产品保持水平，只抬高到不穿地",
         default=True,
     )
     clay_terrain_front_axis: EnumProperty(
