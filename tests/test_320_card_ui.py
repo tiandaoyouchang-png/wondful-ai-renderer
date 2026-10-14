@@ -12,7 +12,7 @@ class CardUITests(unittest.TestCase):
         ast.parse(self.src)
 
     def test_five_steps_in_order(self):
-        order = ['"连接"', '"产品三视图"', '"环境参考图"', '"提示词"', '"生成"']
+        order = ['"连接"', '"产品三视图（可选）"', '"环境参考图"', '"提示词"', '"生成"']
         draw = self.src[self.src.index("class WONDFUL_PT_main"):]
         positions = [draw.index(f"_step_card(layout, {i + 1}, {name}") for i, name in enumerate(order)]
         self.assertEqual(positions, sorted(positions))

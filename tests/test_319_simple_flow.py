@@ -10,7 +10,7 @@ class SimpleFlowTests(unittest.TestCase):
     def test_panel_steps(self):
         src = (PKG / "ui.py").read_text()
         # 3.2.0 replaced the four-step layout with five step cards (see test_320).
-        for text in ("\"连接\"", "\"产品三视图\"", "\"环境参考图\"", "wondful.generate", "\"高级\""):
+        for text in ("\"连接\"", "\"产品三视图（可选）\"", "\"环境参考图\"", "wondful.generate", "\"高级\""):
             self.assertIn(text, src)
         ast.parse(src)
 

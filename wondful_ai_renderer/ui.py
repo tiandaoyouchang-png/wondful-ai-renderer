@@ -398,7 +398,7 @@ class WONDFUL_PT_main(Panel):
     bl_category = "Wondful AI"
 
     def draw(self, context):
-        """3.2.0: five step cards (连接 / 产品三视图 / 环境参考图 / 提示词 / 生成); the rest in 高级."""
+        """3.2.0: five step cards (连接 / 产品三视图（可选） / 环境参考图 / 提示词 / 生成); the rest in 高级."""
         from .operators import generate_needs_polish
         layout = self.layout
         props = context.scene.wondful_ai
@@ -470,13 +470,14 @@ class WONDFUL_PT_main(Panel):
                 auth.prop(props, "progress", text="等待浏览器授权", slider=True)
 
         # ---- ② 产品三视图 -------------------------------------------------------
-        product_done = has_product and structure_ready
-        step2, tools = _step_card(layout, 2, "产品三视图", done=product_done, ready=connected)
+        # 1.1: the 三视图 is optional — the step is done once the product collection is set.
+        product_done = structure_ready and (has_product or bool(props.product_collection))
+        step2, tools = _step_card(layout, 2, "产品三视图（可选）", done=product_done, ready=connected)
         _reference_header_tools(tools, props.product_images, "PRODUCT")
         if not has_product:
             _draw_reference_empty(step2, "PRODUCT", (
-                "放 1 张三视图（正 / 侧 / 后拼成一张）",
-                "只参考造型，不参考原图打光",
+                "可选：放 1 张三视图（正 / 侧 / 后拼成一张）",
+                "不放也能生成，产品以场景里的模型为准",
             ))
         else:
             for index, item in enumerate(props.product_images):
