@@ -42,7 +42,8 @@ CORNER_LABELS = {"fl": "左前", "fr": "右前", "bl": "左后", "br": "右后"}
 MAX_ANGLE = 35.0
 CREST_MAX_DEG = 30.0
 BUMP_REL_AMPLITUDE = 0.035      # bump amplitude at strength 1, × product footprint size
-TWIST_PAD_GAP = 0.3             # pad twist corner height = this × product height × tan(twist)
+TWIST_PAD_GAP = 0.6             # pad twist corner height = this × product height × tan(twist)
+TWIST_PAD_CAP = 0.24            # ... at most this × pad half-diagonal (keeps the rigid product's tilt modest)
 LEGACY_DIRECTIONS = ("front", "back", "left", "right")
 
 # corners (左前, 右前, 左后, 右后), crest, bump
@@ -207,7 +208,7 @@ class HeightField:
         self.twist_far = math.tan(math.radians(self.comp["twist"]))
         # twist height at the pad corners: gentle (one corner of a rigid product lifts by ~4×)
         ht = TWIST_PAD_GAP * ph * abs(self.twist_far)
-        ht = min(ht, 0.12 * self.diag, abs(self.twist_far) * self.diag)
+        ht = min(ht, TWIST_PAD_CAP * self.diag, abs(self.twist_far) * self.diag)
         self.twist_pad = math.copysign(ht, self.twist_far) if self.twist_far else 0.0
         self.twist_run = 1.5 * 2.0 * max(self.half_u, self.half_v)   # full twist slope this far past the shoulder
         self.twist_fade = 2.0 * max(self.half_u, self.half_v)        # then levels off over this distance
@@ -612,7 +613,7 @@ def describe(settings, vehicle=False, hints=None, pose=None) -> str:
 
     ``hints`` maps a direction (front/back/left/right) or corner (fl/fr/bl/br) to where it is in
     the picture (e.g. {"right": "画面左侧", "fr": "画面左下方"}).  ``pose`` is the rest-pose
-    result {"pitch", "roll", "lifted": corner or None} (defaults to the plane components)."""
+    result {"pitch", "roll", "lifted": corner or None, "gap": metres under the lifted corner} (defaults to the plane components)."""
     s = normalize(settings)
     if is_flat(s):
         return ""
@@ -663,10 +664,10 @@ def describe(settings, vehicle=False, hints=None, pose=None) -> str:
         word = "轻微" if b < 0.35 else ("明显" if b < 0.75 else "强烈")
         parts.append(f"地面{word}凹凸不平、高低起伏，像颠簸的土路/坑洼地，不是平整路面")
     if lifted in CORNERS:
-        if vehicle:
-            parts.append(f"刚性{n['subj']}不随地面扭曲：{n['three']}，{cname(lifted)}略微悬空、离地一小段距离")
-        else:
-            parts.append(f"刚性产品不随地面扭曲：{n['three']}，{cname(lifted)}略微悬空、离地一小段距离")
+        gap = float(pose.get("gap") or 0.0)
+        cm = f"约{max(1, round(gap * 100))}厘米" if gap > 0 else "一段"
+        parts.append(f"刚性{n['subj']}不随地面扭曲：{n['three']}，{cname(lifted)}明显悬空、离地{cm}，"
+                     f"能清楚看到它和下方地面之间的空隙")
     if not any(("倾斜" in x or "坡上" in x or "爬坡" in x or "下坡" in x) for x in parts) and not lifted \
             and tilt_min < 1.0:
         parts.append(f"{n['subj']}姿态基本水平")

@@ -97,7 +97,10 @@ class TerrainMathTests(unittest.TestCase):
         self.assertGreater(hf.height(-8, 8), 1.0)   # 右后 high
         self.assertLess(hf.height(8, 8), -1.0)      # 右前 low
         self.assertLess(hf.height(-8, -8), -1.0)    # 左后 low
-        self.assertLess(abs(hf.height(2.8, -1.2)), 0.15)  # gentle under the product (vs ~0.65 at full slope)
+        pad = abs(hf.height(2.8, -1.2))
+        self.assertLess(pad, 0.3)  # gentler under the product (vs ~0.65 at full slope)
+        self.assertGreater(pad, 0.15)  # ... but enough that a rigid product visibly lifts one corner
+        self.assertAlmostEqual(pad, T.TWIST_PAD_GAP * 1.6 * math.tan(math.radians(12)), places=6)
         # numpy and scalar paths agree; continuous
         xs = np.linspace(-20, 20, 801)
         for name in T.PRESET_ORDER:
@@ -131,13 +134,14 @@ class RestPoseTests(unittest.TestCase):
     def test_twist_three_point_contact_one_corner_lifted(self):
         for name in ("TWIST", "TWIST_MIRROR"):
             p, r, lift, rep = settle(name)
+            self.assertLess(max(abs(p), abs(r)), 16.0, name)  # tilts, but does not tip over absurdly
             self.assertEqual(rep["contact_groups"], 3, name)
             self.assertTrue(rep["com_inside"], name)
             self.assertGreaterEqual(rep["min_clearance"], -1e-9)
             corner, gap = T.lifted_corner(rep, 0.5)
             self.assertIn(corner, ("fr", "bl") if name == "TWIST" else ("fl", "br"))  # a low corner hangs
-            self.assertGreater(gap, 0.02)
-            self.assertLess(gap, 0.2)  # "slightly" lifted
+            self.assertGreater(gap, 0.12)  # a 0.8 m product: the gap must read in the picture
+            self.assertLess(gap, 0.35)
 
     def test_bumpy_stable_no_penetration(self):
         p, r, lift, rep = settle("BUMPY")
@@ -158,10 +162,10 @@ class TerrainPromptTests(unittest.TestCase):
         self.assertIn("车轮", text)
         text = T.describe(T.preset_settings("SIDE"), vehicle=True, hints={"right": "画面左侧", "left": "画面右侧"})
         self.assertIn("车身右侧（画面左侧）低", text)
-        text = T.describe(T.preset_settings("TWIST"), vehicle=True, pose={"pitch": -2, "roll": 2, "lifted": "fr"})
+        text = T.describe(T.preset_settings("TWIST"), vehicle=True, pose={"pitch": -2, "roll": 2, "lifted": "fr", "gap": 0.26})
         self.assertIn("左前方与右后方地面较高", text)
         self.assertIn("三个车轮着地", text)
-        self.assertIn("右前轮略微悬空", text)
+        self.assertIn("右前轮明显悬空、离地约26厘米", text)
 
     def test_generic_wording(self):
         for key in T.PRESET_ORDER:
@@ -171,7 +175,8 @@ class TerrainPromptTests(unittest.TestCase):
         text = T.describe(T.preset_settings("TWIST"), pose={"pitch": -3, "roll": 3, "lifted": "fr"},
                           hints={"fr": "画面左侧近处"})
         self.assertIn("产品三点着地", text)
-        self.assertIn("右前角（画面左侧近处）略微悬空", text)
+        self.assertIn("右前角（画面左侧近处）明显悬空", text)
+        self.assertIn("空隙", text)
         self.assertIn("保持悬空", text)
         self.assertIn("坡顶", T.describe(T.preset_settings("CREST")))
         self.assertIn("凹凸不平", T.describe(T.preset_settings("BUMPY")))

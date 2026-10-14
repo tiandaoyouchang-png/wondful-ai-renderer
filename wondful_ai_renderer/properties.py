@@ -450,7 +450,7 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     clay_terrain_follow: BoolProperty(
         name="姿态跟随地形",
-        description="白模渲染时产品像刚体一样落在地面上：随坡俯仰、侧倾，扭曲或颠簸的地面上三点着地、一角可能略微悬空；渲染完立即恢复你的原始变换。关闭则产品保持水平，只抬高到不穿地",
+        description="白模渲染时产品像刚体一样落在地面上：随坡俯仰、侧倾，扭曲或颠簸的地面上三点着地、一角可能悬空离地；渲染完立即恢复你的原始变换。关闭则产品保持水平，只抬高到不穿地",
         default=True,
     )
     clay_terrain_front_axis: EnumProperty(

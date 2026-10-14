@@ -703,7 +703,7 @@ def _custom_terrain(context, collection, settings, created, restore):
             hints[mid[0]], hints[mid[1]] = "画面左侧", "画面右侧"
         except Exception:
             pass
-    pose = {"pitch": pitch, "roll": roll, "lifted": lifted}
+    pose = {"pitch": pitch, "roll": roll, "lifted": lifted, "gap": gap if lifted else 0.0}
     text = TR.describe(s, vehicle=bool(vehicle), hints=hints, pose=pose)
     comp = TR.components(s)
     info.update({
