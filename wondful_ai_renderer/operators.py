@@ -888,23 +888,119 @@ class WONDFUL_OT_terrain_preset(Operator):
         return {"FINISHED"}
 
 
-class WONDFUL_OT_sketch_build(Operator):
-    bl_idname = "wondful.sketch_build"
-    bl_label = "从三视图生成草模"
-    bl_description = ("草图模式：从正视 / 侧视 / 俯视图的轮廓雕出粗略草模（集合「Wondful 草模」，放在 3D 游标处、落在地面上，"
-                      "正面朝 -Y），并设为产品集合。再次生成会保留草模的位置和旋转")
+def _active_block(context):
+    """(root block object, massing collection) for the active object, or (None, collection)."""
+    from . import massing as MS
+    props = context.scene.wondful_ai
+    coll = MS.find_collection(context.scene, props)
+    obj = getattr(context, "active_object", None) or getattr(context.view_layer.objects, "active", None)
+    if coll is None or obj is None:
+        return None, coll
+    objs = MS.massing_objects(coll, getattr(props, "product_collection", None))
+    return MS.block_root(obj, objs), coll
+
+
+class WONDFUL_OT_block_ref_add(Operator, ImportHelper):
+    bl_idname = "wondful.block_ref_add"
+    bl_label = "添加建筑参考"
+    bl_description = ("给当前选中的环境体块添加 1–3 张建筑参考图（真实建筑照片、效果图或概念草图）。"
+                      "生图时 AI 按参考图的风格、立面、材质画这栋楼，体块的位置、高度和轮廓不变")
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ""
+    filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.webp", options={"HIDDEN"})
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement, options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        return _active_block(context)[0] is not None
+
+    def execute(self, context):
+        from . import massing as MS
+        block, _coll = _active_block(context)
+        if block is None:
+            self.report({"ERROR"}, "请先在环境体块集合里选中一个体块")
+            return {"CANCELLED"}
+        selected = [str(Path(self.directory) / f.name) for f in self.files if f.name] if self.files else []
+        if not selected and self.filepath:
+            selected = [self.filepath]
+        selected = [p for p in selected if p and Path(bpy.path.abspath(p)).is_file()]
+        if not selected:
+            self.report({"WARNING"}, "没有选择图片")
+            return {"CANCELLED"}
+        kept, dropped = MS.merge_refs(MS.get_refs(block), selected, MS.MAX_BLOCK_REFS)
+        MS.set_refs(block, kept)
+        msg = f"{block.name}：建筑参考 {len(kept)} 张"
+        if dropped:
+            msg += f"（每个体块最多 {MS.MAX_BLOCK_REFS} 张，{len(dropped)} 张未添加）"
+        self.report({"WARNING" if dropped else "INFO"}, msg)
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_block_ref_clear(Operator):
+    bl_idname = "wondful.block_ref_clear"
+    bl_label = "清空建筑参考"
+    bl_description = "清空当前选中体块的建筑参考图（只删除引用，不删除图片文件）"
+    bl_options = {"REGISTER", "UNDO"}
+    index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
+
+    @classmethod
+    def poll(cls, context):
+        return _active_block(context)[0] is not None
+
+    def execute(self, context):
+        from . import massing as MS
+        block, _coll = _active_block(context)
+        if block is None:
+            return {"CANCELLED"}
+        refs = MS.get_refs(block)
+        if 0 <= self.index < len(refs):
+            refs.pop(self.index)
+        else:
+            refs = []
+        MS.set_refs(block, refs)
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_block_select(Operator):
+    bl_idname = "wondful.block_select"
+    bl_label = "选中体块"
+    bl_description = "在场景中选中这个环境体块（之后可添加 / 清空它的建筑参考）"
+    bl_options = {"REGISTER", "UNDO"}
+    name: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.name)
+        if obj is None:
+            return {"CANCELLED"}
+        try:
+            for other in context.selected_objects:
+                other.select_set(False)
+            obj.select_set(True)
+        except Exception:
+            pass
+        context.view_layer.objects.active = obj
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_massing_hull_build(Operator):
+    bl_idname = "wondful.massing_hull_build"
+    bl_label = "从三视图生成建筑体块"
+    bl_description = ("从建筑的正视 / 侧视 / 俯视图轮廓雕出一个建筑体块，放进环境体块集合（没有时新建「环境体块」），"
+                      "放在 3D 游标处、落在地面上，正立面朝 -Y；三视图自动作为它的建筑参考。产品不受影响")
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         props = context.scene.wondful_ai
         try:
-            from . import sketch_proxy
-            obj, info = sketch_proxy.build_proxy(context, props)
+            from . import massing_hull
+            obj, info = massing_hull.build_block(context, props)
         except Exception as exc:
-            props.last_sketch_note = f"草模生成失败：{exc}"
-            self.report({"ERROR"}, props.last_sketch_note[:200])
+            props.last_hull_note = f"建筑体块生成失败：{exc}"
+            self.report({"ERROR"}, props.last_hull_note[:200])
             return {"CANCELLED"}
-        props.last_sketch_note = sketch_proxy.summary(info)
+        props.last_hull_note = massing_hull.summary(info)
         try:
             for other in context.selected_objects:
                 other.select_set(False)
@@ -912,7 +1008,7 @@ class WONDFUL_OT_sketch_build(Operator):
             context.view_layer.objects.active = obj
         except Exception:
             pass
-        self.report({"INFO"}, props.last_sketch_note[:200])
+        self.report({"INFO"}, props.last_hull_note[:200])
         return {"FINISHED"}
 
 
@@ -1773,6 +1869,21 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             score = -1
         return bool(canvas.get("matches") or canvas.get("fit_compatible")), score
 
+    def _building_refs(self, items):
+        """1.2.0 建筑参考: the blocks' reference images for this run (capped, larger blocks first),
+        copied into the session and downscaled.  Never raises."""
+        try:
+            from . import massing as MS
+            out = []
+            for i, ref in enumerate(MS.select_building_refs(items, exists=lambda p: Path(p).is_file()), start=1):
+                copied = copy_references([ref["path"]], self._session, f"building_ref_{ref['block']}_{i}")
+                if copied:
+                    out.append(dict(ref, path=prepare_reference_for_upload(copied[0], 1600)))
+            return out
+        except Exception as exc:
+            print(f"[Wondful] 建筑参考整理失败：{exc}")
+            return []
+
     def _layers_spec(self, context, props, prefs, provider):
         """1.2.0 分层输出 settings for this run, or None. Never raises."""
         try:
@@ -1970,16 +2081,6 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         product = copy_references(refs["product"], self._session, "product_reference")
         person = copy_references(refs["person"], self._session, "person_reference")
         style = copy_references(refs["style"], self._session, "style_reference")
-        # 1.2.0 草图模式: the three-view images are the product's appearance reference.
-        sketch_refs = []
-        if bool(getattr(props, "sketch_mode", False)):
-            from . import sketch_proxy
-            for index, (src, label) in enumerate(sketch_proxy.reference_images(props)):
-                copied = copy_references([src], self._session, f"sketch_view_{index + 1}")
-                if copied:
-                    sketch_refs.append((prepare_reference_for_upload(copied[0], 1600), label))
-            if not product:  # the agent fallback path gets them as ordinary product references
-                product = [p for p, _l in sketch_refs][:MAX_PRODUCT_REFERENCES]
         self._reference_counts = {"product": len(product), "person": len(person), "style": len(style)}
         product_upload = [prepare_reference_for_upload(p) for p in product]
         person_upload = [prepare_reference_for_upload(p) for p in person]
@@ -2128,6 +2229,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_simple_brief = None
             direct_terrain_text = ""
             direct_massing_text = ""
+            direct_building_refs = []
             from .product_kind import is_vehicle as _is_vehicle
             try:
                 direct_vehicle = _is_vehicle(props)
@@ -2151,8 +2253,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
                         direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
                         blocks = len(LAST_CLAY_INFO.get("massing") or [])
-                        props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面" if massing_coll
-                                                   else "")
+                        if direct_massing_text:
+                            direct_building_refs = self._building_refs(LAST_CLAY_INFO.get("massing") or [])
+                        props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面"
+                                                   + (f" · 建筑参考 {len(direct_building_refs)} 张" if direct_building_refs else "")
+                                                   if massing_coll else "")
                         direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
                 except Exception as exc:
                     print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
@@ -2160,7 +2265,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     direct_simple_base = str(self._session.viewport_reference)
                     direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
-            direct_state["sketch_views"] = [label for _p, label in sketch_refs]
+            direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
+                                             for r in direct_building_refs]
 
             def _direct_status(text):
                 self._phase = text
@@ -2173,7 +2279,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
                     terrain_text=direct_terrain_text, vehicle=direct_vehicle,
                     massing_text=direct_massing_text,
-                    sketch_refs=sketch_refs or None,
+                    building_refs=direct_building_refs or None,
                 )
         if self._layers and not Path(self._layers["mask"]).is_file():
             try:

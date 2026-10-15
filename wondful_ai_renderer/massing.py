@@ -9,12 +9,19 @@ need no ``bpy`` so they are unit-tested directly; Blender-only parts import ``bp
 """
 from __future__ import annotations
 
+import json
 import re
 
 MASSING_HEX = "#9FB4C8"
 MAT_NAME = "_wondful_massing_mat"
 AUTO_KEYS = ("环境", "体块", "context", "massing")
 HINT_PROPS = ("wondful_hint", "hint", "描述", "提示")
+# 建筑参考: per-block reference images (JSON list of paths) stored on the block object
+REF_PROP = "wondful_ref_paths"
+MAX_BLOCK_REFS = 3        # per block
+MAX_BUILDING_IMAGES = 4   # per generation, on top of the clay canvas (image 1)
+DEFAULT_COLLECTION = "环境体块"
+HULL_TAG = "wondful_hull_block"
 
 # English name words → Chinese hint (Chinese names are used as written)
 _EN_HINTS = {
@@ -163,6 +170,130 @@ def build_massing_text(items, vehicle=False) -> str:
     for n, it in enumerate(items, start=1):
         hint = (it.get("hint") or "").strip()
         lines.append(f"- 体块 {n}" + (f"「{hint}」" if hint else "") + "：" + it["place"])
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- 建筑参考 (per-block refs)
+
+def parse_refs(value) -> list:
+    """Paths stored in a block's ``wondful_ref_paths`` (JSON list; a plain string = one path)."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            raw = [text]
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+    out = []
+    for p in raw:
+        p = str(p or "").strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def dump_refs(paths) -> str:
+    return json.dumps(parse_refs(list(paths or [])), ensure_ascii=False)
+
+
+def merge_refs(existing, new, limit: int = MAX_BLOCK_REFS):
+    """(kept list, dropped list): existing refs first, duplicates ignored, at most ``limit``."""
+    kept = parse_refs(existing)
+    dropped = []
+    for p in parse_refs(list(new or [])):
+        if p in kept:
+            continue
+        if len(kept) >= limit:
+            dropped.append(p)
+        else:
+            kept.append(p)
+    return kept, dropped
+
+
+def visible_area(box) -> float:
+    """Frame area (0..1) of a block's projected box [x0, x1, y0, y1], clipped to the frame."""
+    try:
+        x0, x1, y0, y1 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return 0.0
+    w = max(0.0, min(1.0, x1) - max(0.0, x0))
+    h = max(0.0, min(1.0, y1) - max(0.0, y0))
+    return w * h
+
+
+def short_place(place) -> str:
+    """First two parts of a placement phrase ("画面左侧，在产品左边")."""
+    parts = [p for p in str(place or "").split("，") if p]
+    return "，".join(parts[:2])
+
+
+def select_building_refs(items, cap: int = MAX_BUILDING_IMAGES, exists=None) -> list:
+    """Which block reference images go with this generation (after the clay canvas).
+
+    ``items``: the prompt's block list (same order / numbering as ``build_massing_text``), each
+    with ``refs`` (paths), ``box`` and ``hint``.  Over the cap, blocks larger in frame win: one
+    image per block in that order first, then second images, …  Returned grouped by block (in
+    priority order) as dicts ``{block, path, hint, place, area}``; ``block`` is 1-based."""
+    cands = []
+    for n, it in enumerate(items or (), start=1):
+        refs = [p for p in parse_refs(it.get("refs")) if exists is None or exists(p)][:MAX_BLOCK_REFS]
+        if refs:
+            cands.append((visible_area(it.get("box")), n, it, refs))
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    take = {n: 0 for _a, n, _i, _r in cands}
+    left = max(0, int(cap))
+    rnd = 0
+    while left > 0 and any(take[n] < len(r) for _a, n, _i, r in cands):
+        for _a, n, _i, refs in cands:
+            if left > 0 and rnd < len(refs):
+                take[n] += 1
+                left -= 1
+        rnd += 1
+    out = []
+    for area, n, it, refs in cands:
+        for p in refs[:take[n]]:
+            out.append({"block": n, "path": p, "hint": str(it.get("hint") or "").strip(),
+                        "place": str(it.get("place") or ""), "area": round(area, 4)})
+    return out
+
+
+def building_ref_text(selection, first_index: int = 2, vehicle: bool = False, names=None) -> str:
+    """Prompt paragraph mapping each attached reference image to its block.
+
+    ``selection``: ``select_building_refs`` output in attach order.  Images are called
+    图 ``first_index``…, or by ``names`` (one label per image, e.g. file names for the codex exec
+    fallback, whose canvas is the camera capture without grey-blue blocks)."""
+    sel = [s for s in selection or () if s.get("path")]
+    if not sel:
+        return ""
+    subj = "车" if vehicle else "产品"
+    groups = []
+    for i, s in enumerate(sel):
+        label = (f"参考图「{names[i]}」" if names else f"图{first_index + i}")
+        if groups and groups[-1][0]["block"] == s["block"]:
+            groups[-1][1].append(label)
+        else:
+            groups.append((s, [label]))
+    grey = "" if names else "灰蓝"
+    lines = [f"建筑参考图（每张只管对应的那一个{grey}体块）："]
+    for s, labels in groups:
+        where = short_place(s.get("place")) or "画面中"
+        name = f"体块 {s['block']}" + (f"「{s['hint']}」" if s.get("hint") else "")
+        lines.append(f"- {'、'.join(labels)} 是{where}的{name}（{grey}体块）的参考：按它的建筑风格、立面、材质、窗户和细节来画这栋建筑，"
+                     "但保持体块的位置、高度、轮廓和透视；参考图里的机位、构图、天空、其他物体和车辆一律不要照搬。")
+    lines.append("没有参考图的体块仍按场景风格自由设计。参考图只影响对应的体块，不改变画面构图、地面和其他元素。")
+    who = f"相机底图里的{subj}" if names else f"图 1 里不是灰蓝色的主体就是我们的{subj}，它"
+    lines.append(f"{who}完全锁定：位置、大小、角度、透视、轮廓、颜色都与{'底图' if names else '图 1 '}一致，"
+                 f"参考图不影响{subj}；不要按参考图的机位重新构图，也不要放大、缩小或移动{subj}。")
     return "\n".join(lines)
 
 
@@ -382,10 +513,65 @@ def describe_blocks(context, objs, product_pts):
             hint = hint_from_name(m.name, custom)
             if hint:
                 break
-        items.append({"name": names[0], "hint": hint, "depth": depth,
+        refs = []
+        for m in [root] + members:
+            try:
+                if REF_PROP in m.keys():
+                    refs = [_abspath(p) for p in parse_refs(m[REF_PROP])]
+                    break
+            except Exception:
+                pass
+        items.append({"name": names[0], "hint": hint, "depth": depth, "refs": refs,
                       "box": [round(v, 3) for v in (x0, x1, y0, y1)], "height_ratio": round(ratio, 2),
                       "place": placement_words(x0, x1, y0, y1, depth, ratio, px), "_sort": (x0 + x1) / 2})
     items.sort(key=lambda i: i["_sort"])
     for i in items:
         i.pop("_sort", None)
     return items
+
+
+def _abspath(p):
+    try:
+        import bpy
+        return bpy.path.abspath(p)
+    except Exception:
+        return p
+
+
+def block_root(obj, objs):
+    """The block (a root of ``objs``, where its 建筑参考 are stored) that ``obj`` belongs to:
+    ``obj`` itself or its nearest ancestor that is a root block; None when outside the blocks."""
+    roots = set(_roots(list(objs or ())))
+    while obj is not None and obj not in roots:
+        obj = getattr(obj, "parent", None)
+    return obj
+
+
+def block_roots(objs):
+    return _roots(list(objs or ()))
+
+
+def get_refs(obj) -> list:
+    try:
+        return parse_refs(obj.get(REF_PROP)) if obj is not None else []
+    except Exception:
+        return []
+
+
+def set_refs(obj, paths) -> None:
+    paths = parse_refs(list(paths or []))
+    if paths:
+        obj[REF_PROP] = dump_refs(paths)
+    elif REF_PROP in obj.keys():
+        del obj[REF_PROP]
+
+
+def ensure_collection(scene, props=None):
+    """(collection, created): the massing collection, or a new 「环境体块」 one linked to the scene."""
+    import bpy
+    coll = find_collection(scene, props)
+    if coll is not None:
+        return coll, False
+    coll = bpy.data.collections.new(DEFAULT_COLLECTION)
+    scene.collection.children.link(coll)
+    return coll, True

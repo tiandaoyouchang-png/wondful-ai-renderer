@@ -1,5 +1,6 @@
-"""1.2.0 草图模式: silhouettes, sheet split, visual-hull carving, surface nets, prompt + payload wiring."""
-import base64
+"""1.2.0 环境体块 › 从三视图生成建筑体块: silhouettes, sheet split, visual-hull carving, surface nets, wiring.
+
+The product is always the real 3D model; the visual hull only builds environment buildings."""
 import sys
 import tempfile
 import unittest
@@ -9,11 +10,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_316_regressions import load_package_module  # noqa: E402
-from test_321_direct_edit import DirectEditTestBase, rgb_png  # noqa: E402
 
 SM = load_package_module("sketch_model")
 png_io = load_package_module("png_io")
-CD = load_package_module("codex_direct")
 PKG = Path(__file__).resolve().parents[1] / "wondful_ai_renderer"
 
 
@@ -200,66 +199,57 @@ class SheetTests(unittest.TestCase):
             SM.split_sheet(self.sheet(extra=True))
 
 
-class PromptTests(unittest.TestCase):
-    def test_sketch_prompt(self):
-        text = CD.build_simple_prompt("雪山清晨", sketch_views=["正视图", "侧视图", "俯视图"])
-        self.assertIn("白模是根据三视图生成的粗略外形，保持位置、朝向、大小和透视", text)
-        self.assertIn("外形细节、材质、颜色、Logo 以三视图为准，可修正粗模的块面和缺口", text)
-        self.assertIn("图 2：正视图、图 3：侧视图、图 4：俯视图", text)
-        self.assertNotIn("不增减、不改形任何部件", text)
-        self.assertNotIn("固有色", text)
-        plain = CD.build_simple_prompt("雪山清晨")
-        self.assertIn("不增减、不改形任何部件", plain)
-        self.assertNotIn("三视图", plain)
-        car = CD.build_simple_prompt("", env_text="雪山。车身质感：清漆", vehicle=True, sketch_views=["正视图", "侧视图"])
-        self.assertIn("车漆颜色和材质以三视图为准", car)
-        self.assertIn("以白模（位置、朝向、大小）和三视图", car)
-
-
-class SketchPayloadTests(DirectEditTestBase):
-    def test_simple_path_sends_clay_plus_views_not_env(self):
-        views = [(rgb_png(self.tmp / f"v{i}.png", 400, 300, (i * 40, 90, 90)), lab)
-                 for i, lab in enumerate(["正视图", "侧视图", "俯视图"])]
-        result = self.edit(simple_brief="海边黄昏", sketch_refs=views + [(self.product, "多余")])
-        self.assertEqual(result["sketch_views"], ["正视图", "侧视图", "俯视图"])
-        body = self.state.raw_bodies[-1]
-        self.assertIn("rough proxy", body["instructions"])
-        content = body["input"][0]["content"]
-        images = [c for c in content if c["type"] == "input_image"]
-        self.assertEqual(len(images), 4)                       # clay + 3 views, the env image is NOT attached
-        self.assertEqual(base64.b64decode(images[0]["image_url"].split(",", 1)[1]), Path(self.camera).read_bytes())
-        self.assertEqual(base64.b64decode(images[2]["image_url"].split(",", 1)[1]), Path(views[1][0]).read_bytes())
-        self.assertIn("粗略外形", content[0]["text"])
-
-    def test_simple_path_without_sketch_unchanged(self):
-        self.edit(simple_brief="海边黄昏")
-        body = self.state.raw_bodies[-1]
-        self.assertEqual(body["instructions"], CD.INSTRUCTIONS)
-        self.assertEqual(len([c for c in body["input"][0]["content"] if c["type"] == "input_image"]), 1)
-
-    def test_non_simple_ignores_sketch_refs(self):
-        result = self.edit(sketch_refs=[(self.product, "正视图")])
-        self.assertEqual(result["sketch_views"], [])
+class BuildingScaleTests(unittest.TestCase):
+    def test_known_height_20m_building(self):
+        front = np.ones((200, 80), bool)          # 80 wide × 200 tall elevation
+        side = np.ones((200, 60), bool)
+        v, q, info = SM.build_hull(front, side, None, known_axis="HEIGHT", known_value=20.0, resolution=64)
+        W, L, H = info["dims"]
+        self.assertAlmostEqual(H, 20.0, places=3)
+        self.assertAlmostEqual(W, 8.0, places=2)
+        self.assertAlmostEqual(L, 6.0, places=2)
+        self.assertAlmostEqual(float(v[:, 2].min()), 0.0, places=5)   # sits on the ground
+        self.assertLess(abs(float(v[:, 0].mean())), 0.3)             # centred on X
 
 
 class WiringTests(unittest.TestCase):
-    def test_plugin_wiring(self):
+    def test_product_sketch_mode_removed(self):
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
-        self.assertIn('bl_idname = "wondful.sketch_build"', ops)
-        self.assertIn("sketch_refs=sketch_refs or None", ops)
-        init = (PKG / "__init__.py").read_text(encoding="utf-8")
-        self.assertEqual(init.count("WONDFUL_OT_sketch_build"), 2)
+        cd = (PKG / "codex_direct.py").read_text(encoding="utf-8")
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        adv = ui[ui.index("# ---- 高级"):]
-        self.assertIn("_draw_sketch(adv, props, busy)", adv)
-        self.assertIn("草图模式（概念图）", ui)
         props = (PKG / "properties.py").read_text(encoding="utf-8")
-        for name in ("sketch_mode", "sketch_front_path", "sketch_side_path", "sketch_top_path", "sketch_sheet_path",
-                     "sketch_known_value", "sketch_resolution"):
+        for src in (ops, cd, ui, props):
+            self.assertNotIn("sketch_refs", src)
+            self.assertNotIn("sketch_mode", src)
+            self.assertNotIn("草图模式", src)
+        self.assertNotIn("rough proxy", cd)
+        self.assertNotIn("product_collection =", (PKG / "massing_hull.py").read_text(encoding="utf-8"))
+        self.assertFalse((PKG / "sketch_proxy.py").exists())
+
+    def test_hull_wiring(self):
+        ops = (PKG / "operators.py").read_text(encoding="utf-8")
+        self.assertIn('bl_idname = "wondful.massing_hull_build"', ops)
+        self.assertIn("massing_hull.build_block(context, props)", ops)
+        init = (PKG / "__init__.py").read_text(encoding="utf-8")
+        for cls in ("WONDFUL_OT_massing_hull_build", "WONDFUL_OT_block_ref_add", "WONDFUL_OT_block_ref_clear",
+                    "WONDFUL_OT_block_select"):
+            self.assertEqual(init.count(cls), 2, cls)
+        hull = (PKG / "massing_hull.py").read_text(encoding="utf-8")
+        self.assertIn("MS.ensure_collection(scene, props)", hull)       # into the massing collection
+        self.assertIn("MS.set_refs(obj, paths)", hull)                  # three views become its 建筑参考
+        self.assertIn("obj.location = (cur.x, cur.y, 0.0)", hull)       # 3D cursor, on the ground
+        ui = (PKG / "ui.py").read_text(encoding="utf-8")
+        self.assertIn("_draw_massing_hull(box, props, busy)", ui)
+        self.assertIn("从三视图生成建筑体块", ui)
+        props = (PKG / "properties.py").read_text(encoding="utf-8")
+        for name in ("hull_front_path", "hull_side_path", "hull_top_path", "hull_sheet_path", "hull_known_value",
+                     "hull_resolution", "last_hull_note"):
             self.assertIn(f"{name}:", props)
+        self.assertIn('hull_known_value: FloatProperty(name="已知尺寸", default=20.0', props)
+        self.assertIn('default="HEIGHT"', props)
 
     def test_only_numpy_stdlib(self):
-        for name in ("sketch_model.py", "sketch_proxy.py"):
+        for name in ("sketch_model.py", "massing_hull.py", "massing.py"):
             src = (PKG / name).read_text(encoding="utf-8")
             for mod in ("PIL", "cv2", "scipy", "skimage", "trimesh"):
                 self.assertNotIn(f"import {mod}", src)

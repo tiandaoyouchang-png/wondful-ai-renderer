@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 草图模式).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -239,47 +239,76 @@ def main():
     draw("layers_failed")
     props.layered_output = False
     props.last_layers_note = ""
-    # 1.2.0 草图模式 (高级)
-    props.sketch_mode = True
-    draw("sketch_separate")
-    props.sketch_size_mode = "MANUAL"
-    props.last_sketch_note = "草模已生成：长 1.00 × 宽 0.62 × 高 0.80 m，41230 面，1.4s；俯视图是横放的，已按比例自动转正"
-    draw("sketch_manual_done")
-    props.sketch_input = "SHEET"
-    props.last_sketch_note = "草模生成失败：三视图拼图里只找到 1 个轮廓：请把正视 / 侧视 / 俯视分开排列"
-    draw("sketch_sheet_failed")
-    # the operator itself, headless: synthetic box views → proxy collection becomes the product collection
+    # 1.2.0 环境体块 (高级): no collection yet → hull builder creates 「环境体块」
+    props.massing_enabled = True
+    props.ui_show_massing_hull = True
+    draw("massing_none")
     import tempfile, os
     import numpy as np
     from wondful_ai_renderer import png_io
+    from wondful_ai_renderer import massing as MS
     tmp = tempfile.mkdtemp()
-    for name, (h, w) in {"front": (80, 120), "side": (80, 200), "top": (200, 120)}.items():
+    # a stepped tower: front 120w × 300h (narrower top), side 90w × 300h, top 120 × 90
+    for name, (h, w) in {"front": (300, 120), "side": (300, 90), "top": (90, 120)}.items():
         a = np.full((h + 40, w + 40, 4), 255, np.uint8)
         a[20:20 + h, 20:20 + w, :3] = 60
+        if name in ("front", "side"):
+            a[20:20 + h // 3, 20:20 + w // 4, :3] = 255           # set-back upper third
+            a[20:20 + h // 3, 20 + w - w // 4:20 + w, :3] = 255
         png_io.write_png(os.path.join(tmp, name + ".png"), a)
-        setattr(props, f"sketch_{name}_path", os.path.join(tmp, name + ".png"))
-    props.sketch_input = "SEPARATE"
-    props.sketch_size_mode = "AUTO"
-    props.sketch_known_axis = "LENGTH"
-    props.sketch_known_value = 2.0
-    props.sketch_resolution = 96
-    res = bpy.ops.wondful.sketch_build()
-    obj = bpy.data.objects.get("Wondful 草模")
-    if res != {"FINISHED"} or obj is None or props.product_collection is None \
-            or props.product_collection.name != "Wondful 草模":
-        problems.append(f"sketch_build failed: {res} {props.last_sketch_note}")
+        setattr(props, f"hull_{name}_path", os.path.join(tmp, name + ".png"))
+    product_before = props.product_collection
+    scene.cursor.location = (6.0, 4.0, 3.0)
+    props.hull_resolution = 64
+    res = bpy.ops.wondful.massing_hull_build()
+    coll = bpy.data.collections.get("环境体块")
+    obj = bpy.context.view_layer.objects.active
+    if res != {"FINISHED"} or coll is None or obj is None or obj.name not in coll.objects:
+        problems.append(f"massing_hull_build failed: {res} {props.last_hull_note}")
     else:
         dims = tuple(round(v, 2) for v in obj.dimensions)
-        print("sketch proxy dims", dims, props.last_sketch_note)
-        if abs(dims[1] - 2.0) > 0.08 or abs(dims[0] - 1.2) > 0.08 or abs(dims[2] - 0.8) > 0.08:
-            problems.append(f"sketch proxy dims off: {dims}")
-        obj.location.x = 3.0
-        bpy.ops.wondful.sketch_build()
-        if abs(bpy.data.objects["Wondful 草模"].location.x - 3.0) > 1e-6 or len(props.product_collection.objects) != 1:
-            problems.append("sketch rebuild did not keep the proxy transform / made a second object")
-    draw("sketch_built")
-    props.sketch_mode = False
-    props.last_sketch_note = ""
+        print("hull block", obj.name, dims, tuple(obj.location), props.last_hull_note)
+        if abs(dims[2] - 20.0) > 0.6 or abs(dims[0] - 8.0) > 0.6 or abs(dims[1] - 6.0) > 0.6:
+            problems.append(f"hull block dims off (want 8 × 6 × 20 m): {dims}")
+        if tuple(round(v, 3) for v in obj.location) != (6.0, 4.0, 0.0):
+            problems.append(f"hull block not at the cursor on the ground: {tuple(obj.location)}")
+        if len(MS.get_refs(obj)) != 3:
+            problems.append(f"hull block refs: {MS.get_refs(obj)}")
+        if props.product_collection != product_before:
+            problems.append("hull build changed the product collection")
+        if MS.find_collection(scene, props) != coll:
+            problems.append("new 环境体块 collection is not auto-detected as massing")
+        bpy.ops.wondful.massing_hull_build()
+        if len(coll.objects) != 2:
+            problems.append("second hull build did not add a second block")
+    draw("massing_hull_built")
+    # per-block refs: add to the active block through the operator (files), cap at 3, clear one
+    tower = bpy.data.objects.new("高楼", bpy.data.meshes.new("高楼"))
+    coll.objects.link(tower)
+    bpy.context.view_layer.objects.active = tower
+    files = [os.path.join(tmp, n + ".png") for n in ("front", "side", "top")]
+    extra = os.path.join(tmp, "extra.png")
+    png_io.write_png(extra, np.full((8, 8, 4), 200, np.uint8))
+    res = bpy.ops.wondful.block_ref_add(directory=tmp, files=[{"name": "front.png"}, {"name": "side.png"}])
+    res2 = bpy.ops.wondful.block_ref_add(directory=tmp, files=[{"name": "top.png"}, {"name": "extra.png"}])
+    if MS.get_refs(tower) != files:
+        problems.append(f"block_ref_add: {res} {res2} {MS.get_refs(tower)}")
+    draw("massing_block_refs")
+    bpy.ops.wondful.block_ref_clear(index=1)
+    if MS.get_refs(tower) != [files[0], files[2]]:
+        problems.append(f"block_ref_clear(index) wrong: {MS.get_refs(tower)}")
+    bpy.ops.wondful.block_ref_clear()
+    if MS.get_refs(tower) or MS.REF_PROP in tower.keys():
+        problems.append("block_ref_clear did not clear")
+    bpy.ops.wondful.block_select(name=coll.objects[0].name)
+    if bpy.context.view_layer.objects.active != coll.objects[0]:
+        problems.append("block_select did not select")
+    props.hull_input = "SHEET"
+    props.hull_size_mode = "MANUAL"
+    props.last_hull_note = "建筑体块生成失败：三视图拼图里只找到 1 个轮廓：请把正视 / 侧视 / 俯视分开排列"
+    draw("massing_hull_sheet_failed")
+    props.last_hull_note = ""
+    props.ui_show_massing_hull = False
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"

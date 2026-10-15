@@ -372,7 +372,7 @@ def _draw_progress_bar(layout, props, text):
 
 
 def _draw_massing(adv, context, props, busy):
-    """高级 › 环境体块 (1.2.0): pick / auto-detect the context-block collection."""
+    """高级 › 环境体块 (1.2.0): context-block collection, per-block 建筑参考, blocks from three views."""
     box = adv.box()
     box.prop(props, "massing_enabled", text="环境体块", icon="MESH_CUBE")
     if not getattr(props, "massing_enabled", True):
@@ -380,16 +380,17 @@ def _draw_massing(adv, context, props, busy):
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "massing_collection", text="集合")
-    coll = None
+    coll, blocks = None, []
     try:
-        from .massing import find_collection
-        coll = find_collection(context.scene, props)
+        from . import massing as MS
+        coll = MS.find_collection(context.scene, props)
+        if coll is not None:
+            blocks = MS.block_roots(MS.massing_objects(coll, getattr(props, "product_collection", None)))
     except Exception:
-        coll = None
+        coll, blocks = None, []
     if coll is not None:
-        n = sum(1 for o in coll.all_objects if getattr(o, "type", "") == "MESH" and not o.hide_render)
         how = "已选择" if getattr(props, "massing_collection", None) else "自动识别"
-        box.label(text=f"{how}：{coll.name} · {n} 个体块", icon="CHECKMARK")
+        box.label(text=f"{how}：{coll.name} · {len(blocks)} 个体块", icon="CHECKMARK")
         box.label(text="白模里显示为灰蓝色，AI 画成真实建筑；产品保持锁定", icon="INFO")
     elif getattr(props, "massing_collection", None) is not None:
         box.label(text="该集合与产品集合重叠，已忽略", icon="ERROR")
@@ -397,6 +398,92 @@ def _draw_massing(adv, context, props, busy):
         box.label(text="未找到：集合名含 环境 / 体块 / Context / Massing 即自动识别", icon="INFO")
     if getattr(props, "last_massing_note", ""):
         box.label(text=props.last_massing_note[:60], icon="BLANK1")
+    if coll is not None:
+        _draw_block_refs(box, context, props, busy, blocks)
+    _draw_massing_hull(box, props, busy)
+
+
+def _draw_block_refs(box, context, props, busy, blocks):
+    """建筑参考: the active block's 1–3 reference images, then every block with its ref count."""
+    from . import massing as MS
+    refs_box = box.box()
+    refs_box.label(text="建筑参考（真实建筑照片 / 效果图 / 概念草图）", icon="IMAGE_REFERENCE")
+    active = getattr(context, "active_object", None)
+    root = MS.block_root(active, blocks)
+    col = refs_box.column()
+    col.enabled = not busy
+    if root is None:
+        col.label(text="选中一个体块后可添加 1–3 张参考图", icon="INFO")
+    else:
+        refs = MS.get_refs(root)
+        col.label(text=f"当前体块：{root.name} · {len(refs)}/{MS.MAX_BLOCK_REFS} 张", icon="OBJECT_DATA")
+        for index, path in enumerate(refs):
+            line = col.row(align=True)
+            missing = not Path(bpy.path.abspath(path)).is_file()
+            line.label(text=Path(path).name[:40], icon="ERROR" if missing else "FILE_IMAGE")
+            op = line.operator("wondful.block_ref_clear", text="", icon="X")
+            op.index = index
+        actions = col.row(align=True)
+        add = actions.row(align=True)
+        add.enabled = len(refs) < MS.MAX_BLOCK_REFS
+        add.operator("wondful.block_ref_add", text="添加参考图", icon="ADD")
+        clear = actions.row(align=True)
+        clear.enabled = bool(refs)
+        clear.operator("wondful.block_ref_clear", text="清空", icon="TRASH").index = -1
+    if blocks:
+        lst = refs_box.column(align=True)
+        for obj in blocks[:8]:
+            n = len(MS.get_refs(obj))
+            op = lst.operator("wondful.block_select", text=f"{obj.name} · {n} 张参考" if n else f"{obj.name} · 无参考",
+                              icon="IMAGE_REFERENCE" if n else "MESH_CUBE", emboss=(obj == root))
+            op.name = obj.name
+        if len(blocks) > 8:
+            lst.label(text=f"… 另有 {len(blocks) - 8} 个体块", icon="BLANK1")
+    refs_box.label(text=f"每次生图最多带 {MS.MAX_BUILDING_IMAGES} 张，画面里大的体块优先", icon="BLANK1")
+
+
+def _draw_massing_hull(box, props, busy):
+    """从三视图生成建筑体块: visual hull of a building into the massing collection."""
+    sub = box.box()
+    if not _disclosure(sub.row(align=True), props, "ui_show_massing_hull", "从三视图生成建筑体块", icon="HOME"):
+        return
+    col = sub.column()
+    col.enabled = not busy
+    col.label(text="建筑立面 / 侧面 / 平面轮廓 → 灰蓝体块，三视图自动作为它的参考", icon="INFO")
+    col.row(align=True).prop(props, "hull_input", expand=True)
+    if getattr(props, "hull_input", "SEPARATE") == "SHEET":
+        col.prop(props, "hull_sheet_path", text="拼图")
+        col.label(text="三个视图之间要留白；拆不开时请改用分开的图", icon="BLANK1")
+    else:
+        col.prop(props, "hull_front_path", text="正视")
+        col.prop(props, "hull_side_path", text="侧视")
+        col.prop(props, "hull_top_path", text="俯视")
+        col.label(text="白底或透明底 JPG / PNG；俯视图可不填", icon="BLANK1")
+    row = col.row(align=True)
+    row.label(text="侧视")
+    row.prop(props, "hull_side_front", text="")
+    row.label(text="俯视")
+    row.prop(props, "hull_top_front", text="")
+    col.row(align=True).prop(props, "hull_size_mode", expand=True)
+    if getattr(props, "hull_size_mode", "AUTO") == "MANUAL":
+        dims = col.row(align=True)
+        dims.prop(props, "hull_width", text="宽")
+        dims.prop(props, "hull_length", text="长")
+        dims.prop(props, "hull_height", text="高")
+    else:
+        known = col.row(align=True)
+        known.prop(props, "hull_known_axis", text="")
+        known.prop(props, "hull_known_value", text="")
+    col.prop(props, "hull_resolution", text="精度")
+    build = col.row(align=True)
+    build.scale_y = 1.2
+    build.operator("wondful.massing_hull_build", text="从三视图生成建筑体块", icon="MOD_BUILD")
+    note = getattr(props, "last_hull_note", "")
+    if note:
+        for index, line in enumerate(wrap(note, width=44)[:3]):
+            col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
+    else:
+        col.label(text="放在 3D 游标处、落在地面上，正立面朝 -Y", icon="BLANK1")
 
 
 def _draw_terrain(layout, props):
@@ -759,7 +846,6 @@ class WONDFUL_PT_main(Panel):
                              else ("ERROR" if index == 0 else "BLANK1"))
 
         _draw_massing(adv, context, props, busy)
-        _draw_sketch(adv, props, busy)
 
         lock_box = adv.box()
         if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):
@@ -809,52 +895,6 @@ class WONDFUL_PT_main(Panel):
         tools = adv.row(align=True)
         tools.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
         tools.operator("preferences.addon_show", text="插件偏好设置").module = __package__
-
-
-def _draw_sketch(adv, props, busy):
-    """高级 › 草图模式: rough proxy from three-view images (concept mode)."""
-    box = adv.box()
-    box.prop(props, "sketch_mode", text="草图模式（概念图）", icon="GREASEPENCIL")
-    if not getattr(props, "sketch_mode", False):
-        return
-    col = box.column()
-    col.enabled = not busy
-    col.label(text="没有 3D 模型时用：三视图生成粗略草模代替产品", icon="INFO")
-    col.label(text="细节、材质、颜色、Logo 由 AI 按三视图补全，轮廓不严格锁定", icon="BLANK1")
-    col.row(align=True).prop(props, "sketch_input", expand=True)
-    if getattr(props, "sketch_input", "SEPARATE") == "SHEET":
-        col.prop(props, "sketch_sheet_path", text="拼图")
-        col.label(text="三个视图之间要留白；拆不开时请改用分开的图", icon="BLANK1")
-    else:
-        col.prop(props, "sketch_front_path", text="正视")
-        col.prop(props, "sketch_side_path", text="侧视")
-        col.prop(props, "sketch_top_path", text="俯视")
-        col.label(text="白底或透明底 JPG / PNG；俯视图可不填", icon="BLANK1")
-    row = col.row(align=True)
-    row.label(text="侧视")
-    row.prop(props, "sketch_side_front", text="")
-    row.label(text="俯视")
-    row.prop(props, "sketch_top_front", text="")
-    col.row(align=True).prop(props, "sketch_size_mode", expand=True)
-    if getattr(props, "sketch_size_mode", "AUTO") == "MANUAL":
-        dims = col.row(align=True)
-        dims.prop(props, "sketch_length", text="长")
-        dims.prop(props, "sketch_width", text="宽")
-        dims.prop(props, "sketch_height", text="高")
-    else:
-        known = col.row(align=True)
-        known.prop(props, "sketch_known_axis", text="")
-        known.prop(props, "sketch_known_value", text="")
-    col.prop(props, "sketch_resolution", text="精度")
-    build = col.row(align=True)
-    build.scale_y = 1.2
-    build.operator("wondful.sketch_build", text="从三视图生成草模", icon="MESH_MONKEY")
-    note = getattr(props, "last_sketch_note", "")
-    if note:
-        for index, line in enumerate(wrap(note, width=44)[:3]):
-            col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
-    else:
-        col.label(text="生成后移动 / 旋转草模、摆好相机，再照常生成", icon="BLANK1")
 
 
 def _supports_placeholder():

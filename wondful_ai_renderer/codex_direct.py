@@ -48,16 +48,16 @@ INSTRUCTIONS = (
     "The first input image is the canvas: keep its framing, camera, product geometry, position, scale, "
     "perspective and silhouette. Later input images are references only. Do not use any other tool."
 )
-# 1.2.0 草图模式: the clay product is a rough visual hull built from the user's three-view images.
-SKETCH_INSTRUCTIONS = (
+# 1.2.0 环境体块 › 建筑参考: later images are style references for the grey-blue blocks only.
+BUILDING_INSTRUCTIONS = (
     "Use the image_generation tool exactly once to EDIT the first input image and return one PNG. "
-    "The first input image is the canvas: keep its framing, camera, horizon and the product's position, "
-    "orientation, scale and perspective. The gray product in it is only a rough proxy built from the "
-    "product's three-view drawings (the later input images): take the product's exact shape details, "
-    "materials, colours and logos from those three views and correct the proxy's blocky faces and gaps. "
-    "Never copy the three views' layout, background or lighting into the result. Do not use any other tool."
+    "The first input image is the canvas: keep its framing, camera, horizon, product geometry, position, scale, "
+    "perspective, silhouette and colours exactly. Later input images are architecture references for the "
+    "grey-blue context blocks only, as the text maps them: use their building style, facade, materials and windows "
+    "on the matching block while keeping the block's position, height, outline and perspective. Never copy a "
+    "reference's camera, composition, sky, vehicles or other objects, and never let it move, resize or restyle "
+    "the product. Do not use any other tool."
 )
-SKETCH_REF_LIMIT = 3
 
 ROLE_LABELS = {
     "camera": "Blender 相机白模底图（构图 / 几何的唯一权威）",
@@ -65,6 +65,7 @@ ROLE_LABELS = {
     "product": "产品三视图（只看产品造型与身份细节，不取其打光和背景）",
     "person": "人物参考（只看人物身份）",
     "environment": "环境参考图（决定环境、光线方向、色温与氛围）",
+    "building": "环境体块的建筑参考图（只管对应体块的建筑风格，不影响产品和构图）",
     "appearance": "外观参考图集（格内标签见图上 R 编号）",
     "control_bundle": "参考图集（格内标签见图上 R 编号）",
 }
@@ -565,35 +566,27 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
 
 
 def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
-                        massing_text="", sketch_views=None):
+                        massing_text="", building_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
     (``env_text``), so its camera and layout can never pull the composition.
     ``vehicle`` picks car wording (车身、车轮、车漆、车牌); anything else gets
     generic product wording with the same product-lock rules.
-    ``massing_text`` (1.2.0 环境体块) describes the grey-blue context blocks of the clay base.
+    ``massing_text`` (1.2.0 环境体块) describes the grey-blue context blocks of the clay base;
+    ``building_text`` maps the attached 建筑参考 images (图 2…) to their blocks.
     """
     from .product_kind import words
     w = words(bool(vehicle))
     scene = (brief or "").strip()
     env_text = (env_text or "").strip()
     subj = w["subj"]
-    sketch_views = [str(v) for v in (sketch_views or []) if str(v).strip()]
-    if sketch_views:
-        views = "、".join(f"图 {i}：{label}" for i, label in enumerate(sketch_views, start=2))
-        lines = [f"把图 1（Blender 白模渲染图）直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
-        lines.append(f"后面的图是这件{subj}的三视图（{views}），只用来确定{subj}的外形细节、材质、颜色和 Logo，"
-                     "不要把三视图的背景、排版、分格、文字或打光画进结果。")
-        lines.append(f"白模是根据三视图生成的粗略外形，保持位置、朝向、大小和透视；外形细节、材质、颜色、Logo 以三视图为准，"
-                     f"可修正粗模的块面和缺口（补出镂空、圆角、凹槽、细小部件，去掉三视图里没有的多余体块），"
-                     f"但{subj}在画面中占据的范围、朝向和接地位置基本不变；"
-                     "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
-    else:
-        lines = [f"把这张 Blender 白模渲染图直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
-        lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
-                     "不增减、不改形任何部件，不重新设计造型；"
-                     "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
+    building_text = (building_text or "").strip() if (massing_text or "").strip() else ""
+    canvas = "图 1（Blender 白模渲染图）" if building_text else "这张 Blender 白模渲染图"
+    lines = [f"把{canvas}直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
+    lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
+                 "不增减、不改形任何部件，不重新设计造型；"
+                 "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
     lines.append(f"地面的坡度、倾斜方向、起伏以及与{w['contact']}的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；"
                  f"山头/坡顶时{subj}停在山的最高处，四周地面向下掉落，{subj}后方不出现更高的地面，远处只露出低于{subj}的远山、天空或城市），"
                  f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
@@ -602,6 +595,8 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     massing_text = (massing_text or "").strip()
     if massing_text:
         lines.append(massing_text)
+    if building_text:
+        lines.append(building_text)
     if vehicle:
         lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成建筑 / 结构，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
@@ -612,25 +607,21 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
                      "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
                      "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
                      "木材有木纹，金属有清晰高光和环境倒影，塑料和涂层有对应的光泽），明暗过渡自然；不要平涂、不要塑料感或玩具模型感。")
-    if sketch_views:  # the clay proxy has no colour: colour / material come from the three views
-        lines = [ln.replace("车漆保持原本的颜色色相（固有色），明暗随新环境光变化。", "车漆颜色和材质以三视图为准，明暗随新环境光变化。")
-                   .replace("产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。",
-                            "产品各部分的颜色、材质类别以三视图为准，明暗随新环境光变化。")
-                 for ln in lines]
     if env_text and not vehicle:
         # a cached / hand-written description may still carry a car paragraph: drop it
         env_text = "\n".join(p for p in env_text.splitlines() if not p.strip().startswith("车身质感")).strip()
     if env_text:
         lines.append("目标环境（来自环境参考图的文字描述，只用于环境、地面、天气、光线方向、色温和氛围）：" + env_text)
         tag = next((t for t in ("车身质感", "表面质感") if t in env_text), "")
-        src = "白模（位置、朝向、大小）和三视图（造型细节、颜色、Logo）" if sketch_views else "白模原图"
+        src = "白模原图"
         if tag and vehicle:
             lines.append(f"描述里的「{tag}」只用来决定我们这台车的漆面光泽、反射、高光和明暗方式：车型、比例、颜色色相、"
                          f"车门状态、灯组、Logo 和车牌全部以{src}为准，不要照搬参考图里的车。")
         elif tag:
             lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
                          f"部件和 Logo 全部以{src}为准，不要照搬参考图里的任何物体。")
-        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + ("和灰蓝色体块对应的建筑 / 结构（它们的风格和材质也按描述来）"
+        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + (("和灰蓝色体块对应的建筑 / 结构（有建筑参考图的体块按各自参考图，其余按描述来）" if building_text
+                                                          else "和灰蓝色体块对应的建筑 / 结构（它们的风格和材质也按描述来）")
                                                          if massing_text else "")
                      + "，不额外添加" + ("其他" if massing_text else "") + "建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
                      "光线方向、太阳高度、色温和反差与描述一致，不要做得比描述更戏剧化。")
@@ -967,15 +958,16 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False, massing_text="", sketch_refs=None):
+               exact_prompt=False, massing_text="", building_refs=None):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
     short scene prompt, like a hand-made edit on the clay render.
     ``exact_prompt`` sends ``prompt`` verbatim (used by the 分层输出 clean plate).
-    ``sketch_refs`` = [(path, label)] (草图模式, simple path only): the three-view images
-    are attached after the clay canvas as product appearance references; environment
-    references are still read as text only.
+    ``building_refs`` (1.2.0 环境体块 › 建筑参考, simple path with massing only): the
+    ``massing.select_building_refs`` selection; each image is attached after the clay canvas
+    (图 2…) and the prompt maps it to its grey-blue block.  Environment references are still
+    read as text only.
     """
     started = time.time()
     if not edit_base_path or not Path(edit_base_path).is_file():
@@ -988,6 +980,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         auth = refresh_auth(auth, auth_path)
     chain = model_chain(model, available_models(auth, auth_path, client_version))
     simple = simple_brief is not None and not repair
+    attached_refs = []
     if simple:
         images = [(str(Path(edit_base_path).resolve()), "camera", "白模底图")]
         labels = _labels_from_manifest(manifest)
@@ -1001,16 +994,18 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
             else:
                 dropped.append((rp, "simple"))
         # Environment refs are read as text only; the image model sees just the clay canvas
-        # (plus, in 草图模式, the three-view images that define the product).
+        # (plus the 建筑参考 images of grey-blue blocks, each mapped to its block in the text).
         env_paths = env
-        for sp, slabel in list(sketch_refs or [])[:SKETCH_REF_LIMIT]:
-            if sp and Path(sp).is_file() and len(images) < MAX_EDIT_IMAGES:
-                images.append((str(Path(sp).resolve()), "product", f"产品三视图 · {slabel}"))
+        if (massing_text or "").strip():
+            for ref in list(building_refs or []):
+                bp = str(ref.get("path") or "")
+                if bp and Path(bp).is_file() and len(images) < MAX_EDIT_IMAGES and len(attached_refs) < 4:
+                    images.append((str(Path(bp).resolve()), "building", f"建筑参考 · 体块 {ref.get('block')}"))
+                    attached_refs.append(ref)
     else:
         images, dropped = select_images(edit_base_path, reference_paths, manifest, repair=repair)
     if not simple:
         env_paths = []
-    sketch_labels = [label.split(" · ", 1)[-1] for _p, role, label in images[1:] if role == "product"] if simple else []
     log_root = Path(log_dir or Path(output_path).parent)
     mask, mask_note = prepare_mask(mask_path, _png_size(images[0][0]), log_root)
     env_text, env_note = "", ""
@@ -1028,7 +1023,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         text = prompt  # 1.2.0 分层输出: the clean-plate edit sends its own complete instruction
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
-                                   vehicle=bool(vehicle), massing_text=massing_text, sketch_views=sketch_labels)
+                                   vehicle=bool(vehicle), massing_text=massing_text,
+                                   building_text=_building_text(attached_refs, vehicle))
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -1037,7 +1033,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
            "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note,
-           "sketch_views": sketch_labels}
+           "building_refs": [{"block": r.get("block"), "file": Path(str(r.get("path"))).name} for r in attached_refs]}
     model_used = chain[0]
     log["model_chain"] = chain[:6]
     variants = [dict(compat=False, model=m) for m in chain[:6]]
@@ -1051,7 +1047,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         while index < len(variants):
             opts = variants[index]
             payload, summary = build_payload(text, images, size=size, mask_path=mask, model=opts["model"], compat=opts["compat"],
-                                             instructions=SKETCH_INSTRUCTIONS if sketch_labels and not exact_prompt else "")
+                                             instructions=BUILDING_INSTRUCTIONS if attached_refs and not exact_prompt else "")
             headers = auth_headers(auth, client_version)
             log["images"] = summary
             log["payload"] = redact_payload(payload)
@@ -1113,7 +1109,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         "mask": bool(mask),
         "mask_note": mask_note,
         "simple": simple,
-        "sketch_views": sketch_labels,
+        "building_refs": [int(r.get("block") or 0) for r in attached_refs],
         "size_requested": size,
         "size_returned": list(image_dimensions(target) or []),
         "model": log["attempts"][-1]["model"] if log["attempts"] else model_used,
@@ -1124,6 +1120,32 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     }
 
 
+def _building_text(refs, vehicle=False) -> str:
+    if not refs:
+        return ""
+    from .massing import building_ref_text
+    return building_ref_text(refs, first_index=2, vehicle=bool(vehicle))
+
+
+def fallback_with_building_refs(kwargs, building_refs, vehicle=False, limit=4):
+    """codex exec fallback: 建筑参考 images go along as ordinary refs, with the same mapping text
+    (images named by file name, since the agent does not number them after the canvas)."""
+    refs = [r for r in list(building_refs or []) if r.get("path") and Path(str(r["path"])).is_file()][:limit]
+    if not refs:
+        return kwargs
+    from .massing import building_ref_text
+    out = dict(kwargs)
+    paths = list(out.get("reference_paths") or [])
+    for r in refs:
+        if str(r["path"]) not in paths:
+            paths.append(str(r["path"]))
+    out["reference_paths"] = paths
+    names = [Path(str(r["path"])).name for r in refs]
+    out["prompt"] = (str(out.get("prompt") or "").rstrip() + "\n\n"
+                     + building_ref_text(refs, vehicle=bool(vehicle), names=names))
+    return out
+
+
 def short_reason(exc) -> str:
     text = str(exc)
     return text if len(text) <= 60 else text[:58] + "…"
@@ -1131,7 +1153,8 @@ def short_reason(exc) -> str:
 
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
-                           simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text="", sketch_refs=None):
+                           simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text="",
+                           building_refs=None):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1163,7 +1186,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 terrain_text=terrain_text if use_simple else "",
                 vehicle=bool(vehicle),
                 massing_text=massing_text if use_simple else "",
-                sketch_refs=sketch_refs if use_simple else None,
+                building_refs=building_refs if use_simple else None,
             )
             state["direct_ok"] += 1
             return result
@@ -1189,6 +1212,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
             state["last_reason"] = reason
             print(f"[Wondful] Codex 直连图像编辑异常，改用 codex exec：{reason}")
     state["fallbacks"] += 1
+    kwargs = fallback_with_building_refs(kwargs, building_refs, vehicle=bool(vehicle))
     result = fallback(**kwargs)
     if isinstance(result, dict):
         result = dict(result)
