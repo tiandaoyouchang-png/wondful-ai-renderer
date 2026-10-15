@@ -32,7 +32,9 @@ from urllib import request as urlrequest
 DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_REFRESH_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-6.1-sol"
+# Tried in order when the account rejects a model (HTTP 400 "not supported").
+FALLBACK_MODELS = ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra")
 IMAGE_MODEL = "gpt-image-2"
 ORIGINATOR = "codex_cli_rs"
 MAX_EDIT_IMAGES = 5
@@ -922,8 +924,9 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note}
     model_used = (model or "").strip() or DEFAULT_MODEL
     variants = [dict(compat=False, model=model_used)]
-    if model_used != DEFAULT_MODEL:
-        variants.append(dict(compat=False, model=DEFAULT_MODEL))
+    for fallback_model in (DEFAULT_MODEL,) + tuple(FALLBACK_MODELS):
+        if all(v["model"] != fallback_model for v in variants):
+            variants.append(dict(compat=False, model=fallback_model))
     variants.append(dict(compat=True, model=DEFAULT_MODEL))
     refreshed = False
     rate_waits = 0
