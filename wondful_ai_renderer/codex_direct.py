@@ -930,11 +930,13 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
-               cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False):
+               cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
+               exact_prompt=False):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
     short scene prompt, like a hand-made edit on the clay render.
+    ``exact_prompt`` sends ``prompt`` verbatim (used by the 分层输出 clean plate).
     """
     started = time.time()
     if not edit_base_path or not Path(edit_base_path).is_file():
@@ -978,7 +980,9 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
             if exc.kind == "cancelled":
                 raise
             env_note = "环境描述失败：" + str(exc)[:160]
-    if simple:
+    if exact_prompt:
+        text = prompt  # 1.2.0 分层输出: the clean-plate edit sends its own complete instruction
+    elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
                                    vehicle=bool(vehicle))
     else:

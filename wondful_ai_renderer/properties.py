@@ -697,6 +697,24 @@ class WONDFUL_AISettings(PropertyGroup):
         description="上次渲染实际使用的生图通道（直连图像编辑 / Codex 代理生成）",
         default="",
     )
+    layered_output: BoolProperty(
+        name="分层输出",
+        description="生成后在结果图旁另存分层文件：主体（透明 PNG）、投影、可选干净背景，以及 PSD",
+        default=False,
+    )
+    layered_mode: EnumProperty(
+        name="分层方式",
+        items=[
+            ("SHADOW", "主体 + 投影", "不额外调用模型：按 Blender 产品遮罩抠出主体，从成片估算地面投影，几秒完成"),
+            ("FULL", "完整（含干净背景）", "额外调用一次图像编辑生成去掉产品的干净背景（每张约多 30–50 秒），投影更准"),
+        ],
+        default="SHADOW",
+    )
+    last_layers_note: StringProperty(
+        name="分层输出状态",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     last_canvas_fit: BoolProperty(
         name="比例已适配",
         description="结果已按比例缩放并留边到白模画布，未裁切、未拉伸",

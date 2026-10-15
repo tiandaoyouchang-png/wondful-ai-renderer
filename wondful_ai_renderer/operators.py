@@ -476,6 +476,42 @@ def _replace_product_reference(props, filepath):
     return item
 
 
+_LAYER_SCENES = set()
+_LAYER_BATCH = []
+
+
+def _poll_layers():
+    """Main-thread timer: copy finished 分层输出 jobs into the panel note."""
+    from . import layered_output
+    try:
+        results = layered_output.RUNNER.drain()
+        if results:
+            _LAYER_BATCH.extend(results)
+            note = layered_output.summarize(_LAYER_BATCH)
+            if layered_output.RUNNER.pending > 0:
+                note += f"；还有 {layered_output.RUNNER.pending} 张处理中"
+            for name in list(_LAYER_SCENES):
+                scene = bpy.data.scenes.get(name)
+                if scene is not None:
+                    scene.wondful_ai.last_layers_note = note
+            for window in getattr(bpy.context.window_manager, "windows", []):
+                for area in window.screen.areas:
+                    if area.type == "VIEW_3D":
+                        area.tag_redraw()
+    except Exception as exc:
+        print(f"[Wondful] 分层输出状态更新失败：{exc}")
+    if layered_output.RUNNER.pending > 0:
+        return 0.5
+    _LAYER_SCENES.clear()
+    return None
+
+
+def _watch_layers(scene_name):
+    _LAYER_SCENES.add(scene_name)
+    if not bpy.app.timers.is_registered(_poll_layers):
+        bpy.app.timers.register(_poll_layers, first_interval=0.5)
+
+
 class _BaseAsyncOperator(Operator):
     _timer = None
     _thread = None
@@ -1709,6 +1745,56 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             score = -1
         return bool(canvas.get("matches") or canvas.get("fit_compatible")), score
 
+    def _layers_spec(self, context, props, prefs, provider):
+        """1.2.0 分层输出 settings for this run, or None. Never raises."""
+        try:
+            if not bool(getattr(props, "layered_output", False)):
+                return None
+            if getattr(props, "product_collection", None) is None:
+                props.last_layers_note = "分层输出需要先在 ② 选择产品集合，本次已跳过"
+                return None
+            from .product_kind import is_vehicle
+            try:
+                vehicle = bool(is_vehicle(props))
+            except Exception:
+                vehicle = False
+            props.last_layers_note = ""
+            _LAYER_BATCH.clear()
+            return {
+                "mask": str(Path(self._session.viewport_reference).parent / "01_product_mask.png"),
+                "mode": "FULL" if getattr(props, "layered_mode", "SHADOW") == "FULL" else "SHADOW",
+                "model": str(getattr(prefs, "codex_model", "") or ""),
+                "client_version": str(getattr(props, "codex_cli_version", "") or ""),
+                "work_dir": str(self._session.directory),
+                "vehicle": vehicle,
+                "long_edge": int(getattr(prefs, "long_edge", 2048) or 2048),
+                "scene": context.scene.name,
+            }
+        except Exception as exc:
+            print(f"[Wondful] 分层输出设置失败：{exc}")
+            return None
+
+    def _submit_layers(self, props, exported) -> None:
+        """Queue the layer split of one exported image; failures only leave a panel note."""
+        spec = getattr(self, "_layers", None)
+        if not spec:
+            return
+        try:
+            from . import layered_output
+            if not Path(spec["mask"]).is_file():
+                raise RuntimeError("产品遮罩未生成")
+            plate_fn = None
+            if spec["mode"] == "FULL":
+                plate_fn = layered_output.make_plate_fn(
+                    model=spec["model"], client_version=spec["client_version"], log_dir=spec["work_dir"],
+                    vehicle=spec["vehicle"], long_edge=min(2048, max(1024, spec["long_edge"])))
+            layered_output.RUNNER.submit(exported, spec["mask"], spec["mode"], plate_fn, work_dir=spec["work_dir"])
+            _watch_layers(spec["scene"])
+            props.last_layers_note = "分层输出处理中…" + ("（含干净背景，约 30–50 秒）" if plate_fn else "")
+        except Exception as exc:
+            print(f"[Wondful] 分层输出未启动：{exc}")
+            props.last_layers_note = f"分层输出失败：{exc}"
+
     def _drain_completed_variants(self, props) -> None:
         """Aspect-fit and export every finished variant as soon as it is available."""
         queue = getattr(self, "_completed_variants", None)
@@ -1755,6 +1841,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 )
                 self._exported_by_variant[variant_index] = Path(exported)
                 self._exported_variant_records[variant_index] = variant
+                self._submit_layers(props, Path(exported))
             except Exception as exc:
                 self._export_errors.append(str(exc))
 
@@ -1988,6 +2075,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         # image_generation tool; any failure falls back to the codex exec agent.
         self._direct_state = None
         props.last_engine_note = ""
+        self._layers = self._layers_spec(context, props, prefs, provider)
         if provider["id"] == "codex" and bool(getattr(prefs, "codex_direct_edit", True)):
             from . import codex_direct
             from .cli_transport import is_cancellation_requested as _cancel_requested
@@ -2015,7 +2103,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     if render_clay_base(context, clay_path, getattr(props, "product_collection", None),
                                         ground=getattr(props, "clay_ground", "AUTO"),
                                         crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
-                                        terrain=settings_from_props(props)):
+                                        terrain=settings_from_props(props),
+                                        mask_path=(self._layers or {}).get("mask", "")):
                         direct_simple_base = clay_path
                         direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
                         direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
@@ -2037,6 +2126,15 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
                     terrain_text=direct_terrain_text, vehicle=direct_vehicle,
                 )
+        if self._layers and not Path(self._layers["mask"]).is_file():
+            try:
+                from .viewport_capture import render_product_mask
+                if not render_product_mask(context, self._layers["mask"], getattr(props, "product_collection", None)):
+                    raise RuntimeError("产品遮罩未生成")
+            except Exception as exc:
+                print(f"[Wondful] 分层输出：产品遮罩渲染失败：{exc}")
+                props.last_layers_note = f"分层输出失败：产品遮罩渲染失败（{exc}）"
+                self._layers = None
         provider_cli_path = provider["cli_path"]
         provider_model = provider["model"]
         provider_id = provider["id"]

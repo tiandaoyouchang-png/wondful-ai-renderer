@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -229,6 +229,16 @@ def main():
     prefs.codex_direct_edit = False
     draw("result_direct_off")
     prefs.codex_direct_edit = True
+    # 1.2.0 分层输出 (高级)
+    props.layered_output = True
+    draw("layers_shadow")
+    props.layered_mode = "FULL"
+    props.last_layers_note = "分层输出完成 2 张（主体 + 投影 + 背景，PSD + PNG），用时 41s"
+    draw("layers_full_done")
+    props.last_layers_note = "分层输出失败：产品遮罩未生成"
+    draw("layers_failed")
+    props.layered_output = False
+    props.last_layers_note = ""
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"

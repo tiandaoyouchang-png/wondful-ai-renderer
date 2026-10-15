@@ -629,6 +629,9 @@ class WONDFUL_PT_main(Panel):
                 fell_back = "改用" in engine_note
                 for index, line in enumerate(wrap(engine_note, width=42)[:2]):
                     result.label(text=line, icon=("ERROR" if fell_back else "CHECKMARK") if index == 0 else "BLANK1")
+            layers_note = getattr(props, "last_layers_note", "")
+            if layers_note:
+                result.label(text=_short(layers_note, 42), icon="ERROR" if "失败" in layers_note else "RENDERLAYERS")
             again = result.row(align=True)
             again.scale_y = 1.4
             again.enabled = not busy
@@ -708,6 +711,24 @@ class WONDFUL_PT_main(Panel):
             flow.label(text=f"相机：{camera.name} · {camera_w} × {camera_h}", icon="CAMERA_DATA")
         if not prefs.structure_guides_enabled:
             flow.label(text="结构控制图已在偏好设置中关闭", icon="ERROR")
+
+        layers = adv.box()
+        layers.prop(props, "layered_output", text="分层输出", icon="RENDERLAYERS")
+        if getattr(props, "layered_output", False):
+            mode_row = layers.row(align=True)
+            mode_row.enabled = not busy
+            mode_row.prop(props, "layered_mode", expand=True)
+            if getattr(props, "layered_mode", "SHADOW") == "FULL":
+                layers.label(text="额外调用一次图像编辑生成干净背景，每张约多 30–50 秒", icon="TIME")
+            else:
+                layers.label(text="不额外调用模型：主体抠图 + 估算投影，几秒完成", icon="INFO")
+            layers.label(text="存到结果图旁：主体 / 投影 / 背景 PNG + PSD", icon="FILE_IMAGE")
+            if not getattr(props, "product_collection", None):
+                layers.label(text="需要先在 ② 选择产品集合", icon="ERROR")
+        if getattr(props, "last_layers_note", ""):
+            for index, line in enumerate(wrap(props.last_layers_note, width=44)[:2]):
+                layers.label(text=line, icon="CHECKMARK" if index == 0 and "失败" not in props.last_layers_note
+                             else ("ERROR" if index == 0 else "BLANK1"))
 
         lock_box = adv.box()
         if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):

@@ -723,8 +723,102 @@ def _custom_terrain(context, collection, settings, created, restore):
     return mesh, info
 
 
+_GEOMETRY_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES", "POINTCLOUD", "VOLUME",
+                   "GPENCIL", "GREASEPENCIL"}
+
+
+def _render_mask_now(context, filepath: str, collection) -> bool:
+    """Render only the product collection, opaque, on a transparent film: its alpha is the
+    product silhouette from the scene camera (1.2.0 分层输出). Caller restores render settings
+    it already snapshots; this restores what it changes itself."""
+    scene = context.scene
+    render = scene.render
+    product = set(collection.all_objects) if collection is not None else set()
+    if not product:
+        return False
+    hidden = []
+    view_layer = context.view_layer
+    old_override = view_layer.material_override
+    old_engine = render.engine
+    old_film = getattr(render, "film_transparent", False)
+    old_path = render.filepath
+    old_mode = render.image_settings.color_mode
+    cycles = getattr(scene, "cycles", None)
+    old_cycles = (cycles.samples, cycles.use_denoising, cycles.max_bounces) if cycles is not None else None
+    mat = bpy.data.materials.new("_wondful_mask_mat")
+    try:
+        for obj in scene.objects:
+            if obj.type in _GEOMETRY_TYPES and obj not in product and not obj.hide_render:
+                obj.hide_render = True
+                hidden.append(obj)
+        view_layer.material_override = mat  # glass and alpha-blended parts count as solid
+        render.film_transparent = True
+        render.filepath = filepath
+        _set_png(render.image_settings)
+        render.image_settings.color_mode = "RGBA"
+        # Workbench is instant with a GPU context; background Blender may have none (no EGL)
+        # and aborts instead of raising, so it goes straight to Cycles with camera rays only.
+        engines = [os.environ.get("WONDFUL_MASK_ENGINE", "").strip().upper()]
+        engines += ["CYCLES"] if bpy.app.background else ["BLENDER_WORKBENCH", "CYCLES"]
+        for engine in [e for e in engines if e]:
+            try:
+                render.engine = engine
+                if engine == "CYCLES" and cycles is not None:
+                    cycles.samples = 8
+                    cycles.use_denoising = False
+                    cycles.max_bounces = 0
+                bpy.ops.render.render(write_still=True)
+                if Path(filepath).exists():
+                    return True
+            except Exception as exc:
+                print(f"[Wondful] 产品遮罩用 {engine} 渲染失败：{exc}")
+        return False
+    finally:
+        for obj in hidden:
+            try:
+                obj.hide_render = False
+            except Exception:
+                pass
+        view_layer.material_override = old_override
+        try:
+            bpy.data.materials.remove(mat)
+        except Exception:
+            pass
+        render.engine = old_engine
+        if hasattr(render, "film_transparent"):
+            render.film_transparent = old_film
+        render.filepath = old_path
+        try:
+            render.image_settings.color_mode = old_mode
+        except Exception:
+            pass
+        if old_cycles is not None:
+            cycles.samples, cycles.use_denoising, cycles.max_bounces = old_cycles
+
+
+def render_product_mask(context, filepath: str, collection) -> bool:
+    """Product silhouette from the scene camera at the camera output size (no clay base)."""
+    scene = context.scene
+    require_scene_camera(context)
+    width, height = camera_output_dimensions(context)
+    render = scene.render
+    snap = {"x": render.resolution_x, "y": render.resolution_y, "pct": render.resolution_percentage,
+            "fmt": _snapshot_image_format(render.image_settings)}
+    frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
+    try:
+        for k in frame_options:
+            setattr(render, k, False)
+        render.resolution_x, render.resolution_y, render.resolution_percentage = width, height, 100
+        return _render_mask_now(context, filepath, collection) and image_dimensions(filepath) == (width, height)
+    finally:
+        render.resolution_x, render.resolution_y, render.resolution_percentage = snap["x"], snap["y"], snap["pct"]
+        _restore_image_format(render.image_settings, snap["fmt"])
+        for k, v in frame_options.items():
+            setattr(render, k, v)
+
+
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
-                     terrain=None) -> bool:
+                     terrain=None, mask_path: str = "") -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -882,7 +976,16 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         except Exception:
             pass
         bpy.ops.render.render(write_still=True)
-        return Path(filepath).exists() and image_dimensions(filepath) == (width, height)
+        ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
+        if ok and mask_path and collection is not None:
+            # 1.2.0 分层输出: same camera, same temporary product pose as the clay base.
+            try:
+                LAST_CLAY_INFO["mask"] = bool(_render_mask_now(context, mask_path, collection)
+                                              and image_dimensions(mask_path) == (width, height))
+            except Exception as exc:
+                LAST_CLAY_INFO["mask"] = False
+                print(f"[Wondful] 产品遮罩渲染失败：{exc}")
+        return ok
     finally:
         for undo in reversed(restore):
             try:
