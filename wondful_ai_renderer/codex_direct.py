@@ -39,7 +39,7 @@ IMAGE_MODEL = "gpt-image-2"
 ORIGINATOR = "codex_cli_rs"
 MAX_EDIT_IMAGES = 5
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
-ADDON_UA = "wondful-ai-renderer/1.1.0"
+ADDON_UA = "wondful-ai-renderer/1.1.1"
 BASE_URL_ENV = "WONDFUL_CODEX_IMAGE_BASE_URL"
 REFRESH_URL_ENV = "WONDFUL_CODEX_REFRESH_URL"
 
@@ -414,6 +414,72 @@ def prepare_mask(mask_path, base_size, out_dir) -> tuple[str, str]:
     target = Path(out_dir) / (Path(mask_path).stem + f"_{bw}x{bh}.png")
     return write_rgba_png(target, resized), f"Mask 已重采样到 {bw}×{bh}"
 
+
+
+# --------------------------------------------------------------------------- models
+
+_MODEL_CACHE = {"at": 0.0, "models": []}
+_MODEL_CACHE_TTL = 3600.0
+_MODEL_SKIP = ("codex-auto-review",)
+
+
+def _rank_models(models) -> list[str]:
+    """Visible models, newest first (the server's ``priority``; 0 = latest workhorse)."""
+    rows = []
+    for index, item in enumerate(models or []):
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug") or "").strip()
+        if not slug or slug in _MODEL_SKIP or item.get("visibility", "list") != "list":
+            continue
+        if item.get("supported_in_api") is False:
+            continue
+        try:
+            prio = float(item.get("priority", 1000))
+        except (TypeError, ValueError):
+            prio = 1000.0
+        rows.append((prio, index, slug))
+    return [slug for _p, _i, slug in sorted(rows)]
+
+
+def available_models(auth=None, auth_path=None, client_version="", timeout=10.0, *, refresh=False) -> list[str]:
+    """Models this ChatGPT account can use right now, newest first.
+
+    Live list from the Codex backend (cached 1 h per Blender session); falls back to the
+    Codex CLI's own models_cache.json next to auth.json, then to FALLBACK_MODELS."""
+    now = time.time()
+    if not refresh and _MODEL_CACHE["models"] and now - _MODEL_CACHE["at"] < _MODEL_CACHE_TTL:
+        return list(_MODEL_CACHE["models"])
+    ranked = []
+    if auth:
+        base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
+        version = _client_version(client_version) or "0.162.1"
+        url = base.rstrip("/") + "/models?client_version=" + version
+        try:
+            req = urlrequest.Request(url, headers=auth_headers(auth, client_version))
+            with urlrequest.urlopen(req, timeout=timeout) as resp:
+                ranked = _rank_models(json.loads(resp.read().decode("utf-8", "replace")).get("models"))
+        except Exception:
+            ranked = []
+    if not ranked and auth_path:
+        try:
+            cache = json.loads((Path(auth_path).parent / "models_cache.json").read_text(encoding="utf-8"))
+            ranked = _rank_models(cache.get("models"))
+        except (OSError, ValueError, AttributeError):
+            ranked = []
+    if ranked:
+        _MODEL_CACHE.update(at=now, models=list(ranked))
+        return ranked
+    return list(FALLBACK_MODELS)
+
+
+def model_chain(user_model="", available=None) -> list[str]:
+    """Models to try in order: the user's pick (if any), then the newest available ones."""
+    chain = []
+    for slug in [(user_model or "").strip()] + list(available or []) + list(FALLBACK_MODELS):
+        if slug and slug not in chain:
+            chain.append(slug)
+    return chain
 
 # --------------------------------------------------------------------------- payload
 
@@ -879,6 +945,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     auth = load_auth(auth_path)
     if token_expiring(access_token(auth)):
         auth = refresh_auth(auth, auth_path)
+    chain = model_chain(model, available_models(auth, auth_path, client_version))
     simple = simple_brief is not None and not repair
     if simple:
         images = [(str(Path(edit_base_path).resolve()), "camera", "白模底图")]
@@ -904,7 +971,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     if simple and env_paths:
         try:
             env_text, auth = describe_environment(env_paths, auth=auth, auth_path=auth_path,
-                                                  client_version=client_version, model=model,
+                                                  client_version=client_version, model=chain[0],
                                                   cache_dir=str(log_root), cancel_check=cancel_check,
                                                   vehicle=bool(vehicle))
         except DirectEditError as exc:
@@ -922,12 +989,10 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
            "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note}
-    model_used = (model or "").strip() or DEFAULT_MODEL
-    variants = [dict(compat=False, model=model_used)]
-    for fallback_model in (DEFAULT_MODEL,) + tuple(FALLBACK_MODELS):
-        if all(v["model"] != fallback_model for v in variants):
-            variants.append(dict(compat=False, model=fallback_model))
-    variants.append(dict(compat=True, model=DEFAULT_MODEL))
+    model_used = chain[0]
+    log["model_chain"] = chain[:6]
+    variants = [dict(compat=False, model=m) for m in chain[:6]]
+    variants.append(dict(compat=True, model=model_used))
     refreshed = False
     rate_waits = 0
     result = None

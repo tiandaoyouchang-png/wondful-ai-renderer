@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1 · 自动选用最新模型（2026-10-15）
+
+### 修复
+- **图像编辑直连失效修复**：ChatGPT 账号已不再支持旧默认模型 gpt-5.5（返回 HTTP 400「not supported when using Codex with a ChatGPT account」），直连会失败并退回较慢的代理生成。
+- **自动切到最新模型**：每次生成前读取当前 ChatGPT 账号可用的模型列表（Codex 后端 /models，按官方排序取最新；会话内缓存 1 小时；读取失败时用 Codex CLI 的 models_cache.json，再不行用内置列表 gpt-6.1-sol → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra）。某个模型被拒绝时自动换下一个。「高级」里手动填了模型时优先用你填的。
+- 环境参考图描述也用同一个最新模型。
+
+### 实测
+- 真实 Codex 直连（带 Mask 的图像编辑）：自动选中 gpt-6.1-sol，单张 32–40 秒，一次成功。104 项离线测试通过。
+
 ## 1.1.0 · 自定义地形（2026-10-15）
 
 ### 变更
