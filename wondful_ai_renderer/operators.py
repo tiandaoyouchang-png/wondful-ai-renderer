@@ -2089,6 +2089,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_simple_base = ""
             direct_simple_brief = None
             direct_terrain_text = ""
+            direct_massing_text = ""
             from .product_kind import is_vehicle as _is_vehicle
             try:
                 direct_vehicle = _is_vehicle(props)
@@ -2100,13 +2101,20 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 try:
                     from .viewport_capture import render_clay_base, LAST_CLAY_INFO
                     from .terrain import settings_from_props
+                    from .massing import find_collection as _find_massing
+                    massing_coll = _find_massing(context.scene, props)
                     if render_clay_base(context, clay_path, getattr(props, "product_collection", None),
                                         ground=getattr(props, "clay_ground", "AUTO"),
                                         crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
                                         terrain=settings_from_props(props),
-                                        mask_path=(self._layers or {}).get("mask", "")):
+                                        mask_path=(self._layers or {}).get("mask", ""),
+                                        massing=massing_coll):
                         direct_simple_base = clay_path
                         direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
+                        direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
+                        blocks = len(LAST_CLAY_INFO.get("massing") or [])
+                        props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面" if massing_coll
+                                                   else "")
                         direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
                 except Exception as exc:
                     print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
@@ -2125,11 +2133,14 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     on_status=_direct_status, cancel_check=_cancel_requested,
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
                     terrain_text=direct_terrain_text, vehicle=direct_vehicle,
+                    massing_text=direct_massing_text,
                 )
         if self._layers and not Path(self._layers["mask"]).is_file():
             try:
                 from .viewport_capture import render_product_mask
-                if not render_product_mask(context, self._layers["mask"], getattr(props, "product_collection", None)):
+                from .massing import find_collection as _find_massing
+                if not render_product_mask(context, self._layers["mask"], getattr(props, "product_collection", None),
+                                           massing=_find_massing(context.scene, props)):
                     raise RuntimeError("产品遮罩未生成")
             except Exception as exc:
                 print(f"[Wondful] 分层输出：产品遮罩渲染失败：{exc}")

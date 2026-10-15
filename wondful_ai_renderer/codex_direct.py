@@ -554,13 +554,15 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
-def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False):
+def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
+                        massing_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
     (``env_text``), so its camera and layout can never pull the composition.
     ``vehicle`` picks car wording (车身、车轮、车漆、车牌); anything else gets
     generic product wording with the same product-lock rules.
+    ``massing_text`` (1.2.0 环境体块) describes the grey-blue context blocks of the clay base.
     """
     from .product_kind import words
     w = words(bool(vehicle))
@@ -576,11 +578,16 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
                  f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
     if (terrain_text or "").strip():
         lines.append((terrain_text or "").strip())
+    massing_text = (massing_text or "").strip()
+    if massing_text:
+        lines.append(massing_text)
     if vehicle:
-        lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
+        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成建筑 / 结构，不删除）：" if massing_text
+                      else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
                      "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
     else:
-        lines.append("原图里的灰色地面、背景和灯光只是占位：全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
+        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成建筑 / 结构，不删除）：" if massing_text
+                      else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
                      "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
                      "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
                      "木材有木纹，金属有清晰高光和环境倒影，塑料和涂层有对应的光泽），明暗过渡自然；不要平涂、不要塑料感或玩具模型感。")
@@ -596,7 +603,9 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         elif tag:
             lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
                          "部件和 Logo 全部以白模原图为准，不要照搬参考图里的任何物体。")
-        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素，不额外添加建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
+        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + ("和灰蓝色体块对应的建筑 / 结构（它们的风格和材质也按描述来）"
+                                                         if massing_text else "")
+                     + "，不额外添加" + ("其他" if massing_text else "") + "建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
                      "光线方向、太阳高度、色温和反差与描述一致，不要做得比描述更戏剧化。")
     if scene:
         lines.append("场景要求：" + scene + "。")
@@ -931,7 +940,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False):
+               exact_prompt=False, massing_text=""):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -984,7 +993,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         text = prompt  # 1.2.0 分层输出: the clean-plate edit sends its own complete instruction
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
-                                   vehicle=bool(vehicle))
+                                   vehicle=bool(vehicle), massing_text=massing_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -1084,7 +1093,7 @@ def short_reason(exc) -> str:
 
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
-                           simple_base="", simple_brief=None, terrain_text="", vehicle=False):
+                           simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text=""):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1115,6 +1124,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 simple_brief=simple_brief if use_simple else None,
                 terrain_text=terrain_text if use_simple else "",
                 vehicle=bool(vehicle),
+                massing_text=massing_text if use_simple else "",
             )
             state["direct_ok"] += 1
             return result

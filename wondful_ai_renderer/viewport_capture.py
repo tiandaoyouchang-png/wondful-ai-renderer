@@ -215,7 +215,7 @@ def _product_floor_z(collection):
     zs = []
     objs = list(collection.all_objects) if collection else [o for o in bpy.context.scene.objects]
     for obj in objs:
-        if obj.type != "MESH" or obj.hide_render:
+        if obj.type != "MESH" or obj.hide_render or _excluded(obj):
             continue
         for corner in obj.bound_box:
             zs.append((obj.matrix_world @ Vector(corner)).z)
@@ -223,6 +223,12 @@ def _product_floor_z(collection):
 
 
 LAST_CLAY_INFO = {}
+# 1.2.0 环境体块: massing objects never count as product (bounds, ground, terrain pose)
+_MASSING_EXCLUDE = set()
+
+
+def _excluded(obj) -> bool:
+    return obj in _MASSING_EXCLUDE
 
 
 def _product_up_axis(collection):
@@ -261,7 +267,7 @@ def _product_bounds(collection):
     pts = []
     objs = list(collection.all_objects) if collection else [o for o in bpy.context.scene.objects]
     for obj in objs:
-        if obj.type != "MESH" or obj.hide_render:
+        if obj.type != "MESH" or obj.hide_render or _excluded(obj):
             continue
         pts += [obj.matrix_world @ Vector(c) for c in obj.bound_box]
     return pts
@@ -278,7 +284,8 @@ def _user_ground(context, collection, product_pts):
     foot = max(max(xs) - min(xs), max(ys) - min(ys), 1e-3)
     bottom = min(zs)
     for obj in context.scene.objects:
-        if obj in members or obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_"):
+        if obj in members or obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_") \
+                or _excluded(obj):
             continue
         try:
             if not obj.visible_get():
@@ -396,7 +403,7 @@ def _product_vertices(context, collection):
     chunks = []
     objs = list(collection.all_objects) if collection else list(context.scene.objects)
     for obj in objs:
-        if obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_"):
+        if obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_") or _excluded(obj):
             continue
         ev = obj.evaluated_get(depsgraph)
         try:
@@ -727,16 +734,21 @@ _GEOMETRY_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES", "POINTC
                    "GPENCIL", "GREASEPENCIL"}
 
 
-def _render_mask_now(context, filepath: str, collection) -> bool:
+def _render_mask_now(context, filepath: str, collection, holdout=()) -> bool:
     """Render only the product collection, opaque, on a transparent film: its alpha is the
     product silhouette from the scene camera (1.2.0 分层输出). Caller restores render settings
-    it already snapshots; this restores what it changes itself."""
+    it already snapshots; this restores what it changes itself.
+
+    ``holdout`` (1.2.0 环境体块): massing objects stay in the render as holdouts, so a block in
+    front of the product cuts its silhouette and no block ever enters the subject layer."""
     scene = context.scene
     render = scene.render
     product = set(collection.all_objects) if collection is not None else set()
     if not product:
         return False
     hidden = []
+    held = []
+    holdout = [o for o in holdout or () if o not in product and not o.hide_render]
     view_layer = context.view_layer
     old_override = view_layer.material_override
     old_engine = render.engine
@@ -747,7 +759,13 @@ def _render_mask_now(context, filepath: str, collection) -> bool:
     old_cycles = (cycles.samples, cycles.use_denoising, cycles.max_bounces) if cycles is not None else None
     mat = bpy.data.materials.new("_wondful_mask_mat")
     try:
+        hold = set(holdout)
         for obj in scene.objects:
+            if obj in hold:
+                if not getattr(obj, "is_holdout", True):
+                    obj.is_holdout = True
+                    held.append(obj)
+                continue
             if obj.type in _GEOMETRY_TYPES and obj not in product and not obj.hide_render:
                 obj.hide_render = True
                 hidden.append(obj)
@@ -779,6 +797,11 @@ def _render_mask_now(context, filepath: str, collection) -> bool:
                 obj.hide_render = False
             except Exception:
                 pass
+        for obj in held:
+            try:
+                obj.is_holdout = False
+            except Exception:
+                pass
         view_layer.material_override = old_override
         try:
             bpy.data.materials.remove(mat)
@@ -796,7 +819,7 @@ def _render_mask_now(context, filepath: str, collection) -> bool:
             cycles.samples, cycles.use_denoising, cycles.max_bounces = old_cycles
 
 
-def render_product_mask(context, filepath: str, collection) -> bool:
+def render_product_mask(context, filepath: str, collection, massing=None) -> bool:
     """Product silhouette from the scene camera at the camera output size (no clay base)."""
     scene = context.scene
     require_scene_camera(context)
@@ -809,7 +832,9 @@ def render_product_mask(context, filepath: str, collection) -> bool:
         for k in frame_options:
             setattr(render, k, False)
         render.resolution_x, render.resolution_y, render.resolution_percentage = width, height, 100
-        return _render_mask_now(context, filepath, collection) and image_dimensions(filepath) == (width, height)
+        from . import massing as MS
+        holdout = MS.massing_objects(massing, collection) if massing is not None else []
+        return _render_mask_now(context, filepath, collection, holdout) and image_dimensions(filepath) == (width, height)
     finally:
         render.resolution_x, render.resolution_y, render.resolution_percentage = snap["x"], snap["y"], snap["pct"]
         _restore_image_format(render.image_settings, snap["fmt"])
@@ -818,13 +843,18 @@ def render_product_mask(context, filepath: str, collection) -> bool:
 
 
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
-                     terrain=None, mask_path: str = "") -> bool:
+                     terrain=None, mask_path: str = "", massing=None) -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
     with ground contact gives the image model a photographic starting point, so
     it repaints materials and environment instead of re-composing the shot.
     Everything temporary is removed afterwards; the user's scene is unchanged.
+
+    ``massing`` (1.2.0 环境体块): a collection of context blocks.  They render with a temporary
+    matte grey-blue material (their own materials come back afterwards), cast shadows, rest on a
+    sculpted floor, and never count as product; ``LAST_CLAY_INFO["massing_text"]`` describes
+    where each one sits in the frame for the prompt.
     """
     scene = context.scene
     require_scene_camera(context)
@@ -838,8 +868,13 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
     created = []
     restore = []  # undo steps for the temporary product pose (自定义地形), run before cleanup
+    from . import massing as MS
+    blocks = MS.massing_objects(massing, collection) if massing is not None else []
+    _MASSING_EXCLUDE.clear()
+    _MASSING_EXCLUDE.update(blocks)
     try:
         from mathutils import Vector
+        ref_ground = _product_floor_z(collection)  # the level the user modelled on, before any pose
         pts = _product_bounds(collection)
         ground_mode = (ground or "AUTO").upper()
         ground = _user_ground(context, collection, pts)
@@ -905,6 +940,18 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         mesh.materials.append(mat)
         scene.collection.objects.link(floor)
         created += [("obj", floor), ("mesh", mesh), ("mat", mat)]
+        if blocks:
+            massing_mat = MS.make_material(bpy.data.materials.new)
+            created.append(("mat", massing_mat))
+            if ground_mode in {"CREST", "CUSTOM"} and ground is None:
+                LAST_CLAY_INFO["massing_snapped"] = MS.snap_to_ground(context, blocks, floor, ref_ground, restore)
+            MS.swap_materials(blocks, massing_mat, restore)
+            context.view_layer.update()
+            items = MS.describe_blocks(context, blocks, _product_bounds(collection))
+            from .product_kind import names_look_like_vehicle, collection_names
+            veh = names_look_like_vehicle(collection_names(collection)) if collection is not None else False
+            LAST_CLAY_INFO["massing"] = items
+            LAST_CLAY_INFO["massing_text"] = MS.build_massing_text(items, vehicle=veh)
         sun_data = bpy.data.lights.new("_wondful_clay_sun", type="SUN")
         sun_data.energy = 4.0
         try:
@@ -980,18 +1027,19 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         if ok and mask_path and collection is not None:
             # 1.2.0 分层输出: same camera, same temporary product pose as the clay base.
             try:
-                LAST_CLAY_INFO["mask"] = bool(_render_mask_now(context, mask_path, collection)
+                LAST_CLAY_INFO["mask"] = bool(_render_mask_now(context, mask_path, collection, blocks)
                                               and image_dimensions(mask_path) == (width, height))
             except Exception as exc:
                 LAST_CLAY_INFO["mask"] = False
                 print(f"[Wondful] 产品遮罩渲染失败：{exc}")
         return ok
     finally:
+        _MASSING_EXCLUDE.clear()
         for undo in reversed(restore):
             try:
                 undo()
             except Exception as exc:
-                print(f"[Wondful] 恢复产品姿态失败：{exc}")
+                print(f"[Wondful] 恢复产品姿态 / 体块材质失败：{exc}")
         if restore:
             try:
                 context.view_layer.update()

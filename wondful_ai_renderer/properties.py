@@ -715,6 +715,24 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.0 环境体块: context blocks rendered grey-blue in the clay base, turned into buildings
+    massing_enabled: BoolProperty(
+        name="环境体块",
+        description="白模底图里把环境体块集合（方块、圆柱、坡道等）临时显示为灰蓝色体块，"
+                    "AI 按场景风格把它们画成真实建筑 / 结构，产品保持锁定",
+        default=True,
+    )
+    massing_collection: PointerProperty(
+        name="体块集合",
+        description="环境体块所在的集合；留空 = 自动识别名称含 环境 / 体块 / Context / Massing 的集合",
+        type=bpy.types.Collection,
+        poll=lambda self, coll: coll != getattr(self, "product_collection", None),
+    )
+    last_massing_note: StringProperty(
+        name="环境体块状态",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     last_canvas_fit: BoolProperty(
         name="比例已适配",
         description="结果已按比例缩放并留边到白模画布，未裁切、未拉伸",

@@ -371,6 +371,34 @@ def _draw_progress_bar(layout, props, text):
         bar.prop(props, "progress", text=text, slider=True)
 
 
+def _draw_massing(adv, context, props, busy):
+    """高级 › 环境体块 (1.2.0): pick / auto-detect the context-block collection."""
+    box = adv.box()
+    box.prop(props, "massing_enabled", text="环境体块", icon="MESH_CUBE")
+    if not getattr(props, "massing_enabled", True):
+        return
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "massing_collection", text="集合")
+    coll = None
+    try:
+        from .massing import find_collection
+        coll = find_collection(context.scene, props)
+    except Exception:
+        coll = None
+    if coll is not None:
+        n = sum(1 for o in coll.all_objects if getattr(o, "type", "") == "MESH" and not o.hide_render)
+        how = "已选择" if getattr(props, "massing_collection", None) else "自动识别"
+        box.label(text=f"{how}：{coll.name} · {n} 个体块", icon="CHECKMARK")
+        box.label(text="白模里显示为灰蓝色，AI 画成真实建筑；产品保持锁定", icon="INFO")
+    elif getattr(props, "massing_collection", None) is not None:
+        box.label(text="该集合与产品集合重叠，已忽略", icon="ERROR")
+    else:
+        box.label(text="未找到：集合名含 环境 / 体块 / Context / Massing 即自动识别", icon="INFO")
+    if getattr(props, "last_massing_note", ""):
+        box.label(text=props.last_massing_note[:60], icon="BLANK1")
+
+
 def _draw_terrain(layout, props):
     """1.1.0 自定义地形: presets + four product-relative corners + 坡顶 / 凹凸 + pose toggle."""
     box = layout.box()
@@ -729,6 +757,8 @@ class WONDFUL_PT_main(Panel):
             for index, line in enumerate(wrap(props.last_layers_note, width=44)[:2]):
                 layers.label(text=line, icon="CHECKMARK" if index == 0 and "失败" not in props.last_layers_note
                              else ("ERROR" if index == 0 else "BLANK1"))
+
+        _draw_massing(adv, context, props, busy)
 
         lock_box = adv.box()
         if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):
