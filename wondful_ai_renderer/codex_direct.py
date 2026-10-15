@@ -566,7 +566,7 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
 
 
 def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
-                        massing_text="", building_text=""):
+                        massing_text="", building_text="", keep_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
@@ -575,6 +575,7 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     generic product wording with the same product-lock rules.
     ``massing_text`` (1.2.0 环境体块) describes the grey-blue context blocks of the clay base;
     ``building_text`` maps the attached 建筑参考 images (图 2…) to their blocks.
+    ``keep_text`` (1.2.0 细节回贴): plates / badges / logos whose text must stay exactly as is.
     """
     from .product_kind import words
     w = words(bool(vehicle))
@@ -592,6 +593,8 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
                  f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
     if (terrain_text or "").strip():
         lines.append((terrain_text or "").strip())
+    if (keep_text or "").strip():
+        lines.append((keep_text or "").strip())
     massing_text = (massing_text or "").strip()
     if massing_text:
         lines.append(massing_text)
@@ -958,7 +961,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False, massing_text="", building_refs=None):
+               exact_prompt=False, massing_text="", building_refs=None, keep_text=""):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -1024,7 +1027,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
                                    vehicle=bool(vehicle), massing_text=massing_text,
-                                   building_text=_building_text(attached_refs, vehicle))
+                                   building_text=_building_text(attached_refs, vehicle), keep_text=keep_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -1154,7 +1157,7 @@ def short_reason(exc) -> str:
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
                            simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text="",
-                           building_refs=None):
+                           building_refs=None, keep_text=""):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1187,6 +1190,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 vehicle=bool(vehicle),
                 massing_text=massing_text if use_simple else "",
                 building_refs=building_refs if use_simple else None,
+                keep_text=keep_text if use_simple else "",
             )
             state["direct_ok"] += 1
             return result

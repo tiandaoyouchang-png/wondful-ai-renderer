@@ -984,6 +984,44 @@ class WONDFUL_OT_block_select(Operator):
         return {"FINISHED"}
 
 
+def keep_exact_state(context, props):
+    """(selected product parts, how many are already keep-exact) for 「标为原样保留」."""
+    from .viewport_capture import keep_exact_slots
+    coll = getattr(props, "product_collection", None)
+    product = set(coll.all_objects) if coll is not None else set()
+    selected = [o for o in (getattr(context, "selected_objects", None) or ())
+                if o.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"} and (not product or o in product)]
+    marked = {obj for (obj, _i) in keep_exact_slots(coll)} if coll is not None else set()
+    if coll is None:
+        from .detail_paste import KEEP_PROP, prop_state, name_looks_keep_exact
+        marked = {o for o in selected if prop_state(o.get(KEEP_PROP)) is True
+                  or (prop_state(o.get(KEEP_PROP)) is None and name_looks_keep_exact(o.name))}
+    return selected, sum(1 for o in selected if o in marked)
+
+
+class WONDFUL_OT_mark_keep_exact(Operator):
+    bl_idname = "wondful.mark_keep_exact"
+    bl_label = "标为原样保留"
+    bl_description = ("细节回贴：把选中的产品部件（车牌、车标、铭牌、Logo 等）标为原样保留，生成后这些区域整块贴回 "
+                      "Blender 里的真实像素（只轻微匹配颜色和亮度）。已标记时再点一次取消（也会关掉按名称的自动识别）")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        from .detail_paste import KEEP_PROP
+        props = context.scene.wondful_ai
+        selected, marked = keep_exact_state(context, props)
+        if not selected:
+            self.report({"WARNING"}, "先在视图里选中产品里的车牌 / 标识等部件")
+            return {"CANCELLED"}
+        value = 0 if marked == len(selected) else 1
+        for obj in selected:
+            obj[KEEP_PROP] = value
+        msg = (f"已标为原样保留：{len(selected)} 个部件" if value else f"已取消原样保留：{len(selected)} 个部件")
+        props.last_detail_note = msg
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_massing_hull_build(Operator):
     bl_idname = "wondful.massing_hull_build"
     bl_label = "从三视图生成建筑体块"
@@ -1913,6 +1951,54 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             print(f"[Wondful] 分层输出设置失败：{exc}")
             return None
 
+    def _detail_spec(self, context, props):
+        """1.2.0 细节回贴 settings for this run, or None. Never raises."""
+        try:
+            props.last_detail_note = ""
+            if not bool(getattr(props, "detail_paste", True)):
+                return None
+            coll = getattr(props, "product_collection", None)
+            if coll is None:
+                props.last_detail_note = "细节回贴需要先在 ② 选择产品集合，本次已跳过"
+                return None
+            work = Path(self._session.viewport_reference).parent
+            from .viewport_capture import keep_exact_slots, keep_exact_texts
+            slots = keep_exact_slots(coll)
+            return {
+                "detail": str(work / "01_detail_pass.png"),
+                "keep": str(work / "01_keep_mask.png"),
+                "mask": str(work / "01_product_mask.png"),
+                "strength": float(getattr(props, "detail_paste_strength", 0.8)),
+                "keep_slots": len(slots),
+                "keep_texts": keep_exact_texts(coll),
+                "work_dir": str(self._session.directory),
+                "reports": [],
+            }
+        except Exception as exc:
+            print(f"[Wondful] 细节回贴设置失败：{exc}")
+            return None
+
+    def _apply_detail_paste(self, props, variant_final, variant_index):
+        """Paste the detail pass onto one finished variant; returns (path to use, raw path or None)."""
+        spec = getattr(self, "_detail", None)
+        if not spec or not Path(spec["detail"]).is_file() or not Path(spec["mask"]).is_file():
+            return variant_final, None
+        try:
+            from .detail_paste import paste_file, summarize
+            out = self._session.directory / f"output_variant_{variant_index:02d}_detail.png"
+            rep = paste_file(str(variant_final), spec["detail"], spec["mask"], str(out),
+                             keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
+                             strength=spec["strength"])
+            spec["reports"].append(rep)
+            props.last_detail_note = summarize(rep)
+            if rep.get("skipped"):
+                return variant_final, None
+            return out, Path(variant_final)
+        except Exception as exc:
+            print(f"[Wondful] 细节回贴失败：{exc}")
+            props.last_detail_note = f"细节回贴失败（已保留原图）：{str(exc)[:80]}"
+            return variant_final, None
+
     def _submit_layers(self, props, exported) -> None:
         """Queue the layer split of one exported image; failures only leave a panel note."""
         spec = getattr(self, "_layers", None)
@@ -1971,6 +2057,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         identity_meta.get("path", ""),
                         restored_path,
                     ))
+                variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
                 exported = export_result(
                     variant_final,
                     self._output_dir_at_start,
@@ -1978,6 +2065,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     self._camera_name_at_start,
                     self._session.session_id,
                 )
+                if variant_raw is not None:
+                    try:
+                        from .detail_paste import raw_path
+                        shutil.copy2(variant_raw, raw_path(exported))
+                    except Exception as exc:
+                        print(f"[Wondful] 原始结果另存失败：{exc}")
                 self._exported_by_variant[variant_index] = Path(exported)
                 self._exported_variant_records[variant_index] = variant
                 self._submit_layers(props, Path(exported))
@@ -2215,6 +2308,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         self._direct_state = None
         props.last_engine_note = ""
         self._layers = self._layers_spec(context, props, prefs, provider)
+        self._detail = self._detail_spec(context, props)
+        product_mask_path = (self._layers or {}).get("mask", "") or (self._detail or {}).get("mask", "")
         if provider["id"] == "codex" and bool(getattr(prefs, "codex_direct_edit", True)):
             from . import codex_direct
             from .cli_transport import is_cancellation_requested as _cancel_requested
@@ -2235,6 +2330,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 direct_vehicle = _is_vehicle(props)
             except Exception:
                 direct_vehicle = False
+            direct_keep_text = ""
+            if self._detail and (self._detail.get("keep_slots") or self._detail.get("keep_texts")):
+                from .detail_paste import keep_prompt
+                direct_keep_text = keep_prompt(direct_vehicle, self._detail.get("keep_texts") or ())
             direct_state["vehicle"] = direct_vehicle
             if bool(getattr(prefs, "codex_direct_simple", True)):
                 clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
@@ -2247,8 +2346,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                         ground=getattr(props, "clay_ground", "AUTO"),
                                         crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
                                         terrain=settings_from_props(props),
-                                        mask_path=(self._layers or {}).get("mask", ""),
-                                        massing=massing_coll):
+                                        mask_path=product_mask_path,
+                                        massing=massing_coll,
+                                        detail_path=(self._detail or {}).get("detail", ""),
+                                        keep_path=(self._detail or {}).get("keep", "")):
                         direct_simple_base = clay_path
                         direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
                         direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
@@ -2280,7 +2381,26 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     terrain_text=direct_terrain_text, vehicle=direct_vehicle,
                     massing_text=direct_massing_text,
                     building_refs=direct_building_refs or None,
+                    keep_text=direct_keep_text,
                 )
+        if self._detail and not Path(self._detail["detail"]).is_file():
+            # no clay base this run (other canvas / provider): render the detail pass on its own
+            try:
+                from .viewport_capture import render_detail_pass, render_product_mask
+                from .massing import find_collection as _find_massing
+                coll = getattr(props, "product_collection", None)
+                mcoll = _find_massing(context.scene, props)
+                info = render_detail_pass(context, self._detail["detail"], coll, keep_path=self._detail["keep"],
+                                          massing=mcoll)
+                if not info.get("detail"):
+                    raise RuntimeError("细节底图未生成")
+                if not Path(self._detail["mask"]).is_file() and not render_product_mask(
+                        context, self._detail["mask"], coll, massing=mcoll):
+                    raise RuntimeError("产品遮罩未生成")
+            except Exception as exc:
+                print(f"[Wondful] 细节回贴：细节底图渲染失败：{exc}")
+                props.last_detail_note = f"细节回贴已跳过：细节底图渲染失败（{exc}）"
+                self._detail = None
         if self._layers and not Path(self._layers["mask"]).is_file():
             try:
                 from .viewport_capture import render_product_mask

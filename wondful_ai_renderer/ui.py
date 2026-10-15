@@ -371,6 +371,43 @@ def _draw_progress_bar(layout, props, text):
         bar.prop(props, "progress", text=text, slider=True)
 
 
+def _draw_detail_paste(adv, context, props, busy):
+    """高级 › 细节回贴 (1.2.0): toggle, strength, 「标为原样保留」 on selected parts."""
+    box = adv.box()
+    box.prop(props, "detail_paste", text="细节回贴", icon="BRUSH_DATA")
+    if getattr(props, "detail_paste", True):
+        row = box.row(align=True)
+        row.enabled = not busy
+        row.prop(props, "detail_paste_strength", text="细节强度", slider=True)
+        box.label(text="光照随 AI，文字 / Logo / 纹理用 Blender 的；原图存为 _raw", icon="INFO")
+        coll = getattr(props, "product_collection", None)
+        if coll is None:
+            box.label(text="需要先在 ② 选择产品集合", icon="ERROR")
+        else:
+            try:
+                from .viewport_capture import keep_exact_slots
+                slots = keep_exact_slots(coll)
+                objs = {o for (o, _i) in slots}
+                auto = {o for (o, _i), k in slots.items() if k == "auto"} - {o for (o, _i), k in slots.items() if k == "explicit"}
+                text = f"原样保留：{len(objs)} 个部件" + (f"（自动识别 {len(auto)}）" if auto else "") if objs else "原样保留：无（可选中车牌 / 标识后标记）"
+            except Exception:
+                text = "原样保留：—"
+            box.label(text=text, icon="LOCKED")
+        try:
+            from .operators import keep_exact_state
+            selected, marked = keep_exact_state(context, props)
+        except Exception:
+            selected, marked = [], 0
+        mark = box.row(align=True)
+        mark.enabled = bool(selected) and not busy
+        all_marked = bool(selected) and marked == len(selected)
+        mark.operator("wondful.mark_keep_exact", text="取消原样保留" if all_marked else "标为原样保留",
+                      icon="UNLOCKED" if all_marked else "LOCKED")
+    note = getattr(props, "last_detail_note", "")
+    if note:
+        box.label(text=_short(note, 44), icon="ERROR" if ("失败" in note or "跳过" in note) else "CHECKMARK")
+
+
 def _draw_massing(adv, context, props, busy):
     """高级 › 环境体块 (1.2.0): context-block collection, per-block 建筑参考, blocks from three views."""
     box = adv.box()
@@ -747,6 +784,10 @@ class WONDFUL_PT_main(Panel):
             layers_note = getattr(props, "last_layers_note", "")
             if layers_note:
                 result.label(text=_short(layers_note, 42), icon="ERROR" if "失败" in layers_note else "RENDERLAYERS")
+            detail_note = getattr(props, "last_detail_note", "")
+            if detail_note and ("完成" in detail_note or "失败" in detail_note or "跳过" in detail_note):
+                result.label(text=_short(detail_note, 42),
+                             icon="ERROR" if ("失败" in detail_note or "跳过" in detail_note) else "BRUSH_DATA")
             again = result.row(align=True)
             again.scale_y = 1.4
             again.enabled = not busy
@@ -844,6 +885,8 @@ class WONDFUL_PT_main(Panel):
             for index, line in enumerate(wrap(props.last_layers_note, width=44)[:2]):
                 layers.label(text=line, icon="CHECKMARK" if index == 0 and "失败" not in props.last_layers_note
                              else ("ERROR" if index == 0 else "BLANK1"))
+
+        _draw_detail_paste(adv, context, props, busy)
 
         _draw_massing(adv, context, props, busy)
 

@@ -1,0 +1,499 @@
+"""细节回贴 (1.2.0): paste the product's real details back onto the AI result.
+
+Pure numpy + stdlib, no bpy (worker-thread and plain-Python test safe).
+
+The image model keeps the product's silhouette and position but redraws its details:
+plate text, logos, wheel spokes, fabric weave. Blender knows them exactly, so after the
+generation a clean *detail pass* (product only, real materials, flat even light, same
+camera, same temporary pose as the clay base) is blended back:
+
+1. ``fit_mask`` (shared with 分层输出): the product mask is fitted to the AI image with
+   a small similarity transform; the detail pass and the keep-exact mask are warped
+   the same way (``warp_image``).
+2. Frequency separation inside a feathered, eroded product mask: low frequencies
+   (lighting, reflections, colour cast, shadow) come from the AI image, high frequencies
+   (texture, seams, edges, small text) from the detail pass, scaled to the AI's local
+   brightness. Where the detail pass is flat (smooth paint) the AI keeps its own high
+   frequencies, so sharp reflections (neon streaks, horizon lines) survive. The
+   silhouette itself always stays AI pixels: no halo, no seam against the background.
+3. 标识原样贴回: keep-exact regions (plates, badges, logos) are replaced outright by the
+   detail pass, with light per-channel colour / brightness matching to the AI result.
+"""
+from __future__ import annotations
+
+import re
+import time
+
+import numpy as np
+
+from .layered_output import blur, dilate, erode, fit_mask, guided_filter, luminance, resize
+
+DEFAULT_STRENGTH = 0.8
+HEURISTIC_MAX_FRAC = 0.25
+MIN_KEEP_DENSITY = 0.35     # keep-exact blobs must fill this share of a ~L/100 window to be replaced outright   # auto-detected keep-exact parts larger than this share of the product are ignored
+KEEP_PROP = "wondful_keep_exact"
+KEEP_TEXT_PROP = "wondful_keep_text"
+KEEP_PROMPT_VEHICLE = "车牌、车标和标识上的文字与图案保持原样，一字不改，不要重写、替换或模糊。"
+KEEP_PROMPT_GENERIC = "产品上的 Logo、铭牌和标识文字与图案保持原样，一字不改，不要重写、替换或模糊。"
+
+_KEEP_RE = re.compile(r"(plate|licen[cs]e|logo|badge|emblem|decal|车牌|牌照|车标|标识|标志|徽标|铭牌|字标|标)",
+                      re.IGNORECASE)
+_GLASS_RE = re.compile(r"(glass|window|windshield|windscreen|玻璃|车窗|透明)", re.IGNORECASE)
+_KEEP_NOT = re.compile(r"(template|plateau|platen)", re.IGNORECASE)
+
+
+# --------------------------------------------------------------------------- keep-exact names
+
+def name_looks_keep_exact(name) -> bool:
+    """Automatic heuristic: object / material names of plates, badges and logos."""
+    text = str(name or "")
+    if not text:
+        return False
+    return bool(_KEEP_RE.search(_KEEP_NOT.sub("", text)))
+
+
+def name_looks_glass(name) -> bool:
+    return bool(_GLASS_RE.search(str(name or "")))
+
+
+_MATTE_RE = re.compile(r"(fabric|velvet|cloth|textile|linen|wool|felt|suede|leather|wood|"
+                       r"布|绒|毛|麻|皮|木)", re.IGNORECASE)
+_LAMP_RE = re.compile(r"(light|lamp|led|灯)", re.IGNORECASE)
+
+
+def name_looks_matte(name) -> bool:
+    return bool(_MATTE_RE.search(str(name or "")))
+
+
+def name_looks_lamp(name) -> bool:
+    return bool(_LAMP_RE.search(str(name or "")))
+
+
+def prop_state(value):
+    """Custom-property value -> True (marked) / False (explicitly unmarked) / None (not set)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"", "0", "false", "no", "off", "否", "不"}:
+            return False
+        return True
+    try:
+        return bool(value)
+    except Exception:
+        return None
+
+
+def classify_slot(obj_name, obj_prop, mat_name, mat_prop):
+    """'explicit' | 'auto' | '' for one material slot of one object.
+
+    An explicit mark on the object or the material wins; an explicit False on the object
+    (「取消原样保留」) switches the heuristic off for that object."""
+    o, m = prop_state(obj_prop), prop_state(mat_prop)
+    if o is True or m is True:
+        return "explicit"
+    if o is False or m is False:
+        return ""
+    if name_looks_keep_exact(obj_name) or name_looks_keep_exact(mat_name):
+        return "auto"
+    return ""
+
+
+def keep_prompt(vehicle: bool, texts=()) -> str:
+    """Prompt sentence for products with keep-exact text (minor; the paste is what enforces it)."""
+    base = KEEP_PROMPT_VEHICLE if vehicle else KEEP_PROMPT_GENERIC
+    texts = [str(t).strip() for t in texts or () if str(t or "").strip()]
+    if texts:
+        base += "需要原样保留的文字：" + "、".join(f"「{t}」" for t in texts[:6]) + "。"
+    return base
+
+
+def merge_keep_masks(rgba: np.ndarray, product: np.ndarray, max_auto_frac: float = HEURISTIC_MAX_FRAC):
+    """Part masks from the keep render: R = explicit keep-exact, G = automatic keep-exact,
+    B = glass / transparent, black with alpha = matte / textile; A = coverage.
+
+    The automatic part is dropped when it covers more than ``max_auto_frac`` of the product
+    (e.g. a product that *is* a "plate"). Returns (keep, glass, matte, info)."""
+    scale = 255.0 if rgba.dtype == np.uint8 else 1.0
+    a = rgba[..., 3].astype(np.float32) / scale
+    rgb = rgba[..., :3].astype(np.float32) / scale
+    explicit = np.clip(a * rgb[..., 0], 0, 1)
+    auto = np.clip(a * rgb[..., 1], 0, 1)
+    glass = np.clip(a * rgb[..., 2], 0, 1)
+    matte = np.clip(a * (1.0 - rgb.max(-1)), 0, 1)
+    prod_px = float((product > 0.5).sum())
+    auto_px = float((auto > 0.5).sum())
+    frac = auto_px / prod_px if prod_px > 0 else 0.0
+    use_auto = frac <= max_auto_frac
+    keep = np.maximum(explicit, auto) if use_auto else explicit
+    if product.shape == keep.shape:
+        keep = np.minimum(keep, np.clip(product, 0, 1))
+    return keep.astype(np.float32), glass.astype(np.float32), matte.astype(np.float32), {
+        "explicit_px": int((explicit > 0.5).sum()), "auto_px": int(auto_px), "glass_px": int((glass > 0.5).sum()),
+        "matte_px": int((matte > 0.5).sum()), "auto_frac": round(frac, 4), "auto_used": bool(use_auto)}
+
+
+# --------------------------------------------------------------------------- geometry
+
+def warp_image(img: np.ndarray, s, dx: float, dy: float, centre) -> np.ndarray:
+    """``layered_output.warp_mask`` for any channel count (bilinear, edge-clamped)."""
+    h, w = img.shape[:2]
+    cx, cy = centre
+    sx, sy = (s, s) if np.isscalar(s) else (float(s[0]), float(s[1]))
+    xs = (np.arange(w, dtype=np.float32) - cx - dx) / sx + cx
+    ys = (np.arange(h, dtype=np.float32) - cy - dy) / sy + cy
+    x0 = np.floor(xs).astype(int); y0 = np.floor(ys).astype(int)
+    fx = (xs - x0)[None, :]; fy = (ys - y0)[:, None]
+    x0c, x1c = x0.clip(0, w - 1), (x0 + 1).clip(0, w - 1)
+    y0c, y1c = y0.clip(0, h - 1), (y0 + 1).clip(0, h - 1)
+    src = img.astype(np.float32)
+    if src.ndim == 3:
+        fx = fx[..., None]; fy = fy[..., None]
+    top = src[y0c][:, x0c] * (1 - fx) + src[y0c][:, x1c] * fx
+    bot = src[y1c][:, x0c] * (1 - fx) + src[y1c][:, x1c] * fx
+    out = top * (1 - fy) + bot * fy
+    # outside the source canvas -> 0 (transparent detail, empty mask)
+    inside = ((xs >= -0.5) & (xs <= w - 0.5))[None, :] & ((ys >= -0.5) & (ys <= h - 0.5))[:, None]
+    return out * (inside[..., None] if out.ndim == 3 else inside)
+
+
+def _grad(gray: np.ndarray) -> np.ndarray:
+    gx = np.zeros_like(gray); gy = np.zeros_like(gray)
+    gx[:, 1:-1] = gray[:, 2:] - gray[:, :-2]
+    gy[1:-1] = gray[2:] - gray[:-2]
+    return np.sqrt(gx * gx + gy * gy)
+
+
+def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray) -> float:
+    if sel.sum() < 50:
+        return -1.0
+    x = a[sel] - a[sel].mean(); y = b[sel] - b[sel].mean()
+    return float((x * y).sum() / (np.sqrt((x * x).sum() * (y * y).sum()) + 1e-9))
+
+
+MIN_ALIGN_NCC = 0.2       # below this the detail pass does not match the AI image: skip the paste
+IDENTITY_MARGIN = 1.03    # a moved fit must explain the interior edges 3 % better than identity
+
+
+def verify_alignment(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray, mask: np.ndarray,
+                     fit: dict) -> dict:
+    """Check (and if needed correct) the alignment with the detail pass itself.
+
+    The mask-outline fit only sees the silhouette; an outline can snap onto background
+    clutter. The detail pass has the product's *inner* edges, so the transform is chosen by
+    the correlation of edge maps (AI vs warped detail pass) among: identity, the outline
+    fit, and a small scale / shift grid around identity, then refined by ±1 px at full size.
+    Identity wins unless another candidate is clearly better. Returns dict(scale_x, scale_y,
+    dx, dy, ncc, ncc_identity, ncc_outline, source, ok)."""
+    h, w = mask.shape
+    f = max(1, int(round(max(h, w) / 640)))
+    sw, sh = max(8, w // f), max(8, h // f)
+    ga = _grad(luminance(resize(ai, sw, sh)))
+    dl = resize(detail * detail_alpha[..., None], sw, sh)
+    da = resize(detail_alpha, sw, sh)
+    gd = _grad(luminance(dl)) * (da > 0.5)
+    ms = resize(mask, sw, sh)
+    ys, xs = np.nonzero(ms > 0.5)
+    if not len(xs):
+        return {"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0, "ncc": -1.0, "ok": False, "source": "empty"}
+    c = (float(xs.mean()), float(ys.mean()))
+
+    def score(sx, sy, dx, dy):
+        g = warp_image(gd, (sx, sy), dx / f, dy / f, c) if (sx, sy, dx, dy) != (1.0, 1.0, 0.0, 0.0) else gd
+        m = warp_image(ms, (sx, sy), dx / f, dy / f, c) if (sx, sy, dx, dy) != (1.0, 1.0, 0.0, 0.0) else ms
+        return _ncc(ga, g, erode(m > 0.5, 2))
+
+    ident = score(1.0, 1.0, 0.0, 0.0)
+    best = (ident, 1.0, 1.0, 0.0, 0.0, "identity")
+    outline = None
+    if fit and (fit.get("scale_x", 1.0), fit.get("scale_y", 1.0), fit.get("dx", 0.0), fit.get("dy", 0.0)) != (1.0, 1.0, 0.0, 0.0):
+        outline = score(fit["scale_x"], fit["scale_y"], fit["dx"], fit["dy"])
+        if outline > ident * IDENTITY_MARGIN:
+            best = (outline, fit["scale_x"], fit["scale_y"], fit["dx"], fit["dy"], "outline")
+    step = 2 * f
+    for s in (0.98, 0.99, 1.0, 1.01, 1.02):
+        for dx in range(-3 * step, 3 * step + 1, step):
+            for dy in range(-3 * step, 3 * step + 1, step):
+                if (s, dx, dy) == (1.0, 0, 0):
+                    continue
+                v = score(s, s, float(dx), float(dy))
+                if v > best[0] and v > ident * IDENTITY_MARGIN:
+                    best = (v, s, s, float(dx), float(dy), "grid")
+    if best[5] != "identity" and f > 1:   # full-resolution ±1 px refinement (sub-sampling step)
+        v0, sx, sy, dx, dy, src = best
+        for ddx in range(-f, f + 1):
+            for ddy in range(-f, f + 1):
+                v = score(sx, sy, dx + ddx, dy + ddy)
+                if v > best[0]:
+                    best = (v, sx, sy, dx + ddx, dy + ddy, src)
+    v, sx, sy, dx, dy, src = best
+    return {"scale_x": round(float(sx), 4), "scale_y": round(float(sy), 4), "dx": round(float(dx), 1),
+            "dy": round(float(dy), 1), "ncc": round(float(v), 3), "ncc_identity": round(float(ident), 3),
+            "ncc_outline": None if outline is None else round(float(outline), 3), "source": src,
+            "ok": bool(v >= MIN_ALIGN_NCC)}
+
+
+def product_size(mask: np.ndarray) -> float:
+    ys, xs = np.nonzero(mask > 0.5)
+    if not len(xs):
+        return 0.0
+    return float(np.hypot(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))
+
+
+def blur_radius(diag: float) -> int:
+    """Frequency split radius: ~1 % of the product's bounding-box diagonal (2–24 px)."""
+    return int(np.clip(round(0.01 * diag), 2, 24))
+
+
+def paste_weight(mask: np.ndarray, L: int):
+    """Feathered interior weight: 0 on and near the silhouette, 1 deep inside.
+
+    Erode first, then feather inwards, so the outermost ``r_e`` pixels stay pure AI
+    (no halo from the detail pass's background or a 1-px misalignment)."""
+    hard = mask > 0.5
+    r_e = max(2, int(round(0.003 * L)))
+    r_f = max(2, int(round(0.004 * L)))
+    core = erode(hard, r_e + r_f)
+    w = np.clip(blur(core.astype(np.float32), r_f, 2), 0, 1)
+    return np.where(erode(hard, r_e), w, 0.0).astype(np.float32), r_e, r_f
+
+
+def _norm_blur(img: np.ndarray, weight: np.ndarray, r: int) -> np.ndarray:
+    """Normalised convolution: blur of ``img`` using only pixels where ``weight`` > 0."""
+    num = blur(img * weight[..., None], r, 2)
+    den = blur(weight, r, 2)[..., None]
+    return num / np.maximum(den, 1e-4)
+
+
+# --------------------------------------------------------------------------- blend
+
+def denoise_detail(detail: np.ndarray, L: int) -> np.ndarray:
+    """Edge-preserving clean-up of the detail pass (guided filter, luminance guide): removes
+    render grain (few samples, no denoiser) so grain is never mistaken for detail, while
+    edges, seams and text with real contrast pass through."""
+    g = luminance(detail)
+    r = max(1, int(round(L / 640)))
+    return np.clip(np.dstack([guided_filter(g, detail[..., c], r, 4e-4) for c in range(3)]), 0, 1)
+
+
+def frequency_blend(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray, weight: np.ndarray,
+                    r: int, strength: float = DEFAULT_STRENGTH, flat=(0.012, 0.04), matte=None):
+    """Low frequencies of ``ai`` + high frequencies of ``detail`` inside ``weight``.
+
+    ``detail`` is brightness-normalised to the AI locally (ratio of low-pass luminance,
+    clamped), so a flat-lit detail pass carries its texture into a dark night scene at
+    the right contrast. Per pixel the detail's high frequencies replace the AI's only as
+    far as the detail pass actually has structure there (local high-frequency energy,
+    ramping from ``flat[0]`` to ``flat[1]``): on flat paint the AI keeps its own sharp
+    reflections and grain-level noise in the detail pass is ignored. On ``matte`` parts
+    (fabric, wood, leather, rubber: no sharp reflections) the detail pass wins everywhere,
+    so texture the AI invented there (crumpled velvet, fake grain) is replaced."""
+    strength = float(np.clip(strength, 0.0, 1.0))
+    ai = ai.astype(np.float32)
+    detail = detail.astype(np.float32)
+    support = np.clip(detail_alpha, 0, 1).astype(np.float32)
+    inside = (support > 0.5).astype(np.float32)
+    a_low = blur(ai, r, 2)
+    d_low = _norm_blur(detail, np.maximum(support, 1e-3), r)
+    hf_a = ai - a_low
+    hf_d = (detail - d_low) * inside[..., None]
+    la, ld = luminance(a_low), luminance(d_low)
+    gain = np.clip((la + 0.02) / (ld + 0.02), 0.25, 3.0)[..., None]
+    hf_d = hf_d * gain
+    er = max(1, r // 3)
+    energy = blur(np.abs(luminance(hf_d)) * inside, er, 2) / np.maximum(blur(inside, er, 2), 1e-3)
+    structure = np.clip((energy - flat[0]) / max(flat[1] - flat[0], 1e-4), 0, 1)
+    if matte is not None:
+        structure = np.maximum(structure, np.clip(matte, 0, 1))
+    # A flat-lit pass has less micro-contrast than a photo: lift the detail's high frequencies
+    # towards the AI's local contrast (never lower, at most ×2.5) so edges keep their punch.
+    e_ai = blur(np.abs(luminance(hf_a)), r, 2)
+    e_d = blur(np.abs(luminance(hf_d)) * inside, r, 2) / np.maximum(blur(inside, r, 2), 1e-3)
+    hf_d = hf_d * np.clip((e_ai + 1e-3) / (e_d + 1e-3), 1.0, 2.5)[..., None]
+    wd = (strength * structure * np.clip(weight, 0, 1) * inside)[..., None]
+    out = a_low + wd * hf_d + (1 - wd) * hf_a
+    sel = weight > 0.5
+    return np.clip(out, 0, 1), {"r": int(r), "structure_mean": round(float(structure[sel].mean()) if sel.any() else 0.0, 3),
+                                "wd_mean": round(float(wd[..., 0][sel].mean()) if sel.any() else 0.0, 3)}
+
+
+def colour_match(src: np.ndarray, ref: np.ndarray, region: np.ndarray, amount: float = 0.85,
+                 levels=(0.7, 2.5), cast=(0.6, 1.6)) -> np.ndarray:
+    """Light colour / brightness / contrast match of ``src`` (detail pass) to ``ref`` (AI) over
+    ``region``. Levels: the 2nd / 98th luminance percentiles of the detail pass are mapped
+    onto the AI's (a flat-lit plate has grey letters, a photo of it near-black ones), scale
+    clamped to ``levels``. Colour cast: per-channel ratio of the AI's chroma to the detail's,
+    clamped to ``cast``. Both applied at ``amount``; the pixels' structure stays the detail's."""
+    sel = region > 0.5
+    if sel.sum() < 4:
+        return src
+    ls, lr = luminance(src)[sel], luminance(ref)[sel]
+    s5, s95 = np.percentile(ls, [2, 98])
+    r5, r95 = np.percentile(lr, [2, 98])
+    k = float(np.clip((r95 - r5 + 1e-3) / (s95 - s5 + 1e-3), levels[0], levels[1]))
+    out = (src - s95) * k + r95
+    ms = src[sel].mean(0) / max(float(ls.mean()), 1e-3)
+    mr = ref[sel].mean(0) / max(float(lr.mean()), 1e-3)
+    g = np.clip((mr + 0.01) / (ms + 0.01), cast[0], cast[1])
+    out = out * g[None, None, :]
+    return np.clip(src + amount * (out - src), 0, 1)
+
+
+def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
+                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None) -> dict:
+    """Paste the detail pass onto the AI image. All inputs on the same canvas (H×W).
+
+    ``ai_rgb`` float 0..1; ``detail_rgba`` float 0..1 (straight alpha); ``product_mask``
+    float 0..1; ``keep_rgba`` optional keep render (see ``merge_keep_masks``).
+    Returns dict(image, fit, keep, timings, ...)."""
+    t0 = time.time()
+    h, w = ai_rgb.shape[:2]
+    L = max(h, w)
+    I = ai_rgb[..., :3].astype(np.float32)
+    D = detail_rgba[..., :3].astype(np.float32)
+    Da = detail_rgba[..., 3].astype(np.float32) if detail_rgba.shape[-1] == 4 else np.ones((h, w), np.float32)
+    timings = {}
+    align = None
+    if fit is None:
+        fit = fit_mask(I, product_mask)
+        align = verify_alignment(I, D, Da, product_mask, fit)
+        if not align["ok"]:
+            return {"image": I.copy(), "skipped": "对齐不可靠（细节底图与成片不匹配）",
+                    "fit": {k: v for k, v in fit.items() if k != "mask"}, "align": align, "keep": {},
+                    "blend": {}, "changed_px": 0, "weight": np.zeros((h, w), np.float32), "keep_mask": None,
+                    "timings": {"fit": round(time.time() - t0, 2), "total": round(time.time() - t0, 2)}}
+        if (align["scale_x"], align["scale_y"], align["dx"], align["dy"]) != (
+                fit.get("scale_x"), fit.get("scale_y"), fit.get("dx"), fit.get("dy")):
+            fit = {"scale": round((align["scale_x"] + align["scale_y"]) / 2, 4), "scale_x": align["scale_x"],
+                   "scale_y": align["scale_y"], "dx": align["dx"], "dy": align["dy"], "search": align["source"],
+                   "outline_fit": {k: v for k, v in fit.items() if k != "mask"}}
+    timings["fit"] = round(time.time() - t0, 2)
+    t = time.time()
+    sx, sy, dx, dy = fit.get("scale_x", 1.0), fit.get("scale_y", 1.0), fit.get("dx", 0.0), fit.get("dy", 0.0)
+    identity = (sx, sy, dx, dy) == (1.0, 1.0, 0.0, 0.0)
+    ys, xs = np.nonzero(product_mask > 0.5)
+    centre = (float(xs.mean()), float(ys.mean())) if len(xs) else (w / 2, h / 2)
+    keep = glass = matte = None
+    keep_info = {}
+    if keep_rgba is not None:
+        keep, glass, matte, keep_info = merge_keep_masks(keep_rgba, product_mask)
+    if not identity:
+        # warp premultiplied colour so the transparent background never bleeds in
+        Dp = warp_image(np.dstack([D * Da[..., None], Da]), (sx, sy), dx, dy, centre)
+        Da = Dp[..., 3]
+        D = Dp[..., :3] / np.maximum(Da, 1e-4)[..., None]
+        if keep is not None:
+            keep = warp_image(keep, (sx, sy), dx, dy, centre)
+            glass = warp_image(glass, (sx, sy), dx, dy, centre)
+            matte = warp_image(matte, (sx, sy), dx, dy, centre)
+    fitted = fit.get("mask")
+    if fitted is None:
+        fitted = product_mask if identity else warp_image(product_mask, (sx, sy), dx, dy, centre)
+    timings["warp"] = round(time.time() - t, 2)
+    t = time.time()
+    weight, r_e, r_f = paste_weight(fitted, L)
+    weight = weight * np.clip((Da - 0.5) * 2.0, 0, 1)   # holes in the detail pass stay AI
+    if glass is not None and (glass > 0.5).any():          # glass / windows: AI reflections win
+        weight = weight * (1.0 - np.clip(blur(dilate(glass > 0.5, 1).astype(np.float32), 2, 1), 0, 1))
+    if canvas_alpha is not None:
+        weight = weight * (canvas_alpha > 0.5)
+    diag = product_size(fitted)
+    r = blur_radius(diag)
+    D = denoise_detail(D, L)
+    blended, binfo = frequency_blend(I, D, Da, weight, r, strength, matte=matte)
+    out = I * (1 - weight[..., None]) + blended * weight[..., None]
+    timings["blend"] = round(time.time() - t, 2)
+    t = time.time()
+    keep_px = 0
+    if keep is not None and (keep > 0.5).any():
+        # replace keep-exact regions outright, colour-matched to the AI result; a slightly
+        # grown hard core with a 1–2 px feather, but never past the product silhouette.
+        k_hard = keep > 0.5
+        # Badges too small to carry legible text (a few pixels: a distant bonnet logo) are
+        # left to the frequency blend: replacing them outright only swaps a dot for a dot
+        # and their colour statistics are unreliable.
+        rk = max(4, int(round(L / 200)))
+        k_hard = k_hard & (blur(k_hard.astype(np.float32), rk, 1) >= MIN_KEEP_DENSITY)
+        k_hard = dilate(k_hard, rk) & (keep > 0.5)
+        grow = max(1, int(round(L / 1400)))
+        k_core = dilate(k_hard, grow) & (fitted > 0.5)
+        k = np.clip(blur(k_core.astype(np.float32), max(1, grow), 1), 0, 1) * (Da > 0.5)
+        k = np.where(erode(fitted > 0.5, max(1, r_e // 2)), k, 0.0)
+        if canvas_alpha is not None:
+            k = k * (canvas_alpha > 0.5)
+        stats = k_core if k_core.sum() >= 30 else (dilate(k_core, max(2, r)) & (fitted > 0.5))
+        matched = colour_match(D, I, stats)
+        out = out * (1 - k[..., None]) + matched * k[..., None]
+        keep_px = int((k > 0.5).sum())
+    timings["keep"] = round(time.time() - t, 2)
+    out = np.clip(out, 0, 1)
+    changed = np.abs(out - I).max(-1) > (1.5 / 255)
+    return {"image": out, "fit": {k: v for k, v in fit.items() if k != "mask"}, "align": align,
+            "keep": dict(keep_info, pasted_px=keep_px),
+            "blend": dict(binfo, erode=r_e, feather=r_f, strength=round(float(strength), 3), diag=round(diag, 1)),
+            "changed_px": int(changed.sum()), "weight": weight, "keep_mask": keep,
+            "timings": dict(timings, total=round(time.time() - t0, 2))}
+
+
+# --------------------------------------------------------------------------- file driver
+
+def raw_path(path) -> str:
+    from pathlib import Path
+    p = Path(path)
+    return str(p.with_name(p.stem + "_raw" + (p.suffix or ".png")))
+
+
+def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="", strength=DEFAULT_STRENGTH,
+               debug_dir="") -> dict:
+    """File-level entry: read PNGs (any size; Blender passes are resampled to the image),
+    write the pasted PNG (alpha of the input image preserved). Returns a JSON-able report."""
+    from pathlib import Path
+    from .png_io import read_png, write_png
+    t0 = time.time()
+    rgba = read_png(image_path)
+    h, w = rgba.shape[:2]
+    I = rgba[..., :3].astype(np.float32) / 255.0
+    ca = rgba[..., 3].astype(np.float32) / 255.0 if rgba.shape[-1] == 4 else None
+
+    def load(path, channels):
+        arr = read_png(path).astype(np.float32) / 255.0
+        if arr.shape[-1] == 3 and channels == 4:
+            arr = np.dstack([arr, np.ones(arr.shape[:2], np.float32)])
+        if arr.shape[:2] != (h, w):
+            arr = np.clip(resize(arr, w, h), 0, 1)
+        return arr
+
+    D = load(detail_path, 4)
+    M = load(mask_path, 4)[..., 3]
+    K = load(keep_path, 4) if keep_path and Path(keep_path).is_file() else None
+    res = paste_details(I, D, M, K, strength=strength, canvas_alpha=ca)
+    out = (np.clip(res["image"], 0, 1) * 255 + 0.5).astype(np.uint8)
+    if ca is not None:
+        out = np.dstack([out, rgba[..., 3]])
+    write_png(output_path, out)
+    if debug_dir:
+        Path(debug_dir).mkdir(parents=True, exist_ok=True)
+        stem = Path(output_path).stem
+        gray = lambda x: np.repeat((np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8)[..., None], 3, -1)
+        write_png(str(Path(debug_dir) / f"{stem}_weight.png"), gray(res["weight"]))
+        if res["keep_mask"] is not None:
+            write_png(str(Path(debug_dir) / f"{stem}_keep.png"), gray(res["keep_mask"]))
+    rep = {k: v for k, v in res.items() if k not in {"image", "weight", "keep_mask"}}
+    rep["seconds"] = round(time.time() - t0, 2)
+    rep["output"] = str(output_path)
+    return rep
+
+
+def summarize(report) -> str:
+    if not report:
+        return ""
+    if report.get("error"):
+        return "细节回贴失败：" + str(report["error"])[:80]
+    if report.get("skipped"):
+        return "细节回贴已跳过：" + str(report["skipped"])[:60] + "，保留 AI 原图"
+    keep = (report.get("keep") or {}).get("pasted_px", 0)
+    fit = report.get("fit") or {}
+    moved = fit.get("search") not in (None, "identity")
+    return ("细节回贴完成" + ("（含标识原样贴回）" if keep else "")
+            + (f" · 对齐 缩放 {fit.get('scale', 1):.3f}" if moved else "")
+            + f" · {report.get('seconds', 0):.1f} 秒")

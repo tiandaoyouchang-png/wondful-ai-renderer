@@ -715,6 +715,23 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.0 细节回贴: paste the product's real Blender details back onto the AI result
+    detail_paste: BoolProperty(
+        name="细节回贴",
+        description="生成后把 Blender 里产品的真实细节（车牌文字、Logo、轮毂辐条、面料纹理、缝线等）贴回成片："
+                    "光照、反射和色调保留 AI 的，细节用 Blender 的；车牌 / 标识整块原样贴回。原始 AI 结果另存为 _raw.png",
+        default=True,
+    )
+    detail_paste_strength: FloatProperty(
+        name="细节强度",
+        description="细节回贴的强度：0 = 完全保留 AI 画的细节，1 = 细节全部来自 Blender（光照始终保留 AI 的）",
+        default=0.8, min=0.0, max=1.0, subtype="FACTOR",
+    )
+    last_detail_note: StringProperty(
+        name="细节回贴状态",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     # 1.2.0 环境体块: context blocks rendered grey-blue in the clay base, turned into buildings
     massing_enabled: BoolProperty(
         name="环境体块",

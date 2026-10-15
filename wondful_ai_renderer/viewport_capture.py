@@ -730,6 +730,20 @@ def _custom_terrain(context, collection, settings, created, restore):
     return mesh, info
 
 
+def _render_still(scene):
+    """``render.render(write_still=True)``; a Cycles build without OpenImageDenoise raises
+    "Failed to denoise" when denoising is on: retry once without denoising."""
+    try:
+        bpy.ops.render.render(write_still=True)
+    except RuntimeError as exc:
+        cycles = getattr(scene, "cycles", None)
+        if "denois" not in str(exc).lower() or cycles is None or not cycles.use_denoising:
+            raise
+        print("[Wondful] 当前 Blender 不支持降噪，改为不降噪渲染")
+        cycles.use_denoising = False
+        bpy.ops.render.render(write_still=True)
+
+
 _GEOMETRY_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES", "POINTCLOUD", "VOLUME",
                    "GPENCIL", "GREASEPENCIL"}
 
@@ -819,6 +833,346 @@ def _render_mask_now(context, filepath: str, collection, holdout=()) -> bool:
             cycles.samples, cycles.use_denoising, cycles.max_bounces = old_cycles
 
 
+def keep_exact_slots(collection, with_glass=False):
+    """1.2.0 细节回贴: {(object, slot index or -1): 'explicit' | 'auto' | 'glass' | 'matte'} for the
+    product's keep-exact parts (and, with ``with_glass``, its glass / transparent and matte /
+    textile parts).
+
+    Explicit = custom property ``wondful_keep_exact`` on the object or its material
+    (「标为原样保留」); automatic = names of plates / badges / logos (plate, license, logo,
+    badge, emblem, 车牌, 标 …). An explicit False on the object switches the automatic
+    detection off for it."""
+    from .detail_paste import KEEP_PROP, classify_slot
+    out = {}
+    if collection is None:
+        return out
+    for obj in collection.all_objects:
+        if obj.type not in _GEOMETRY_TYPES or obj in _MASSING_EXCLUDE:
+            continue
+        oprop = obj.get(KEEP_PROP) if hasattr(obj, "get") else None
+        slots = list(getattr(obj, "material_slots", []) or [])
+        if not slots:
+            kind = classify_slot(obj.name, oprop, "", None)
+            if kind:
+                out[(obj, -1)] = kind
+            continue
+        for i, slot in enumerate(slots):
+            mat = slot.material
+            kind = classify_slot(obj.name, oprop, mat.name if mat else "", mat.get(KEEP_PROP) if mat else None)
+            if not kind and with_glass and _material_is_glass(mat):
+                kind = "glass"
+            if not kind and with_glass and _material_is_matte(mat):
+                kind = "matte"
+            if kind:
+                out[(obj, i)] = kind
+    return out
+
+
+def _material_is_matte(mat) -> bool:
+    """Matte / textile material (fabric, velvet, wood, leather, rubber): it shows no sharp
+    reflections, so any fine texture the AI draws on it is invented; 细节回贴 uses the
+    Blender texture there even where it is smooth."""
+    if mat is None:
+        return False
+    from .detail_paste import name_looks_matte
+    if name_looks_matte(mat.name):
+        return True
+    try:
+        tree = mat.node_tree if mat.use_nodes else None
+        for node in (tree.nodes if tree else ()):
+            if node.type != "BSDF_PRINCIPLED":
+                continue
+            sheen = node.inputs.get("Sheen Weight") or node.inputs.get("Sheen")
+            if sheen is not None and not sheen.is_linked and float(sheen.default_value) > 0.2:
+                return True
+            rough, metal = node.inputs.get("Roughness"), node.inputs.get("Metallic")
+            if rough is not None and not rough.is_linked and float(rough.default_value) >= 0.6 \
+                    and (metal is None or (not metal.is_linked and float(metal.default_value) < 0.5)):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _material_is_glass(mat) -> bool:
+    """Transparent / transmissive material (glass, windows, light covers): the AI renders its
+    reflections and what shows through, so 细节回贴 leaves it to the AI."""
+    if mat is None:
+        return False
+    from .detail_paste import name_looks_glass, name_looks_lamp
+    if name_looks_lamp(mat.name):
+        return False  # lamp covers: the lamp graphics behind them are identity detail, keep pasting
+    if name_looks_glass(mat.name):
+        return True
+    try:
+        if getattr(mat, "blend_method", "OPAQUE") in {"BLEND"}:
+            return True
+        tree = mat.node_tree if mat.use_nodes else None
+        for node in (tree.nodes if tree else ()):
+            if node.type == "BSDF_PRINCIPLED":
+                for key in ("Transmission Weight", "Transmission"):
+                    sock = node.inputs.get(key)
+                    if sock is not None and not sock.is_linked and float(sock.default_value) > 0.3:
+                        return True
+                alpha = node.inputs.get("Alpha")
+                if alpha is not None and not alpha.is_linked and float(alpha.default_value) < 0.6:
+                    return True
+            elif node.type in {"BSDF_GLASS", "BSDF_TRANSPARENT", "BSDF_REFRACTION"}:
+                out = node.outputs[0]
+                if out.is_linked:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def keep_exact_texts(collection) -> list:
+    """Texts the user typed in ``wondful_keep_text`` on product objects (for the prompt)."""
+    from .detail_paste import KEEP_TEXT_PROP
+    texts = []
+    for obj in (collection.all_objects if collection is not None else ()):
+        value = obj.get(KEEP_TEXT_PROP) if hasattr(obj, "get") else None
+        if isinstance(value, str) and value.strip() and value.strip() not in texts:
+            texts.append(value.strip())
+    return texts
+
+
+def _emission_material(name, rgb):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for node in list(nt.nodes):
+        nt.nodes.remove(node)
+    em = nt.nodes.new("ShaderNodeEmission")
+    em.inputs["Color"].default_value = (*rgb, 1.0)
+    em.inputs["Strength"].default_value = 1.0
+    outn = nt.nodes.new("ShaderNodeOutputMaterial")
+    nt.links.new(em.outputs[0], outn.inputs["Surface"])
+    return mat
+
+
+def _holdout_material(name):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for node in list(nt.nodes):
+        nt.nodes.remove(node)
+    ho = nt.nodes.new("ShaderNodeHoldout")
+    outn = nt.nodes.new("ShaderNodeOutputMaterial")
+    nt.links.new(ho.outputs[0], outn.inputs["Surface"])
+    return mat
+
+
+def _isolate_product(scene, product, holdout, hidden, held, hide_lights=False):
+    hold = set(holdout)
+    for obj in scene.objects:
+        if obj in hold:
+            if not getattr(obj, "is_holdout", True):
+                obj.is_holdout = True
+                held.append(obj)
+            continue
+        if obj in product or obj.hide_render:
+            continue
+        if obj.type in _GEOMETRY_TYPES or (hide_lights and obj.type == "LIGHT"):
+            obj.hide_render = True
+            hidden.append(obj)
+
+
+def _unisolate(hidden, held):
+    for obj in hidden:
+        try:
+            obj.hide_render = False
+        except Exception:
+            pass
+    for obj in held:
+        try:
+            obj.is_holdout = False
+        except Exception:
+            pass
+
+
+def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path: str = "") -> dict:
+    """1.2.0 细节回贴: clean detail pass of the product only, with its own materials, under a
+    flat even light (uniform white world, no lamps), transparent film, Standard view
+    transform. Optionally also the keep-exact mask (R = explicit, G = automatic, A =
+    coverage, B = glass / transparent parts left to the AI, black = matte / textile parts
+    whose texture always comes from Blender; other product parts are holdouts so they still
+    occlude). Restores every
+    setting it changes. Returns {"detail": bool, "keep": bool, "keep_slots": n, "engine": str}."""
+    scene = context.scene
+    render = scene.render
+    product = set(collection.all_objects) if collection is not None else set()
+    info = {"detail": False, "keep": False, "keep_slots": 0, "engine": ""}
+    if not product:
+        return info
+    hidden, held, created, slot_undo = [], [], [], []
+    holdout = [o for o in holdout or () if o not in product and not o.hide_render]
+    view_layer = context.view_layer
+    old = {"override": view_layer.material_override, "engine": render.engine,
+           "film": getattr(render, "film_transparent", False), "path": render.filepath,
+           "mode": render.image_settings.color_mode, "world": scene.world}
+    vs = scene.view_settings
+    old_cm = (vs.view_transform, vs.look, vs.exposure, vs.gamma)
+    cycles = getattr(scene, "cycles", None)
+    old_cycles = (cycles.samples, cycles.use_denoising, cycles.max_bounces) if cycles is not None else None
+    eevee = getattr(scene, "eevee", None)
+    old_eevee = getattr(eevee, "taa_render_samples", None) if eevee is not None else None
+    try:
+        _isolate_product(scene, product, holdout, hidden, held, hide_lights=True)
+        view_layer.material_override = None
+        world = bpy.data.worlds.new("_wondful_detail_world")
+        world.use_nodes = True
+        bg = world.node_tree.nodes.get("Background")
+        if bg:
+            bg.inputs[0].default_value = (1.0, 1.0, 1.0, 1.0)
+            bg.inputs[1].default_value = float(os.environ.get("WONDFUL_DETAIL_LIGHT", "1.0"))
+        scene.world = world
+        created.append(("world", world))
+        render.film_transparent = True
+        _set_png(render.image_settings)
+        render.image_settings.color_mode = "RGBA"
+        try:
+            vs.view_transform, vs.look, vs.exposure, vs.gamma = "Standard", "None", 0.0, 1.0
+        except Exception:
+            pass
+        forced = os.environ.get("WONDFUL_DETAIL_ENGINE", "").strip().upper()
+        # Eevee is fast in the UI; background Blender may have no GPU context (no EGL) and
+        # Eevee/Workbench abort there instead of raising, so it uses Cycles + denoise.
+        engines = [forced] if forced else (["CYCLES"] if bpy.app.background
+                                           else ["BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES"])
+        for engine in engines:
+            try:
+                render.engine = engine
+                break
+            except Exception:
+                continue
+        if render.engine == "CYCLES" and cycles is not None:
+            cycles.samples = int(os.environ.get("WONDFUL_DETAIL_SAMPLES", "128"))
+            cycles.use_denoising = os.environ.get("WONDFUL_DETAIL_DENOISE", "1") != "0"
+            cycles.max_bounces = max(4, int(old_cycles[2] if old_cycles else 8))
+        elif eevee is not None and old_eevee is not None:
+            eevee.taa_render_samples = max(64, int(old_eevee))
+        info["engine"] = render.engine
+        render.filepath = filepath
+        try:
+            _render_still(scene)
+            info["detail"] = Path(filepath).exists()
+        except Exception as exc:
+            if render.engine != "CYCLES":   # one more try on Cycles
+                print(f"[Wondful] 细节底图 {render.engine} 失败：{exc}，改用 Cycles")
+                render.engine = "CYCLES"
+                info["engine"] = "CYCLES"
+                if cycles is not None:
+                    cycles.samples = int(os.environ.get("WONDFUL_DETAIL_SAMPLES", "128"))
+                    cycles.use_denoising = True
+                _render_still(scene)
+                info["detail"] = Path(filepath).exists()
+            else:
+                raise
+        slots = keep_exact_slots(collection, with_glass=True) if keep_path else {}
+        info["keep_slots"] = sum(1 for k in slots.values() if k in {"explicit", "auto"})
+        info["glass_slots"] = sum(1 for k in slots.values() if k == "glass")
+        info["matte_slots"] = sum(1 for k in slots.values() if k == "matte")
+        if slots:
+            explicit = _emission_material("_wondful_keep_explicit", (1.0, 0.0, 0.0))
+            auto = _emission_material("_wondful_keep_auto", (0.0, 1.0, 0.0))
+            glass = _emission_material("_wondful_keep_glass", (0.0, 0.0, 1.0))
+            matte = _emission_material("_wondful_keep_matte", (0.0, 0.0, 0.0))
+            hold_mat = _holdout_material("_wondful_keep_holdout")
+            created += [("mat", explicit), ("mat", auto), ("mat", glass), ("mat", matte), ("mat", hold_mat)]
+            for obj in product:
+                if obj.type not in _GEOMETRY_TYPES or obj.hide_render:
+                    continue
+                mats = getattr(getattr(obj, "data", None), "materials", None)
+                if mats is None:
+                    continue
+                if len(obj.material_slots) == 0:
+                    mats.append(None)
+                    slot_undo.append(lambda mats=mats: mats.clear() if len(mats) <= 1 else mats.pop())
+                for i, slot in enumerate(list(obj.material_slots)):
+                    kind = slots.get((obj, i)) or slots.get((obj, -1))
+                    old_link = slot.link
+                    if old_link != "OBJECT":
+                        slot.link = "OBJECT"
+                    old_mat = slot.material
+
+                    def undo(slot=slot, link=old_link, mat=old_mat):
+                        if slot.link != "OBJECT":
+                            slot.link = "OBJECT"
+                        slot.material = mat
+                        if link != "OBJECT":
+                            slot.link = link
+                    slot_undo.append(undo)
+                    slot.material = {"explicit": explicit, "auto": auto, "glass": glass, "matte": matte}.get(kind, hold_mat)
+            render.engine = "CYCLES"
+            if cycles is not None:
+                cycles.samples = 16
+                cycles.use_denoising = False
+                cycles.max_bounces = 0
+            render.filepath = keep_path
+            bpy.ops.render.render(write_still=True)
+            info["keep"] = Path(keep_path).exists()
+        return info
+    finally:
+        for undo in reversed(slot_undo):
+            try:
+                undo()
+            except Exception as exc:
+                print(f"[Wondful] 恢复材质槽失败：{exc}")
+        _unisolate(hidden, held)
+        view_layer.material_override = old["override"]
+        render.engine = old["engine"]
+        if hasattr(render, "film_transparent"):
+            render.film_transparent = old["film"]
+        render.filepath = old["path"]
+        try:
+            render.image_settings.color_mode = old["mode"]
+        except Exception:
+            pass
+        try:
+            vs.view_transform, vs.look, vs.exposure, vs.gamma = old_cm
+        except Exception:
+            pass
+        scene.world = old["world"]
+        if old_cycles is not None:
+            cycles.samples, cycles.use_denoising, cycles.max_bounces = old_cycles
+        if old_eevee is not None:
+            try:
+                eevee.taa_render_samples = old_eevee
+            except Exception:
+                pass
+        for kind, block in created:
+            try:
+                {"mat": bpy.data.materials, "world": bpy.data.worlds}[kind].remove(block)
+            except Exception:
+                pass
+
+
+def render_detail_pass(context, filepath: str, collection, keep_path: str = "", massing=None) -> dict:
+    """Standalone 细节回贴 detail pass (when no clay base was rendered): scene camera, output size."""
+    scene = context.scene
+    require_scene_camera(context)
+    width, height = camera_output_dimensions(context)
+    render = scene.render
+    snap = {"x": render.resolution_x, "y": render.resolution_y, "pct": render.resolution_percentage,
+            "fmt": _snapshot_image_format(render.image_settings)}
+    frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
+    try:
+        for k in frame_options:
+            setattr(render, k, False)
+        render.resolution_x, render.resolution_y, render.resolution_percentage = width, height, 100
+        from . import massing as MS
+        holdout = MS.massing_objects(massing, collection) if massing is not None else []
+        info = _render_detail_now(context, filepath, collection, holdout, keep_path)
+        info["detail"] = bool(info.get("detail")) and image_dimensions(filepath) == (width, height)
+        return info
+    finally:
+        render.resolution_x, render.resolution_y, render.resolution_percentage = snap["x"], snap["y"], snap["pct"]
+        _restore_image_format(render.image_settings, snap["fmt"])
+        for k, v in frame_options.items():
+            setattr(render, k, v)
+
+
 def render_product_mask(context, filepath: str, collection, massing=None) -> bool:
     """Product silhouette from the scene camera at the camera output size (no clay base)."""
     scene = context.scene
@@ -843,7 +1197,8 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
 
 
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
-                     terrain=None, mask_path: str = "", massing=None) -> bool:
+                     terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
+                     keep_path: str = "") -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -1022,7 +1377,7 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             render.image_settings.color_mode = "RGB"
         except Exception:
             pass
-        bpy.ops.render.render(write_still=True)
+        _render_still(scene)
         ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
         if ok and mask_path and collection is not None:
             # 1.2.0 分层输出: same camera, same temporary product pose as the clay base.
@@ -1032,6 +1387,21 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             except Exception as exc:
                 LAST_CLAY_INFO["mask"] = False
                 print(f"[Wondful] 产品遮罩渲染失败：{exc}")
+        if ok and detail_path and collection is not None:
+            # 1.2.0 细节回贴: same camera and temporary pose; clay lamps / floor are hidden for it.
+            try:
+                import time as _time
+                t_detail = _time.time()
+                for kind, block in created:
+                    if kind == "obj" and not block.hide_render:
+                        block.hide_render = True
+                info = _render_detail_now(context, detail_path, collection, blocks, keep_path)
+                info["detail"] = bool(info.get("detail")) and image_dimensions(detail_path) == (width, height)
+                info["seconds"] = round(_time.time() - t_detail, 1)
+                LAST_CLAY_INFO["detail"] = info
+            except Exception as exc:
+                LAST_CLAY_INFO["detail"] = {"detail": False, "error": str(exc)[:200]}
+                print(f"[Wondful] 细节底图渲染失败：{exc}")
         return ok
     finally:
         _MASSING_EXCLUDE.clear()
