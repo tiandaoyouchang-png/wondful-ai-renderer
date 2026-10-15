@@ -379,6 +379,11 @@ def _draw_detail_paste(adv, context, props, busy):
         row = box.row(align=True)
         row.enabled = not busy
         row.prop(props, "detail_paste_strength", text="细节强度", slider=True)
+        row = box.row(align=True)
+        row.enabled = not busy
+        row.prop(props, "detail_colour_fix", text="按材质校色")
+        if getattr(props, "detail_colour_fix", True):
+            row.prop(props, "detail_colour_strength", text="强度", slider=True)
         box.label(text="光照随 AI，文字 / Logo / 纹理用 Blender 的；原图存为 _raw", icon="INFO")
         coll = getattr(props, "product_collection", None)
         if coll is None:

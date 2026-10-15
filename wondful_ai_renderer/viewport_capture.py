@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 import os
 from pathlib import Path
 from typing import Tuple
@@ -991,18 +992,63 @@ def _unisolate(hidden, held):
             pass
 
 
-def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path: str = "") -> dict:
+def material_color_kind(mat) -> str:
+    """按材质校色 kind of one material (see ``material_color.material_kind``)."""
+    from .material_color import material_kind
+    from .detail_paste import name_looks_lamp
+    if mat is None:
+        return "default"
+    name = mat.name
+    vals = {"metallic": 0.0, "roughness": 0.5, "coat": 0.0}
+    emissive = name_looks_lamp(name)
+    try:
+        tree = mat.node_tree if mat.use_nodes else None
+        out = None
+        for node in (tree.nodes if tree else ()):
+            if node.type == "OUTPUT_MATERIAL" and (out is None or getattr(node, "is_active_output", False)):
+                out = node
+        for node in (tree.nodes if tree else ()):
+            if node.type == "BSDF_PRINCIPLED":
+                for key, sock_names in (("metallic", ("Metallic",)), ("roughness", ("Roughness",)),
+                                        ("coat", ("Coat Weight", "Clearcoat"))):
+                    for sn in sock_names:
+                        sock = node.inputs.get(sn)
+                        if sock is not None and not sock.is_linked:
+                            vals[key] = max(vals[key], float(sock.default_value)) if key != "roughness" \
+                                else float(sock.default_value)
+                            break
+                es = node.inputs.get("Emission Strength")
+                ec = node.inputs.get("Emission Color") or node.inputs.get("Emission")
+                if es is not None and (es.is_linked or float(es.default_value) > 0.05) and ec is not None and \
+                        (ec.is_linked or max(ec.default_value[:3]) > 0.05):
+                    emissive = True
+            elif node.type == "EMISSION" and node.outputs[0].is_linked:
+                emissive = True
+        if out is not None and out.inputs["Surface"].is_linked:
+            src = out.inputs["Surface"].links[0].from_node
+            if src.type == "EMISSION":
+                emissive = True
+    except Exception:
+        pass
+    return material_kind(name, glass=_material_is_glass(mat), emissive=emissive,
+                         matte=_material_is_matte(mat), **vals)
+
+
+def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path: str = "",
+                       matid_path: str = "") -> dict:
     """1.2.0 细节回贴: clean detail pass of the product only, with its own materials, under a
     flat even light (uniform white world, no lamps), transparent film, Standard view
     transform. Optionally also the keep-exact mask (R = explicit, G = automatic, A =
     coverage, B = glass / transparent parts left to the AI, black = matte / textile parts
     whose texture always comes from Blender; other product parts are holdouts so they still
-    occlude). Restores every
-    setting it changes. Returns {"detail": bool, "keep": bool, "keep_slots": n, "engine": str}."""
+    occlude). Optionally the material-ID pass for 按材质校色 (``matid_path``: every product
+    material as one flat palette emission colour, no anti-aliasing, plus ``<path>.json`` with
+    the material list and kinds). Restores every
+    setting it changes. Returns {"detail": bool, "keep": bool, "matid": bool, "keep_slots": n, "engine": str}."""
     scene = context.scene
     render = scene.render
     product = set(collection.all_objects) if collection is not None else set()
-    info = {"detail": False, "keep": False, "keep_slots": 0, "engine": ""}
+    info = {"detail": False, "keep": False, "matid": False, "keep_slots": 0, "engine": ""}
     if not product:
         return info
     hidden, held, created, slot_undo = [], [], [], []
@@ -1017,6 +1063,12 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
     old_cycles = (cycles.samples, cycles.use_denoising, cycles.max_bounces) if cycles is not None else None
     eevee = getattr(scene, "eevee", None)
     old_eevee = getattr(eevee, "taa_render_samples", None) if eevee is not None else None
+    old_filter = getattr(cycles, "filter_width", None) if cycles is not None else None
+    old_dither = getattr(render, "dither_intensity", None)
+    orig_mats = {}
+    for obj in product:
+        for i, slot in enumerate(getattr(obj, "material_slots", []) or []):
+            orig_mats[(obj, i)] = slot.material
     try:
         _isolate_product(scene, product, holdout, hidden, held, hide_lights=True)
         view_layer.material_override = None
@@ -1112,6 +1164,13 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
             render.filepath = keep_path
             bpy.ops.render.render(write_still=True)
             info["keep"] = Path(keep_path).exists()
+        if matid_path:
+            try:
+                t_id = time.time()
+                info["matid"] = _render_matid(scene, product, matid_path, orig_mats, created, slot_undo)
+                info["matid_seconds"] = round(time.time() - t_id, 1)
+            except Exception as exc:
+                print(f"[Wondful] 材质 ID 渲染失败（跳过按材质校色）：{exc}")
         return info
     finally:
         for undo in reversed(slot_undo):
@@ -1136,6 +1195,16 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
         scene.world = old["world"]
         if old_cycles is not None:
             cycles.samples, cycles.use_denoising, cycles.max_bounces = old_cycles
+        if old_filter is not None:
+            try:
+                cycles.filter_width = old_filter
+            except Exception:
+                pass
+        if old_dither is not None:
+            try:
+                render.dither_intensity = old_dither
+            except Exception:
+                pass
         if old_eevee is not None:
             try:
                 eevee.taa_render_samples = old_eevee
@@ -1148,7 +1217,73 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
                 pass
 
 
-def render_detail_pass(context, filepath: str, collection, keep_path: str = "", massing=None) -> dict:
+def _render_matid(scene, product, matid_path, orig_mats, created, slot_undo) -> bool:
+    """Material-ID pass (按材质校色): each distinct product material -> one palette emission
+    colour (``material_color.palette_colour``), Cycles, 4 samples, pixel filter 0.01 px (no
+    anti-aliasing mixes between IDs), no dither; writes ``matid_path`` and ``<path>.json``.
+    Slot overrides are appended to ``slot_undo`` (restored to ``orig_mats`` by the caller)."""
+    import json
+    from .material_color import palette_colour, srgb_to_linear_scalar, sidecar_path, MAX_MATERIALS
+    render = scene.render
+    cycles = getattr(scene, "cycles", None)
+    ids, mats_out, id_mats = {}, [], {}
+
+    def id_material(mat):
+        key = mat.name if mat is not None else None
+        if key not in ids:
+            if len(ids) >= MAX_MATERIALS:
+                return None
+            idx = len(ids)
+            ids[key] = idx
+            rgb = palette_colour(idx)
+            em = _emission_material(f"_wondful_matid_{idx}", tuple(srgb_to_linear_scalar(c / 255.0) for c in rgb))
+            created.append(("mat", em))
+            id_mats[key] = em
+            mats_out.append({"index": idx, "name": key or "(无材质)", "kind": material_color_kind(mat),
+                             "rgb": list(rgb)})
+        return id_mats[key]
+
+    for obj in sorted(product, key=lambda o: o.name):     # stable material order
+        if obj.type not in _GEOMETRY_TYPES or obj.hide_render:
+            continue
+        mats = getattr(getattr(obj, "data", None), "materials", None)
+        if mats is None:
+            continue
+        if len(obj.material_slots) == 0:
+            mats.append(None)
+            slot_undo.append(lambda mats=mats: mats.clear() if len(mats) <= 1 else mats.pop())
+        for i, slot in enumerate(list(obj.material_slots)):
+            old_link, old_mat = slot.link, slot.material
+            if old_link != "OBJECT":
+                slot.link = "OBJECT"
+
+            def undo(slot=slot, link=old_link, mat=old_mat):
+                if slot.link != "OBJECT":
+                    slot.link = "OBJECT"
+                slot.material = mat
+                if link != "OBJECT":
+                    slot.link = link
+            slot_undo.append(undo)
+            slot.material = id_material(orig_mats.get((obj, i), old_mat if old_mat is None or
+                                                      not old_mat.name.startswith("_wondful_") else None))
+    render.engine = "CYCLES"
+    if cycles is not None:
+        cycles.samples = 4
+        cycles.use_denoising = False
+        cycles.max_bounces = 0
+        if hasattr(cycles, "filter_width"):
+            cycles.filter_width = 0.01
+    if hasattr(render, "dither_intensity"):
+        render.dither_intensity = 0.0
+    render.filepath = matid_path
+    bpy.ops.render.render(write_still=True)
+    with open(sidecar_path(matid_path), "w", encoding="utf-8") as fh:
+        json.dump({"materials": mats_out}, fh, ensure_ascii=False, indent=1)
+    return Path(matid_path).exists()
+
+
+def render_detail_pass(context, filepath: str, collection, keep_path: str = "", massing=None,
+                       matid_path: str = "") -> dict:
     """Standalone 细节回贴 detail pass (when no clay base was rendered): scene camera, output size."""
     scene = context.scene
     require_scene_camera(context)
@@ -1163,7 +1298,7 @@ def render_detail_pass(context, filepath: str, collection, keep_path: str = "", 
         render.resolution_x, render.resolution_y, render.resolution_percentage = width, height, 100
         from . import massing as MS
         holdout = MS.massing_objects(massing, collection) if massing is not None else []
-        info = _render_detail_now(context, filepath, collection, holdout, keep_path)
+        info = _render_detail_now(context, filepath, collection, holdout, keep_path, matid_path)
         info["detail"] = bool(info.get("detail")) and image_dimensions(filepath) == (width, height)
         return info
     finally:
@@ -1198,7 +1333,7 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
 
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
-                     keep_path: str = "") -> bool:
+                     keep_path: str = "", matid_path: str = "") -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -1395,7 +1530,7 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
                 for kind, block in created:
                     if kind == "obj" and not block.hide_render:
                         block.hide_render = True
-                info = _render_detail_now(context, detail_path, collection, blocks, keep_path)
+                info = _render_detail_now(context, detail_path, collection, blocks, keep_path, matid_path)
                 info["detail"] = bool(info.get("detail")) and image_dimensions(detail_path) == (width, height)
                 info["seconds"] = round(_time.time() - t_detail, 1)
                 LAST_CLAY_INFO["detail"] = info

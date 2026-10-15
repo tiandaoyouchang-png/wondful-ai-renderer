@@ -727,6 +727,17 @@ class WONDFUL_AISettings(PropertyGroup):
         description="细节回贴的强度：0 = 完全保留 AI 画的细节，1 = 细节全部来自 Blender（光照始终保留 AI 的）",
         default=0.8, min=0.0, max=1.0, subtype="FACTOR",
     )
+    detail_colour_fix: BoolProperty(
+        name="按材质校色",
+        description="细节回贴时按材质把颜色拉回模型：每种材质（木头、面料、车漆……）的色相和饱和度向 Blender 模型靠拢，"
+                    "AI 的光影、阴影和反射保留；玻璃、自发光和镜面材质不动，车漆与金属只轻微校正",
+        default=True,
+    )
+    detail_colour_strength: FloatProperty(
+        name="校色强度",
+        description="按材质校色的强度：0 = 颜色完全保留 AI 的，1 = 尽量贴近模型颜色（单次校正有上限，不会过艳）",
+        default=0.7, min=0.0, max=1.0, subtype="FACTOR",
+    )
     last_detail_note: StringProperty(
         name="细节回贴状态",
         default="",

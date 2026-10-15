@@ -18,6 +18,9 @@ camera, same temporary pose as the clay base) is blended back:
    silhouette itself always stays AI pixels: no halo, no seam against the background.
 3. 标识原样贴回: keep-exact regions (plates, badges, logos) are replaced outright by the
    detail pass, with light per-channel colour / brightness matching to the AI result.
+4. 按材质校色 (optional, ``matid`` + ``colour_strength``): each material region from the
+   material-ID pass is pulled towards the model's colour (``material_color``), keeping the
+   scene's colour cast, the AI's lighting and the outer AI edge.
 """
 from __future__ import annotations
 
@@ -340,12 +343,16 @@ def colour_match(src: np.ndarray, ref: np.ndarray, region: np.ndarray, amount: f
 
 
 def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
-                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None) -> dict:
+                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
+                  matid=None, colour_strength: float = 0.0) -> dict:
     """Paste the detail pass onto the AI image. All inputs on the same canvas (H×W).
 
     ``ai_rgb`` float 0..1; ``detail_rgba`` float 0..1 (straight alpha); ``product_mask``
     float 0..1; ``keep_rgba`` optional keep render (see ``merge_keep_masks``).
-    Returns dict(image, fit, keep, timings, ...)."""
+    ``matid``: optional (labels, materials) from the material-ID pass; with ``colour_strength``
+    > 0 each material is pulled towards the model's colour after the blend (按材质校色,
+    ``material_color.correct_colours``; pasted keep-exact parts are left alone).
+    Returns dict(image, fit, keep, colour, timings, ...)."""
     t0 = time.time()
     h, w = ai_rgb.shape[:2]
     L = max(h, w)
@@ -377,7 +384,13 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     keep_info = {}
     if keep_rgba is not None:
         keep, glass, matte, keep_info = merge_keep_masks(keep_rgba, product_mask)
+    labels = materials = None
+    if matid is not None and colour_strength > 0:
+        labels, materials = matid
     if not identity:
+        if labels is not None:
+            from .material_color import warp_labels
+            labels = warp_labels(labels, (sx, sy), dx, dy, centre)
         # warp premultiplied colour so the transparent background never bleeds in
         Dp = warp_image(np.dstack([D * Da[..., None], Da]), (sx, sy), dx, dy, centre)
         Da = Dp[..., 3]
@@ -426,10 +439,30 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
         out = out * (1 - k[..., None]) + matched * k[..., None]
         keep_px = int((k > 0.5).sum())
     timings["keep"] = round(time.time() - t, 2)
+    colour = {}
+    if labels is not None:
+        t = time.time()
+        from .material_color import correct_colours
+        protect = None
+        if keep_px:
+            protect = k
+        # own weight: the outer r_e px stay AI (same edge rule as the paste), then a short ramp;
+        # no wide feather, so thin parts (chair legs) are corrected across their width.
+        hard_f = fitted > 0.5
+        cw = np.clip(blur(erode(hard_f, r_e + 1).astype(np.float32), 2, 1), 0, 1) * erode(hard_f, r_e)
+        cw = cw * np.clip((Da - 0.5) * 2.0, 0, 1)
+        if canvas_alpha is not None:
+            cw = cw * (canvas_alpha > 0.5)
+        cres = correct_colours(np.clip(out, 0, 1), D, labels, materials, cw.astype(np.float32), colour_strength,
+                               model_alpha=Da, protect=protect)
+        out = cres["image"]
+        colour = {"cast": cres["cast"], "regions": cres["regions"], "changed_px": cres["changed_px"],
+                  "strength": round(float(colour_strength), 3)}
+        timings["colour"] = round(time.time() - t, 2)
     out = np.clip(out, 0, 1)
     changed = np.abs(out - I).max(-1) > (1.5 / 255)
     return {"image": out, "fit": {k: v for k, v in fit.items() if k != "mask"}, "align": align,
-            "keep": dict(keep_info, pasted_px=keep_px),
+            "keep": dict(keep_info, pasted_px=keep_px), "colour": colour,
             "blend": dict(binfo, erode=r_e, feather=r_f, strength=round(float(strength), 3), diag=round(diag, 1)),
             "changed_px": int(changed.sum()), "weight": weight, "keep_mask": keep,
             "timings": dict(timings, total=round(time.time() - t0, 2))}
@@ -443,8 +476,28 @@ def raw_path(path) -> str:
     return str(p.with_name(p.stem + "_raw" + (p.suffix or ".png")))
 
 
+def load_matid(matid_path, w: int, h: int):
+    """(labels, materials) from the material-ID pass and its JSON sidecar, at w×h; None if absent."""
+    from pathlib import Path
+    from .png_io import read_png
+    from . import material_color as MC
+    side = MC.sidecar_path(matid_path)
+    if not matid_path or not Path(matid_path).is_file() or not Path(side).is_file():
+        return None
+    materials = MC.read_sidecar(side)
+    if not materials:
+        return None
+    arr = read_png(matid_path)
+    if arr.dtype != np.uint8:
+        arr = (np.clip(arr.astype(np.float32) / 255.0, 0, 1) * 255 + 0.5).astype(np.uint8)
+    if arr.shape[-1] == 3:
+        arr = np.dstack([arr, np.full(arr.shape[:2], 255, np.uint8)])
+    labels = MC.decode_ids(arr, len(materials))
+    return MC.resize_labels(labels, w, h), materials
+
+
 def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="", strength=DEFAULT_STRENGTH,
-               debug_dir="") -> dict:
+               debug_dir="", matid_path="", colour_strength=0.0) -> dict:
     """File-level entry: read PNGs (any size; Blender passes are resampled to the image),
     write the pasted PNG (alpha of the input image preserved). Returns a JSON-able report."""
     from pathlib import Path
@@ -466,7 +519,9 @@ def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="",
     D = load(detail_path, 4)
     M = load(mask_path, 4)[..., 3]
     K = load(keep_path, 4) if keep_path and Path(keep_path).is_file() else None
-    res = paste_details(I, D, M, K, strength=strength, canvas_alpha=ca)
+    matid = load_matid(matid_path, w, h) if matid_path and colour_strength > 0 else None
+    res = paste_details(I, D, M, K, strength=strength, canvas_alpha=ca, matid=matid,
+                        colour_strength=colour_strength if matid is not None else 0.0)
     out = (np.clip(res["image"], 0, 1) * 255 + 0.5).astype(np.uint8)
     if ca is not None:
         out = np.dstack([out, rgba[..., 3]])
@@ -494,6 +549,9 @@ def summarize(report) -> str:
     keep = (report.get("keep") or {}).get("pasted_px", 0)
     fit = report.get("fit") or {}
     moved = fit.get("search") not in (None, "identity")
+    colour = (report.get("colour") or {}).get("regions") or []
+    fixed = sum(1 for r in colour if "shift" in r and max(abs(x) for x in r["shift"]) >= 0.5)
     return ("细节回贴完成" + ("（含标识原样贴回）" if keep else "")
+            + (f" · 按材质校色 {fixed} 种材质" if fixed else "")
             + (f" · 对齐 缩放 {fit.get('scale', 1):.3f}" if moved else "")
             + f" · {report.get('seconds', 0):.1f} 秒")

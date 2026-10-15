@@ -1969,6 +1969,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 "keep": str(work / "01_keep_mask.png"),
                 "mask": str(work / "01_product_mask.png"),
                 "strength": float(getattr(props, "detail_paste_strength", 0.8)),
+                "matid": str(work / "01_material_id.png") if bool(getattr(props, "detail_colour_fix", True)) else "",
+                "colour_strength": (float(getattr(props, "detail_colour_strength", 0.7))
+                                    if bool(getattr(props, "detail_colour_fix", True)) else 0.0),
                 "keep_slots": len(slots),
                 "keep_texts": keep_exact_texts(coll),
                 "work_dir": str(self._session.directory),
@@ -1988,7 +1991,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             out = self._session.directory / f"output_variant_{variant_index:02d}_detail.png"
             rep = paste_file(str(variant_final), spec["detail"], spec["mask"], str(out),
                              keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
-                             strength=spec["strength"])
+                             strength=spec["strength"],
+                             matid_path=spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else "",
+                             colour_strength=float(spec.get("colour_strength", 0.0) or 0.0))
             spec["reports"].append(rep)
             props.last_detail_note = summarize(rep)
             if rep.get("skipped"):
@@ -2349,7 +2354,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                         mask_path=product_mask_path,
                                         massing=massing_coll,
                                         detail_path=(self._detail or {}).get("detail", ""),
-                                        keep_path=(self._detail or {}).get("keep", "")):
+                                        keep_path=(self._detail or {}).get("keep", ""),
+                                        matid_path=(self._detail or {}).get("matid", "")):
                         direct_simple_base = clay_path
                         direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
                         direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
@@ -2391,7 +2397,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 coll = getattr(props, "product_collection", None)
                 mcoll = _find_massing(context.scene, props)
                 info = render_detail_pass(context, self._detail["detail"], coll, keep_path=self._detail["keep"],
-                                          massing=mcoll)
+                                          massing=mcoll, matid_path=self._detail.get("matid", ""))
                 if not info.get("detail"):
                     raise RuntimeError("细节底图未生成")
                 if not Path(self._detail["mask"]).is_file() and not render_product_mask(
