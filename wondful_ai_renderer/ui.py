@@ -552,7 +552,7 @@ def _draw_terrain(layout, props):
 
 
 class WONDFUL_PT_main(Panel):
-    bl_label = "Wondful AI 渲染器 · 1.1"
+    bl_label = "Wondful AI 渲染器 · 1.2"
     bl_idname = "WONDFUL_PT_main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
