@@ -888,6 +888,34 @@ class WONDFUL_OT_terrain_preset(Operator):
         return {"FINISHED"}
 
 
+class WONDFUL_OT_sketch_build(Operator):
+    bl_idname = "wondful.sketch_build"
+    bl_label = "从三视图生成草模"
+    bl_description = ("草图模式：从正视 / 侧视 / 俯视图的轮廓雕出粗略草模（集合「Wondful 草模」，放在 3D 游标处、落在地面上，"
+                      "正面朝 -Y），并设为产品集合。再次生成会保留草模的位置和旋转")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.wondful_ai
+        try:
+            from . import sketch_proxy
+            obj, info = sketch_proxy.build_proxy(context, props)
+        except Exception as exc:
+            props.last_sketch_note = f"草模生成失败：{exc}"
+            self.report({"ERROR"}, props.last_sketch_note[:200])
+            return {"CANCELLED"}
+        props.last_sketch_note = sketch_proxy.summary(info)
+        try:
+            for other in context.selected_objects:
+                other.select_set(False)
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+        except Exception:
+            pass
+        self.report({"INFO"}, props.last_sketch_note[:200])
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_codex_check(_BaseAsyncOperator):
     bl_idname = "wondful.codex_check"
     bl_label = "检测 Codex"
@@ -1942,6 +1970,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         product = copy_references(refs["product"], self._session, "product_reference")
         person = copy_references(refs["person"], self._session, "person_reference")
         style = copy_references(refs["style"], self._session, "style_reference")
+        # 1.2.0 草图模式: the three-view images are the product's appearance reference.
+        sketch_refs = []
+        if bool(getattr(props, "sketch_mode", False)):
+            from . import sketch_proxy
+            for index, (src, label) in enumerate(sketch_proxy.reference_images(props)):
+                copied = copy_references([src], self._session, f"sketch_view_{index + 1}")
+                if copied:
+                    sketch_refs.append((prepare_reference_for_upload(copied[0], 1600), label))
+            if not product:  # the agent fallback path gets them as ordinary product references
+                product = [p for p, _l in sketch_refs][:MAX_PRODUCT_REFERENCES]
         self._reference_counts = {"product": len(product), "person": len(person), "style": len(style)}
         product_upload = [prepare_reference_for_upload(p) for p in product]
         person_upload = [prepare_reference_for_upload(p) for p in person]
@@ -2114,6 +2152,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     direct_simple_base = str(self._session.viewport_reference)
                     direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
+            direct_state["sketch_views"] = [label for _p, label in sketch_refs]
 
             def _direct_status(text):
                 self._phase = text
@@ -2125,6 +2164,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     on_status=_direct_status, cancel_check=_cancel_requested,
                     simple_base=direct_simple_base, simple_brief=direct_simple_brief,
                     terrain_text=direct_terrain_text, vehicle=direct_vehicle,
+                    sketch_refs=sketch_refs or None,
                 )
         if self._layers and not Path(self._layers["mask"]).is_file():
             try:

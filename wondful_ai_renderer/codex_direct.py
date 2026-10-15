@@ -48,6 +48,16 @@ INSTRUCTIONS = (
     "The first input image is the canvas: keep its framing, camera, product geometry, position, scale, "
     "perspective and silhouette. Later input images are references only. Do not use any other tool."
 )
+# 1.2.0 草图模式: the clay product is a rough visual hull built from the user's three-view images.
+SKETCH_INSTRUCTIONS = (
+    "Use the image_generation tool exactly once to EDIT the first input image and return one PNG. "
+    "The first input image is the canvas: keep its framing, camera, horizon and the product's position, "
+    "orientation, scale and perspective. The gray product in it is only a rough proxy built from the "
+    "product's three-view drawings (the later input images): take the product's exact shape details, "
+    "materials, colours and logos from those three views and correct the proxy's blocky faces and gaps. "
+    "Never copy the three views' layout, background or lighting into the result. Do not use any other tool."
+)
+SKETCH_REF_LIMIT = 3
 
 ROLE_LABELS = {
     "camera": "Blender 相机白模底图（构图 / 几何的唯一权威）",
@@ -554,7 +564,8 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
-def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False):
+def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
+                        sketch_views=None):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
@@ -567,10 +578,21 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     scene = (brief or "").strip()
     env_text = (env_text or "").strip()
     subj = w["subj"]
-    lines = [f"把这张 Blender 白模渲染图直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
-    lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
-                 "不增减、不改形任何部件，不重新设计造型；"
-                 "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
+    sketch_views = [str(v) for v in (sketch_views or []) if str(v).strip()]
+    if sketch_views:
+        views = "、".join(f"图 {i}：{label}" for i, label in enumerate(sketch_views, start=2))
+        lines = [f"把图 1（Blender 白模渲染图）直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
+        lines.append(f"后面的图是这件{subj}的三视图（{views}），只用来确定{subj}的外形细节、材质、颜色和 Logo，"
+                     "不要把三视图的背景、排版、分格、文字或打光画进结果。")
+        lines.append(f"白模是根据三视图生成的粗略外形，保持位置、朝向、大小和透视；外形细节、材质、颜色、Logo 以三视图为准，"
+                     f"可修正粗模的块面和缺口（补出镂空、圆角、凹槽、细小部件，去掉三视图里没有的多余体块），"
+                     f"但{subj}在画面中占据的范围、朝向和接地位置基本不变；"
+                     "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
+    else:
+        lines = [f"把这张 Blender 白模渲染图直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
+        lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
+                     "不增减、不改形任何部件，不重新设计造型；"
+                     "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
     lines.append(f"地面的坡度、倾斜方向、起伏以及与{w['contact']}的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；"
                  f"山头/坡顶时{subj}停在山的最高处，四周地面向下掉落，{subj}后方不出现更高的地面，远处只露出低于{subj}的远山、天空或城市），"
                  f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
@@ -584,18 +606,24 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
                      "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
                      "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
                      "木材有木纹，金属有清晰高光和环境倒影，塑料和涂层有对应的光泽），明暗过渡自然；不要平涂、不要塑料感或玩具模型感。")
+    if sketch_views:  # the clay proxy has no colour: colour / material come from the three views
+        lines = [ln.replace("车漆保持原本的颜色色相（固有色），明暗随新环境光变化。", "车漆颜色和材质以三视图为准，明暗随新环境光变化。")
+                   .replace("产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。",
+                            "产品各部分的颜色、材质类别以三视图为准，明暗随新环境光变化。")
+                 for ln in lines]
     if env_text and not vehicle:
         # a cached / hand-written description may still carry a car paragraph: drop it
         env_text = "\n".join(p for p in env_text.splitlines() if not p.strip().startswith("车身质感")).strip()
     if env_text:
         lines.append("目标环境（来自环境参考图的文字描述，只用于环境、地面、天气、光线方向、色温和氛围）：" + env_text)
         tag = next((t for t in ("车身质感", "表面质感") if t in env_text), "")
+        src = "白模（位置、朝向、大小）和三视图（造型细节、颜色、Logo）" if sketch_views else "白模原图"
         if tag and vehicle:
             lines.append(f"描述里的「{tag}」只用来决定我们这台车的漆面光泽、反射、高光和明暗方式：车型、比例、颜色色相、"
-                         "车门状态、灯组、Logo 和车牌全部以白模原图为准，不要照搬参考图里的车。")
+                         f"车门状态、灯组、Logo 和车牌全部以{src}为准，不要照搬参考图里的车。")
         elif tag:
             lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
-                         "部件和 Logo 全部以白模原图为准，不要照搬参考图里的任何物体。")
+                         f"部件和 Logo 全部以{src}为准，不要照搬参考图里的任何物体。")
         lines.append("环境严格按上面的描述还原：只出现描述里写到的元素，不额外添加建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
                      "光线方向、太阳高度、色温和反差与描述一致，不要做得比描述更戏剧化。")
     if scene:
@@ -606,7 +634,7 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     return "\n".join(lines)
 
 
-def build_payload(prompt, images, *, size, mask_path="", model="", quality="high", compat=False):
+def build_payload(prompt, images, *, size, mask_path="", model="", quality="high", compat=False, instructions=""):
     content = [{"type": "input_text", "text": prompt}]
     summary = []
     for index, (path, role, _label) in enumerate(images, start=1):
@@ -624,7 +652,7 @@ def build_payload(prompt, images, *, size, mask_path="", model="", quality="high
                         "size": list(_png_size(mask_path) or [])})
     payload = {
         "model": (model or "").strip() or DEFAULT_MODEL,
-        "instructions": INSTRUCTIONS,
+        "instructions": instructions or INSTRUCTIONS,
         "input": [{"type": "message", "role": "user", "content": content}],
         "tools": [tool],
         "tool_choice": {"type": "image_generation"},
@@ -931,12 +959,15 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False):
+               exact_prompt=False, sketch_refs=None):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
     short scene prompt, like a hand-made edit on the clay render.
     ``exact_prompt`` sends ``prompt`` verbatim (used by the 分层输出 clean plate).
+    ``sketch_refs`` = [(path, label)] (草图模式, simple path only): the three-view images
+    are attached after the clay canvas as product appearance references; environment
+    references are still read as text only.
     """
     started = time.time()
     if not edit_base_path or not Path(edit_base_path).is_file():
@@ -961,12 +992,17 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                 env.append(rp)
             else:
                 dropped.append((rp, "simple"))
-        # Environment refs are read as text only; the image model sees just the clay canvas.
+        # Environment refs are read as text only; the image model sees just the clay canvas
+        # (plus, in 草图模式, the three-view images that define the product).
         env_paths = env
+        for sp, slabel in list(sketch_refs or [])[:SKETCH_REF_LIMIT]:
+            if sp and Path(sp).is_file() and len(images) < MAX_EDIT_IMAGES:
+                images.append((str(Path(sp).resolve()), "product", f"产品三视图 · {slabel}"))
     else:
         images, dropped = select_images(edit_base_path, reference_paths, manifest, repair=repair)
     if not simple:
         env_paths = []
+    sketch_labels = [label.split(" · ", 1)[-1] for _p, role, label in images[1:] if role == "product"] if simple else []
     log_root = Path(log_dir or Path(output_path).parent)
     mask, mask_note = prepare_mask(mask_path, _png_size(images[0][0]), log_root)
     env_text, env_note = "", ""
@@ -984,7 +1020,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         text = prompt  # 1.2.0 分层输出: the clean-plate edit sends its own complete instruction
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
-                                   vehicle=bool(vehicle))
+                                   vehicle=bool(vehicle), sketch_views=sketch_labels)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -992,7 +1028,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     log = {"tag": tag, "url_host": re.sub(r"^(https?://[^/]+).*$", r"\1", url), "size": size,
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
            "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
-           "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note}
+           "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note,
+           "sketch_views": sketch_labels}
     model_used = chain[0]
     log["model_chain"] = chain[:6]
     variants = [dict(compat=False, model=m) for m in chain[:6]]
@@ -1005,7 +1042,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     try:
         while index < len(variants):
             opts = variants[index]
-            payload, summary = build_payload(text, images, size=size, mask_path=mask, model=opts["model"], compat=opts["compat"])
+            payload, summary = build_payload(text, images, size=size, mask_path=mask, model=opts["model"], compat=opts["compat"],
+                                             instructions=SKETCH_INSTRUCTIONS if sketch_labels and not exact_prompt else "")
             headers = auth_headers(auth, client_version)
             log["images"] = summary
             log["payload"] = redact_payload(payload)
@@ -1067,6 +1105,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         "mask": bool(mask),
         "mask_note": mask_note,
         "simple": simple,
+        "sketch_views": sketch_labels,
         "size_requested": size,
         "size_returned": list(image_dimensions(target) or []),
         "model": log["attempts"][-1]["model"] if log["attempts"] else model_used,
@@ -1084,7 +1123,7 @@ def short_reason(exc) -> str:
 
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
-                           simple_base="", simple_brief=None, terrain_text="", vehicle=False):
+                           simple_base="", simple_brief=None, terrain_text="", vehicle=False, sketch_refs=None):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1115,6 +1154,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 simple_brief=simple_brief if use_simple else None,
                 terrain_text=terrain_text if use_simple else "",
                 vehicle=bool(vehicle),
+                sketch_refs=sketch_refs if use_simple else None,
             )
             state["direct_ok"] += 1
             return result

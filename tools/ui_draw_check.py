@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 草图模式).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -239,6 +239,47 @@ def main():
     draw("layers_failed")
     props.layered_output = False
     props.last_layers_note = ""
+    # 1.2.0 草图模式 (高级)
+    props.sketch_mode = True
+    draw("sketch_separate")
+    props.sketch_size_mode = "MANUAL"
+    props.last_sketch_note = "草模已生成：长 1.00 × 宽 0.62 × 高 0.80 m，41230 面，1.4s；俯视图是横放的，已按比例自动转正"
+    draw("sketch_manual_done")
+    props.sketch_input = "SHEET"
+    props.last_sketch_note = "草模生成失败：三视图拼图里只找到 1 个轮廓：请把正视 / 侧视 / 俯视分开排列"
+    draw("sketch_sheet_failed")
+    # the operator itself, headless: synthetic box views → proxy collection becomes the product collection
+    import tempfile, os
+    import numpy as np
+    from wondful_ai_renderer import png_io
+    tmp = tempfile.mkdtemp()
+    for name, (h, w) in {"front": (80, 120), "side": (80, 200), "top": (200, 120)}.items():
+        a = np.full((h + 40, w + 40, 4), 255, np.uint8)
+        a[20:20 + h, 20:20 + w, :3] = 60
+        png_io.write_png(os.path.join(tmp, name + ".png"), a)
+        setattr(props, f"sketch_{name}_path", os.path.join(tmp, name + ".png"))
+    props.sketch_input = "SEPARATE"
+    props.sketch_size_mode = "AUTO"
+    props.sketch_known_axis = "LENGTH"
+    props.sketch_known_value = 2.0
+    props.sketch_resolution = 96
+    res = bpy.ops.wondful.sketch_build()
+    obj = bpy.data.objects.get("Wondful 草模")
+    if res != {"FINISHED"} or obj is None or props.product_collection is None \
+            or props.product_collection.name != "Wondful 草模":
+        problems.append(f"sketch_build failed: {res} {props.last_sketch_note}")
+    else:
+        dims = tuple(round(v, 2) for v in obj.dimensions)
+        print("sketch proxy dims", dims, props.last_sketch_note)
+        if abs(dims[1] - 2.0) > 0.08 or abs(dims[0] - 1.2) > 0.08 or abs(dims[2] - 0.8) > 0.08:
+            problems.append(f"sketch proxy dims off: {dims}")
+        obj.location.x = 3.0
+        bpy.ops.wondful.sketch_build()
+        if abs(bpy.data.objects["Wondful 草模"].location.x - 3.0) > 1e-6 or len(props.product_collection.objects) != 1:
+            problems.append("sketch rebuild did not keep the proxy transform / made a second object")
+    draw("sketch_built")
+    props.sketch_mode = False
+    props.last_sketch_note = ""
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"
