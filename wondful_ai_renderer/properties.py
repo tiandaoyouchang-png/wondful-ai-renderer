@@ -733,6 +733,57 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.0 草图模式: no real 3D model — a rough proxy carved from three-view images
+    sketch_mode: BoolProperty(
+        name="草图模式",
+        description="没有真实 3D 模型时用：从正视 / 侧视 / 俯视图生成粗略草模代替产品，摆好位置和相机后照常生成；"
+                    "外形细节、材质、颜色和 Logo 由 AI 按三视图补全（概念图，轮廓不是严格锁定）",
+        default=False,
+    )
+    sketch_input: EnumProperty(
+        name="三视图输入",
+        items=[
+            ("SEPARATE", "分开的三张图", "正视、侧视、俯视（可选）各一张，白底或透明底的 JPG / PNG"),
+            ("SHEET", "一张三视图拼图", "三个视图排在一张图里、彼此留白，自动拆分（视图之间没有空隙或有尺寸标注时请改用分开的图）"),
+        ],
+        default="SEPARATE",
+    )
+    sketch_front_path: StringProperty(name="正视图", description="从产品正面看（白底或透明底）", subtype="FILE_PATH", default="")
+    sketch_side_path: StringProperty(name="侧视图", description="从产品侧面看（白底或透明底）", subtype="FILE_PATH", default="")
+    sketch_top_path: StringProperty(name="俯视图", description="从正上方看（可选，白底或透明底）", subtype="FILE_PATH", default="")
+    sketch_sheet_path: StringProperty(name="三视图拼图", description="正视 / 侧视 / 俯视排在一张图里", subtype="FILE_PATH", default="")
+    sketch_side_front: EnumProperty(
+        name="侧视图正面朝向",
+        items=[("LEFT", "正面朝左", "侧视图里产品正面（车头）在左边"),
+               ("RIGHT", "正面朝右", "侧视图里产品正面（车头）在右边")],
+        default="LEFT",
+    )
+    sketch_top_front: EnumProperty(
+        name="俯视图正面朝向",
+        items=[("BOTTOM", "正面朝下", "俯视图里产品正面在下方（常见画法）"),
+               ("TOP", "正面朝上", "俯视图里产品正面在上方"),
+               ("LEFT", "正面朝左", "俯视图横放，产品正面在左边"),
+               ("RIGHT", "正面朝右", "俯视图横放，产品正面在右边")],
+        default="BOTTOM",
+    )
+    sketch_size_mode: EnumProperty(
+        name="尺寸",
+        items=[("AUTO", "按比例", "按正视 / 侧视图的长宽比推算，只需填一个已知尺寸"),
+               ("MANUAL", "长宽高", "直接填写真实的长、宽、高")],
+        default="AUTO",
+    )
+    sketch_known_axis: EnumProperty(
+        name="已知尺寸",
+        items=[("LENGTH", "长", "前后方向的长度"), ("WIDTH", "宽", "左右方向的宽度"), ("HEIGHT", "高", "高度")],
+        default="LENGTH",
+    )
+    sketch_known_value: FloatProperty(name="已知尺寸", default=1.0, min=0.01, max=100.0, unit="LENGTH", precision=3)
+    sketch_length: FloatProperty(name="长", description="前后方向（Y）", default=1.0, min=0.01, max=100.0, unit="LENGTH", precision=3)
+    sketch_width: FloatProperty(name="宽", description="左右方向（X）", default=1.0, min=0.01, max=100.0, unit="LENGTH", precision=3)
+    sketch_height: FloatProperty(name="高", description="高度（Z）", default=1.0, min=0.01, max=100.0, unit="LENGTH", precision=3)
+    sketch_resolution: IntProperty(name="精度", description="雕刻网格在最长方向上的格数（越高越细、越慢）",
+                                   default=160, min=64, max=256)
+    last_sketch_note: StringProperty(name="草模状态", default="", options={"SKIP_SAVE"})
     last_canvas_fit: BoolProperty(
         name="比例已适配",
         description="结果已按比例缩放并留边到白模画布，未裁切、未拉伸",

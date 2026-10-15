@@ -759,6 +759,7 @@ class WONDFUL_PT_main(Panel):
                              else ("ERROR" if index == 0 else "BLANK1"))
 
         _draw_massing(adv, context, props, busy)
+        _draw_sketch(adv, props, busy)
 
         lock_box = adv.box()
         if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):
@@ -808,6 +809,52 @@ class WONDFUL_PT_main(Panel):
         tools = adv.row(align=True)
         tools.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
         tools.operator("preferences.addon_show", text="插件偏好设置").module = __package__
+
+
+def _draw_sketch(adv, props, busy):
+    """高级 › 草图模式: rough proxy from three-view images (concept mode)."""
+    box = adv.box()
+    box.prop(props, "sketch_mode", text="草图模式（概念图）", icon="GREASEPENCIL")
+    if not getattr(props, "sketch_mode", False):
+        return
+    col = box.column()
+    col.enabled = not busy
+    col.label(text="没有 3D 模型时用：三视图生成粗略草模代替产品", icon="INFO")
+    col.label(text="细节、材质、颜色、Logo 由 AI 按三视图补全，轮廓不严格锁定", icon="BLANK1")
+    col.row(align=True).prop(props, "sketch_input", expand=True)
+    if getattr(props, "sketch_input", "SEPARATE") == "SHEET":
+        col.prop(props, "sketch_sheet_path", text="拼图")
+        col.label(text="三个视图之间要留白；拆不开时请改用分开的图", icon="BLANK1")
+    else:
+        col.prop(props, "sketch_front_path", text="正视")
+        col.prop(props, "sketch_side_path", text="侧视")
+        col.prop(props, "sketch_top_path", text="俯视")
+        col.label(text="白底或透明底 JPG / PNG；俯视图可不填", icon="BLANK1")
+    row = col.row(align=True)
+    row.label(text="侧视")
+    row.prop(props, "sketch_side_front", text="")
+    row.label(text="俯视")
+    row.prop(props, "sketch_top_front", text="")
+    col.row(align=True).prop(props, "sketch_size_mode", expand=True)
+    if getattr(props, "sketch_size_mode", "AUTO") == "MANUAL":
+        dims = col.row(align=True)
+        dims.prop(props, "sketch_length", text="长")
+        dims.prop(props, "sketch_width", text="宽")
+        dims.prop(props, "sketch_height", text="高")
+    else:
+        known = col.row(align=True)
+        known.prop(props, "sketch_known_axis", text="")
+        known.prop(props, "sketch_known_value", text="")
+    col.prop(props, "sketch_resolution", text="精度")
+    build = col.row(align=True)
+    build.scale_y = 1.2
+    build.operator("wondful.sketch_build", text="从三视图生成草模", icon="MESH_MONKEY")
+    note = getattr(props, "last_sketch_note", "")
+    if note:
+        for index, line in enumerate(wrap(note, width=44)[:3]):
+            col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
+    else:
+        col.label(text="生成后移动 / 旋转草模、摆好相机，再照常生成", icon="BLANK1")
 
 
 def _supports_placeholder():
