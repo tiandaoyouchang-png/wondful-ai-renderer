@@ -1,8 +1,9 @@
 # Changelog
 
-## 1.1.0 · 自定义地形（2026-10-15，付费版）
+## 1.1.0 · 自定义地形（2026-10-15）
 
 ### 变更
+- English UI translations (`wondful_ai_renderer/i18n.py`, registered with `bpy.app.translations`) for the connect step (step ①): its labels, buttons and tooltips. English shows when Blender's interface language is English; Chinese stays the default for zh_HANS. Other steps are not translated yet.
 - **高级 › 地面 新增「自定义」**（主流程五步卡片不变），重点是坡顶和不平整地面：
   - **四角坡度**：左前 / 右前 / 左后 / 右后（相对产品自身朝向），每个角 -35°…+35°，正值 = 朝该角方向地面抬高，负值 = 降低。四个角合起来决定前后坡（爬坡/下坡）、左右坡（侧坡）、对角扭曲，以及四角同时降低 = 坡顶、同时抬高 = 低洼。
   - **坡顶**（0–1）：产品停在坡顶最高处，四周地面从脚下向外掉落（最大约 30°），可与四角叠加。
