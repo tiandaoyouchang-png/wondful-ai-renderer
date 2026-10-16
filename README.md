@@ -10,11 +10,11 @@
 
 **适合谁**：电商卖家做主图和场景图、工业设计师出方案效果图、品牌做一款产品多种场景的广告图、3D 艺术家省掉搭场景和打灯的时间。
 
-**付费版**：[Gumroad · $29.90](https://tiandao1.gumroad.com/l/wondful)（含 1 年更新）。**付费版比免费版早三个月拿到每个新功能**；本仓库的免费开源版在新版发布三个月后同步更新。
+**付费版**：[Gumroad · $29.90](https://tiandao1.gumroad.com/l/wondful)（含 1 年更新）。开源版和付费版功能相同；付费版是打包好的安装包和 1 年版本更新，也是对项目的支持。
 
-Wondful AI Renderer 是一个开源的 Blender 插件。它把 Blender 当作“构图与结构的唯一真相”：先从你的相机渲出白模底图和结构图（Depth / Normal / 部件 ID），再调用本机已登录的 **Codex CLI** 或 **Antigravity CLI** 生图，最后按结构做验收和纠偏。
+Wondful AI Renderer 是一个开源的 Blender 插件。一句话：**AI 负责整体商业视觉，Blender 负责产品真实性。** 插件从你的相机渲出白模底图，配上产品三视图和读成文字的环境参考，交给已登录的 ChatGPT（Codex）直接在白模上做图像编辑；出图后再把 Blender 里的真实细节（车牌、Logo、纹理）贴回，并按材质把颜色拉回模型。
 
-English: an open-source Blender add-on for **shape-locked AI product rendering**. Shoes, watches, lamps, cameras, furniture, cars — any product with a 3D model. One camera setup becomes many photoreal commercial scenes, while silhouette, scale, colour and position stay locked to your Blender render. The paid version on [Gumroad](https://tiandao1.gumroad.com/l/wondful) gets every new feature three months before this free open-source repo.
+English: an open-source Blender add-on for **shape-locked AI product rendering**. Shoes, watches, lamps, cameras, furniture, cars — any product with a 3D model. One camera setup becomes many photoreal commercial scenes, while silhouette, scale, colour and position stay locked to your Blender render. Blender locks the composition, the three-view sheet locks identity, the AI paints light and environment, and Blender then pastes real details and per-material colour back. The open-source and paid builds have the same features; the [Gumroad](https://tiandao1.gumroad.com/l/wondful) version is the packaged installer with a year of updates.
 
 ---
 
@@ -73,7 +73,7 @@ English: an open-source Blender add-on for **shape-locked AI product rendering**
 ## 核心能力
 
 - **白模相机即构图权威**：输出与 Blender Camera 完全同机位；比例不一致时等比缩放、透明留边，不裁切、不拉伸。
-- **结构图约束**：自动渲出 Camera Base、Depth、Normal、部件 ID（Object Index），作为生图的结构参考。
+- **白模底图 + 三视图**：生图主链路只发带地面和灯光的白模底图（锁构图）和产品三视图（锁身份），环境参考先读成文字。Depth / Normal / 部件 ID 仍会渲出，用于验收、分层和细节回贴，不再作为主要生图输入。
 - **Identity Preserve Mask**：按部件锁定产品身份区域（Logo、表盘、灯组、鞋标、车标等），只放开环境、光影与材质质感。
 - **严格模式验收 + 纠偏**：每张候选图按比例、位置、轮廓检查，不合格自动用 Mask 局部修复重试。
 - **环境图读成文字，构图零漂移**（3.2.2）：只把带地面灯光的白模底图发给图像编辑模型，环境参考图先读成精准文字描述再参与生成，产品位置、大小、轮廓不再漂移；支持斜坡和改视角。
@@ -97,19 +97,22 @@ English: an open-source Blender add-on for **shape-locked AI product rendering**
 Blender 场景 + 相机 + 产品集合
         │
         ▼
- Camera Base（白模） + Depth / Normal / Part ID
+ 白模底图（锁构图） + 产品三视图（锁身份）
         │
         ▼
- 提示词（AI 润色）+ 产品参考 + 环境参考
+ 环境参考 → 读成文字描述 → 写入提示词
         │
         ▼
- Codex 图像编辑直连（白模为画布）/ Codex CLI / Antigravity CLI 生图（本机登录）
+ Codex 图像编辑直连（白模为画布；失败回退 Codex CLI / Antigravity CLI）
         │
         ▼
- 比例适配 → 结构验收 → Identity Mask 纠偏（严格模式）
+ 比例适配 → 轮廓验收
         │
         ▼
- 输出目录 + Blender 内预览 / Compare
+ 细节回贴（车牌 / Logo 原样贴回，纹理高频融合） → 按材质校色
+        │
+        ▼
+ 输出目录（可选分层 PNG / PSD） + Blender 内预览 / Compare
 ```
 
 ## 环境要求
@@ -161,7 +164,7 @@ docs/showcase/             README 展示图
 
 ## 已知限制
 
-- 结构图以参考图形式交给生图工具，不是原生 ControlNet，无法保证像素级对齐；GPT Image 的编辑 Mask 是提示性的（模型参考 Mask，但不保证 Mask 外逐像素不变）。严格模式的验收与 Mask 纠偏用来兜底。
+- 生图模型不是原生 ControlNet，无法保证像素级对齐，偶尔会把产品略放大或挪位；GPT Image 的编辑 Mask 是提示性的（模型参考 Mask，但不保证 Mask 外逐像素不变）。严格模式的验收与 Mask 纠偏用来兜底。
 - Codex 图像编辑直连使用的是 Codex 自己的 ChatGPT 后端接口（非公开 API），接口变化时会自动回退到 CLI 代理生成；需要 Codex 使用文件方式保存登录（`auth.json`）。
 - 实际出图质量取决于 CLI 背后的图像模型与账号额度；严格模式的远程调用次数可能多于最终导出张数。
 - Blender 5.x 的合成器 API 有较大变化，自 3.1.6 起已适配（实测 Blender 5.1.2）。
