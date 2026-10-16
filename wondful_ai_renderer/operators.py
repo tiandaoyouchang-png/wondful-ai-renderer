@@ -2013,12 +2013,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         panel line under 高级 › 上次渲染 and score_XX.json in the session). Never raises."""
         try:
             from .identity_score import score_file, summarize
-            rep = score_file(str(image), spec["detail"], spec["mask"], matid)
+            rep = score_file(str(image), spec["detail"], spec["mask"], matid, placement_of=raw)
             if raw is None:
-                if rep.get("overall") is not None:
+                if not rep.get("error"):
                     props.last_score_note = summarize(rep)
                 return rep
-            props.last_score_note = summarize(raw, rep) if raw and raw.get("overall") is not None else ""
+            props.last_score_note = summarize(raw, rep) if raw and not raw.get("error") else ""
             if variant_index is not None:
                 import json
                 path = Path(spec["work_dir"]) / f"score_{variant_index:02d}.json"

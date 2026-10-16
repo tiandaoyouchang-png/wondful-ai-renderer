@@ -13,7 +13,11 @@ each 0–100, computed on the *raw* AI image (before the paste), all on the Blen
 - 材质色 colour: per-material colour error after removing the scene's overall colour cast
   (``material_color.measure``).
 
-Overall = mean of the available sub-scores. Pure numpy; never raises from ``score_file``.
+The panel shows pixel / ΔE readings at the output size (user, 2026-10-16: 用像素计量，好换算):
+偏移 px, 缩放 %, 轮廓 px (mean outline distance after the fit), 细节边缘 px (symmetric mean
+distance between Blender and AI inner edges per part), 颜色 ΔE. Placement comes from the inner
+structure (``structure_fit``). The 0–100 sub-scores and ``overall`` stay in the JSON only.
+Pure numpy; never raises from ``score_file``.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ import time
 
 import numpy as np
 
-from .layered_output import blur, erode, luminance, resize, fit_mask
+from .layered_output import blur, erode, luminance, resize, fit_mask, truncated_distance
 
 # score curves (calibrated on the 1.2.0 chair / YU7 test sets, see tests/test_121_identity_score.py)
 COMP_SCALE_K = 500.0      # 1 % scale error  -> -5
@@ -61,6 +65,111 @@ def _diag(mask: np.ndarray) -> float:
     return float(np.hypot(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))
 
 
+EDGE_CAP = 12             # px: an edge further than this counts as missing (capped distance)
+EDGE_FRAC = 0.15          # strongest 15 % of gradients inside a part count as its edges
+
+
+def _sobel(gray: np.ndarray) -> np.ndarray:
+    g = blur(gray, 1, 1)
+    p = np.pad(g, 1, mode="edge")
+    gx = (p[:-2, 2:] + 2 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2 * p[1:-1, :-2] + p[2:, :-2])
+    gy = (p[2:, :-2] + 2 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2 * p[:-2, 1:-1] + p[:-2, 2:])
+    return np.hypot(gx, gy)
+
+
+def _edges(mag: np.ndarray, sel: np.ndarray, frac: float = EDGE_FRAC, floor: float = 0.04) -> np.ndarray:
+    if sel.sum() < 20:
+        return np.zeros_like(sel)
+    thr = max(float(np.quantile(mag[sel], 1.0 - frac)), floor)
+    return (mag > thr) & sel
+
+
+def edge_offset_px(e_ai: np.ndarray, dt_ai: np.ndarray, e_bl: np.ndarray, dt_bl: np.ndarray, sel: np.ndarray):
+    """Symmetric mean edge distance (px, full resolution) inside ``sel``: Blender edges the AI
+    lost or moved, and AI edges Blender does not have (redrawn structure). None if too few edges."""
+    a = e_bl & sel
+    b = e_ai & sel
+    if a.sum() < 15 or b.sum() < 15:
+        return None
+    return float((dt_ai[a].mean() + dt_bl[b].mean()) / 2.0)
+
+
+def _part_edge_px(mag_ai: np.ndarray, mag_bl: np.ndarray, sel: np.ndarray):
+    """Edge offset (px) of one part, computed on its bounding box (plus the distance cap)."""
+    ys, xs = np.nonzero(sel)
+    if len(xs) < 40:
+        return None
+    h, w = sel.shape
+    y0, y1 = max(0, ys.min() - EDGE_CAP), min(h, ys.max() + EDGE_CAP + 1)
+    x0, x1 = max(0, xs.min() - EDGE_CAP), min(w, xs.max() + EDGE_CAP + 1)
+    sc = sel[y0:y1, x0:x1]
+    ea = _edges(mag_ai[y0:y1, x0:x1], sc)
+    eb = _edges(mag_bl[y0:y1, x0:x1], sc)
+    return edge_offset_px(ea, truncated_distance(ea, EDGE_CAP), eb, truncated_distance(eb, EDGE_CAP), sc)
+
+
+def structure_fit(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray, mask: np.ndarray,
+                  scale_range=(0.88, 1.16), shift_frac=0.06) -> dict:
+    """Where did the AI put the product? Coarse-to-fine search (scale about the product centre +
+    shift) maximising the correlation of inner-structure edges (detail pass vs AI). The outline
+    fit alone snaps onto scene clutter; wheels, lamps and seams do not. Returns full-res
+    dict(scale, dx, dy, ncc, ncc_identity)."""
+    h, w = mask.shape
+    ys, xs = np.nonzero(mask > 0.5)
+    if not len(xs):
+        return {"scale": 1.0, "dx": 0.0, "dy": 0.0, "ncc": -1.0, "ncc_identity": -1.0}
+    cx, cy = float(xs.mean()), float(ys.mean())
+    lum_a, lum_d = luminance(ai), luminance(detail * detail_alpha[..., None])
+
+    def level(long_edge):
+        f = max(h, w) / float(long_edge)
+        sw, sh = max(8, int(round(w / f))), max(8, int(round(h / f)))
+        ga = _grad(blur(resize(lum_a, sw, sh), 1, 1))
+        gd = _grad(blur(resize(lum_d, sw, sh), 1, 1))
+        ms = resize(mask * (detail_alpha > 0.5), sw, sh)
+        return f, ga, gd, ms
+
+    from .detail_paste import warp_image
+
+    def ncc_at(lv, s, dx, dy):
+        f, ga, gd, ms = lv
+        c = (cx / f, cy / f)
+        g = warp_image(gd, (s, s), dx / f, dy / f, c)
+        m = erode(warp_image(ms, (s, s), dx / f, dy / f, c) > 0.5, 1)
+        v = _ncc(ga, g, m)
+        return -1.0 if v is None else v
+
+    lv = level(200)
+    f = lv[0]
+    rng = int(round(shift_frac * 200))
+    best = (ncc_at(lv, 1.0, 0.0, 0.0), 1.0, 0.0, 0.0)
+    ident = best[0]
+    for s in np.arange(scale_range[0], scale_range[1] + 1e-6, 0.02):
+        for ddx in range(-rng, rng + 1, 2):
+            for ddy in range(-rng, rng + 1, 2):
+                v = ncc_at(lv, float(s), ddx * f, ddy * f)
+                if v > best[0]:
+                    best = (v, float(s), ddx * f, ddy * f)
+    for long_edge, ds, step in ((200, 0.01, 1), (400, 0.01, 1), (800, 0.005, 1)):
+        lv = level(min(long_edge, max(h, w)))
+        f = lv[0]
+        v0, s0, x0, y0 = best
+        best = (ncc_at(lv, s0, x0, y0), s0, x0, y0)
+        for s in (s0 - ds, s0, s0 + ds):
+            for ddx in range(-2, 3, step):
+                for ddy in range(-2, 3, step):
+                    v = ncc_at(lv, s, x0 + ddx * f, y0 + ddy * f)
+                    if v > best[0]:
+                        best = (v, s, x0 + ddx * f, y0 + ddy * f)
+        if long_edge == 800 or long_edge >= max(h, w):
+            ident = ncc_at(lv, 1.0, 0.0, 0.0)
+    v, s, dx, dy = best
+    if v < ident * 1.03:     # identity unless clearly better (same rule as the paste)
+        v, s, dx, dy = ident, 1.0, 0.0, 0.0
+    return {"scale": round(float(s), 4), "dx": round(float(dx), 1), "dy": round(float(dy), 1),
+            "ncc": round(float(v), 3), "ncc_identity": round(float(ident), 3)}
+
+
 def composition_score(fit: dict, diag: float) -> float:
     s = abs(float(fit.get("scale", 1.0)) - 1.0)
     shift = float(np.hypot(fit.get("dx", 0.0), fit.get("dy", 0.0))) / max(diag, 1.0)
@@ -74,7 +183,8 @@ def silhouette_score(fit: dict, long_edge: int) -> float | None:
     return _clip(100.0 - SIL_K * float(ch) * 1000.0 / max(long_edge, 1))
 
 
-def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray, matid=None) -> dict:
+def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray, matid=None,
+          placement_of=None) -> dict:
     """All arrays on the same H×W canvas. ``ai_rgb``/``detail_rgba`` float 0..1, ``product_mask``
     float 0..1, ``matid`` optional (labels, materials) from ``detail_paste.load_matid``."""
     from .detail_paste import verify_alignment, warp_image
@@ -86,6 +196,19 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
     Da = detail_rgba[..., 3].astype(np.float32) if detail_rgba.shape[-1] == 4 else np.ones((h, w), np.float32)
     diag = _diag(product_mask)
     fit = fit_mask(I, product_mask)
+    if placement_of and placement_of.get("fit"):
+        # the pasted image: placement is the raw image's (the paste does not move the product)
+        pf = placement_of["fit"]
+        place = {"scale": pf.get("scale", 1.0), "dx": pf.get("dx", 0.0), "dy": pf.get("dy", 0.0), "ncc": 1.0}
+    else:
+        try:
+            place = structure_fit(I, D, Da, product_mask)
+        except Exception:
+            place = None
+    if place is not None and place["ncc"] > 0.15:
+        # placement (偏移/缩放) from inner structure; the outline fit keeps the 轮廓 reading
+        fit = dict(fit, scale=place["scale"], scale_x=place["scale"], scale_y=place["scale"],
+                   dx=place["dx"], dy=place["dy"], placement="structure", placement_ncc=place["ncc"])
     out = {"composition": composition_score(fit, diag), "silhouette": silhouette_score(fit, L),
            "fit": {k: v for k, v in fit.items() if k != "mask"}, "parts": [], "detail": None, "colour": None}
 
@@ -117,6 +240,8 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
     ga = _grad(blur(luminance(resize(I, sw, sh)), 1, 1))
     gd = _grad(blur(luminance(resize(D, sw, sh)), 1, 1))
     inner_s = resize(inner.astype(np.float32), sw, sh) > 0.5
+    mag_ai = _sobel(luminance(I))
+    mag_bl = _sobel(luminance(D))
     parts = []
     if labels is not None and materials:
         lab_s = labels[(np.arange(sh) * h // sh)][:, (np.arange(sw) * w // sw)]
@@ -134,6 +259,9 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
                 if v is not None:
                     rec["edge_ncc"] = round(v, 3)
                     rec["detail"] = round(_clip(100.0 * (v - DETAIL_LO) / (DETAIL_HI - DETAIL_LO)), 1)
+                px_off = _part_edge_px(mag_ai, mag_bl, inner & (labels == idx))
+                if px_off is not None:
+                    rec["edge_px"] = round(px_off, 2)
             parts.append(rec)
     scored = [p for p in parts if "detail" in p]
     if scored:
@@ -167,6 +295,21 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
             out["colour_error"] = str(exc)[:120]
 
     out["parts"] = parts
+    # pixel / ΔE readings (what the panel shows; the 0–100 sub-scores stay in the JSON)
+    out["shift_px"] = round(float(np.hypot(fit.get("dx", 0.0), fit.get("dy", 0.0))), 1)
+    out["scale_pct"] = round((float(fit.get("scale", 1.0)) - 1.0) * 100.0, 1)
+    out["outline_px"] = None if fit.get("chamfer_after") is None else round(float(fit["chamfer_after"]), 2)
+    timed = [p for p in parts if p.get("edge_px") is not None]
+    if timed:
+        wsum = sum(p["px"] * p["edge"] for p in timed)
+        out["edge_px"] = round(sum(p["edge_px"] * p["px"] * p["edge"] for p in timed) / max(wsum, 1e-9), 2)
+    else:
+        out["edge_px"] = _part_edge_px(mag_ai, mag_bl, inner)
+        if out["edge_px"] is not None:
+            out["edge_px"] = round(out["edge_px"], 2)
+    des = [(p["dE"], p["px"]) for p in parts if p.get("dE") is not None]
+    out["colour_dE"] = round(sum(d * n for d, n in des) / sum(n for _d, n in des), 1) if des else None
+    out["size"] = [int(w), int(h)]
     subs = [out[k] for k in ("composition", "silhouette", "detail", "colour") if out.get(k) is not None]
     out["overall"] = round(float(np.mean(subs)), 1) if subs else None
     for k in ("composition", "silhouette"):
@@ -175,18 +318,24 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
     return out
 
 
-def weakest_parts(report: dict, n: int = 2, below: float = 60.0) -> list:
-    """The n weakest scored parts under ``below``, as 'name 细节' / 'name 颜色'."""
+WEAK_EDGE_PX = 4.0         # a part whose edges sit more than 4 px off is named
+WEAK_DE = 25.0             # ... or whose colour is off by more than ΔE 25
+
+
+def weakest_parts(report: dict, n: int = 2) -> list:
+    """The n worst parts past the pixel / ΔE limits, as 'tyre_3 4.1px' / 'wood ΔE 28'."""
     rows = []
     for p in report.get("parts") or []:
-        for key, label in (("detail", "细节"), ("colour", "颜色")):
-            v = p.get(key)
-            if v is not None and v < below:
-                rows.append((v, f"{p['name']} {label}"))
-    return [name for _v, name in sorted(rows)[:n]]
+        e = p.get("edge_px")
+        if e is not None and e > WEAK_EDGE_PX:
+            rows.append((e / WEAK_EDGE_PX, f"{p['name']} {e:.1f}px"))
+        d = p.get("dE")
+        if d is not None and d > WEAK_DE:
+            rows.append((d / WEAK_DE, f"{p['name']} ΔE {d:.0f}"))
+    return [name for _v, name in sorted(rows, reverse=True)[:n]]
 
 
-def score_file(image_path, detail_path, mask_path, matid_path="") -> dict:
+def score_file(image_path, detail_path, mask_path, matid_path="", placement_of=None) -> dict:
     """File-level entry (passes are resampled to the image). Never raises: errors land in 'error'."""
     t0 = time.time()
     try:
@@ -208,23 +357,40 @@ def score_file(image_path, detail_path, mask_path, matid_path="") -> dict:
         D = load(detail_path)
         M = load(mask_path)[..., 3]
         matid = load_matid(matid_path, w, h) if matid_path and Path(matid_path).is_file() else None
-        rep = score(I, D, M, matid)
+        rep = score(I, D, M, matid, placement_of=placement_of)
     except Exception as exc:
         rep = {"error": str(exc)[:200]}
     rep["seconds"] = round(time.time() - t0, 2)
     return rep
 
 
+def _px(v) -> str:
+    return f"{v:.1f}px" if v is not None else "—"
+
+
 def summarize(report, final=None) -> str:
-    """One panel line: 识别分 88（回贴后 95）· 构图 100 · 轮廓 86 · 细节 91 · 材质色 84 · 待查：tyre_3 细节."""
-    if not report or report.get("overall") is None:
+    """One panel line in pixels at the output size, e.g.
+    1672×941 · 偏移 2px · 缩放 +0.5% · 轮廓 1.8px · 细节边缘 2.1px（回贴后 1.2px）· 颜色 ΔE 6 · 待查：tyre_3 4.1px"""
+    if not report or report.get("shift_px") is None:
         return ""
-    names = (("构图", "composition"), ("轮廓", "silhouette"), ("细节", "detail"), ("材质色", "colour"))
-    line = f"识别分 {report['overall']:.0f}"
-    if final and final.get("overall") is not None:
-        line += f"（回贴后 {final['overall']:.0f}）"
-    line += "".join(f" · {label} {report[key]:.0f}" for label, key in names if report.get(key) is not None)
+    parts = []
+    if report.get("size"):
+        parts.append(f"{report['size'][0]}×{report['size'][1]}")
+    parts.append(f"偏移 {report['shift_px']:.0f}px")
+    parts.append(f"缩放 {report.get('scale_pct', 0):+.1f}%")
+    if report.get("outline_px") is not None:
+        parts.append(f"轮廓 {_px(report['outline_px'])}")
+    if report.get("edge_px") is not None:
+        line = f"细节边缘 {_px(report['edge_px'])}"
+        if final and final.get("edge_px") is not None:
+            line += f"（回贴后 {_px(final['edge_px'])}）"
+        parts.append(line)
+    if report.get("colour_dE") is not None:
+        line = f"颜色 ΔE {report['colour_dE']:.0f}"
+        if final and final.get("colour_dE") is not None:
+            line += f"（回贴后 {final['colour_dE']:.0f}）"
+        parts.append(line)
     weak = weakest_parts(report)
     if weak:
-        line += " · 待查：" + "、".join(weak)
-    return line
+        parts.append("待查：" + "、".join(weak))
+    return " · ".join(parts)

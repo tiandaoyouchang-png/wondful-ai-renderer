@@ -739,8 +739,8 @@ class WONDFUL_AISettings(PropertyGroup):
         default=0.7, min=0.0, max=1.0, subtype="FACTOR",
     )
     last_score_note: StringProperty(
-        name="识别分",
-        description="产品识别分：构图 / 轮廓 / 细节 / 材质色，按 Blender 模型对比 AI 原图；括号里是细节回贴后的分数",
+        name="产品还原度",
+        description="AI 原图对比 Blender 模型（按输出尺寸的像素）：偏移、缩放、轮廓误差、细节边缘误差、颜色 ΔE；括号里是细节回贴后的数值",
         default="",
         options={"SKIP_SAVE"},
     )

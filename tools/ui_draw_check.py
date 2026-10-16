@@ -230,7 +230,7 @@ def main():
     draw("result_direct_off")
     prefs.codex_direct_edit = True
     # 1.2.1 识别分 (高级 › 上次渲染)
-    props.last_score_note = "识别分 88（回贴后 92） · 构图 100 · 轮廓 80 · 细节 85 · 材质色 86 · 待查：ALUM 颜色、tyre_3 细节"
+    props.last_score_note = "1672×941 · 偏移 18px · 缩放 +8.0% · 轮廓 3.6px · 细节边缘 2.7px（回贴后 2.1px） · 颜色 ΔE 7（回贴后 6） · 待查：Black_Mat 4.8px"
     draw("result_identity_score")
     props.last_score_note = ""
     # 1.2.0 分层输出 (高级)

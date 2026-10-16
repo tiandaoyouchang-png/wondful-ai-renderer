@@ -1,4 +1,4 @@
-"""1.2.1 识别分: composition / silhouette / detail / colour sub-scores and wiring."""
+"""1.2.1 产品还原度 (识别分): pixel readings (偏移/缩放/轮廓/细节边缘/颜色 ΔE), sub-scores, wiring."""
 import importlib
 import sys
 import tempfile
@@ -64,6 +64,9 @@ class IdentityScoreTests(unittest.TestCase):
         self.assertGreaterEqual(r["detail"], 85)
         self.assertGreaterEqual(r["overall"], 85)
         self.assertEqual(S.weakest_parts(r), [])
+        self.assertLessEqual(r["shift_px"], 2)
+        self.assertLess(abs(r["scale_pct"]), 1.0)
+        self.assertLess(r["edge_px"], 1.5)
 
     def test_enlarged_product_loses_composition(self):
         h, w = self.mask.shape
@@ -72,6 +75,7 @@ class IdentityScoreTests(unittest.TestCase):
                        _ai(self.det, np.zeros_like(self.mask)))
         r = S.score(big, self.det, self.mask, self.matid)
         self.assertLess(r["composition"], 70)
+        self.assertAlmostEqual(r["scale_pct"], 10.0, delta=1.5)
         self.assertLess(r["overall"], S.score(self.ai, self.det, self.mask, self.matid)["overall"])
 
     def test_redrawn_wheel_is_named(self):
@@ -81,7 +85,8 @@ class IdentityScoreTests(unittest.TestCase):
         r = S.score(ai, self.det, self.mask, self.matid)
         rim = [p for p in r["parts"] if p["name"] == "Rim"][0]
         self.assertLess(rim["detail"], 40)
-        self.assertTrue(any(n.startswith("Rim") for n in S.weakest_parts(r)))
+        self.assertGreater(rim["edge_px"], S.WEAK_EDGE_PX)
+        self.assertTrue(any(n.startswith("Rim") and n.endswith("px") for n in S.weakest_parts(r)))
 
     def test_wrong_colour_lowers_colour_score(self):
         ai = self.ai.copy()
@@ -113,8 +118,11 @@ class IdentityScoreTests(unittest.TestCase):
             r = S.score_file(f"{d}/ai.png", f"{d}/det.png", f"{d}/mask.png")
             self.assertIn("overall", r)
             line = S.summarize(r, r)
-            self.assertTrue(line.startswith("识别分 "))
+            self.assertTrue(line.startswith("480×270 · 偏移 "), line)
+            self.assertIn("细节边缘", line)
             self.assertIn("回贴后", line)
+            fin = S.score_file(f"{d}/ai.png", f"{d}/det.png", f"{d}/mask.png", placement_of=r)
+            self.assertEqual(fin["shift_px"], r["shift_px"])
             bad = S.score_file(f"{d}/missing.png", f"{d}/det.png", f"{d}/mask.png")
             self.assertIn("error", bad)
             self.assertEqual(S.summarize(bad), "")
