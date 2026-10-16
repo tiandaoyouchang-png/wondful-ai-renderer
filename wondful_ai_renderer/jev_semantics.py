@@ -156,7 +156,7 @@ def _system_one(state: Any, questions: dict[str, Any], timeout: float = 10.0) ->
             "Authorization": f"Bearer {key}",
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "wondful-ai-renderer/1.2.0",
+            "User-Agent": "wondful-ai-renderer/1.2.1",
         },
     )
     last = ""

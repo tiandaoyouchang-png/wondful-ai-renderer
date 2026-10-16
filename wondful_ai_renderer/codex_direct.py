@@ -39,7 +39,7 @@ IMAGE_MODEL = "gpt-image-2"
 ORIGINATOR = "codex_cli_rs"
 MAX_EDIT_IMAGES = 5
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
-ADDON_UA = "wondful-ai-renderer/1.2.0"
+ADDON_UA = "wondful-ai-renderer/1.2.1"
 BASE_URL_ENV = "WONDFUL_CODEX_IMAGE_BASE_URL"
 REFRESH_URL_ENV = "WONDFUL_CODEX_REFRESH_URL"
 
