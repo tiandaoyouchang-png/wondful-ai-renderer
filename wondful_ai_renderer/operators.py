@@ -1955,6 +1955,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         """1.2.0 细节回贴 settings for this run, or None. Never raises."""
         try:
             props.last_detail_note = ""
+            props.last_score_note = ""
             if not bool(getattr(props, "detail_paste", True)):
                 return None
             coll = getattr(props, "product_collection", None)
@@ -1989,6 +1990,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         try:
             from .detail_paste import paste_file, summarize
             out = self._session.directory / f"output_variant_{variant_index:02d}_detail.png"
+            matid = spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else ""
+            raw_score = self._identity_score(props, variant_final, spec, matid)
             rep = paste_file(str(variant_final), spec["detail"], spec["mask"], str(out),
                              keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
                              strength=spec["strength"],
@@ -1998,11 +2001,33 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             props.last_detail_note = summarize(rep)
             if rep.get("skipped"):
                 return variant_final, None
+            self._identity_score(props, out, spec, matid, raw=raw_score, variant_index=variant_index)
             return out, Path(variant_final)
         except Exception as exc:
             print(f"[Wondful] 细节回贴失败：{exc}")
             props.last_detail_note = f"细节回贴失败（已保留原图）：{str(exc)[:80]}"
             return variant_final, None
+
+    def _identity_score(self, props, image, spec, matid, raw=None, variant_index=None):
+        """1.2.1 识别分: score the raw AI image (raw=None) or the pasted one (raw given: writes the
+        panel line under 高级 › 上次渲染 and score_XX.json in the session). Never raises."""
+        try:
+            from .identity_score import score_file, summarize
+            rep = score_file(str(image), spec["detail"], spec["mask"], matid)
+            if raw is None:
+                if rep.get("overall") is not None:
+                    props.last_score_note = summarize(rep)
+                return rep
+            props.last_score_note = summarize(raw, rep) if raw and raw.get("overall") is not None else ""
+            if variant_index is not None:
+                import json
+                path = Path(spec["work_dir"]) / f"score_{variant_index:02d}.json"
+                path.write_text(json.dumps({"raw": raw, "final": rep}, ensure_ascii=False, indent=1, default=str),
+                                encoding="utf-8")
+            return rep
+        except Exception as exc:
+            print(f"[Wondful] 识别分计算失败：{exc}")
+            return None
 
     def _submit_layers(self, props, exported) -> None:
         """Queue the layer split of one exported image; failures only leave a panel note."""

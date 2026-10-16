@@ -229,6 +229,10 @@ def main():
     prefs.codex_direct_edit = False
     draw("result_direct_off")
     prefs.codex_direct_edit = True
+    # 1.2.1 识别分 (高级 › 上次渲染)
+    props.last_score_note = "识别分 88（回贴后 92） · 构图 100 · 轮廓 80 · 细节 85 · 材质色 86 · 待查：ALUM 颜色、tyre_3 细节"
+    draw("result_identity_score")
+    props.last_score_note = ""
     # 1.2.0 分层输出 (高级)
     props.layered_output = True
     draw("layers_shadow")

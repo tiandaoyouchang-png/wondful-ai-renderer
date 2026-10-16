@@ -931,6 +931,10 @@ class WONDFUL_PT_main(Panel):
             if props.last_canvas_warning:
                 for line in wrap(props.last_canvas_warning, width=44)[:3]:
                     info.label(text=line)
+            score_note = getattr(props, "last_score_note", "")
+            if score_note:
+                for index, line in enumerate(wrap(score_note, width=44)[:3]):
+                    info.label(text=line, icon="CHECKMARK" if index == 0 else "BLANK1")
             if props.last_structure_note:
                 info.label(text=props.last_structure_note[:100])
             if getattr(props, "last_engine_note", ""):

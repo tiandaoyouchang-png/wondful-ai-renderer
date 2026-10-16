@@ -738,6 +738,12 @@ class WONDFUL_AISettings(PropertyGroup):
         description="按材质校色的强度：0 = 颜色完全保留 AI 的，1 = 尽量贴近模型颜色（单次校正有上限，不会过艳）",
         default=0.7, min=0.0, max=1.0, subtype="FACTOR",
     )
+    last_score_note: StringProperty(
+        name="识别分",
+        description="产品识别分：构图 / 轮廓 / 细节 / 材质色，按 Blender 模型对比 AI 原图；括号里是细节回贴后的分数",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     last_detail_note: StringProperty(
         name="细节回贴状态",
         default="",
