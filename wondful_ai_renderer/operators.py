@@ -14,6 +14,8 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 
 from .codex_client import (
+    pop_model_notice as codex_pop_model_notice,
+    set_model_fallbacks as codex_set_model_fallbacks,
     CodexImageGenerationUnavailable,
     CodexNotInstalledError,
     CodexNotLoggedInError,
@@ -59,17 +61,27 @@ from queue import Empty, Queue
 from .prompt_editor import open_prompt_in_area, close_prompt_area, sync_prompt_editors
 
 
+# 1.2.2: images per generation follow the scene's 「张数」 (props.render_count, 1-4);
+# these are the Codex default/maximum and the Antigravity cap.
 RENDER_VARIANT_COUNT = 4
 ANTIGRAVITY_RENDER_VARIANT_COUNT = 2
 
 
-def render_variant_count(provider_id: str) -> int:
-    """Return the requested output count for the selected image provider."""
-    return (
-        ANTIGRAVITY_RENDER_VARIANT_COUNT
-        if str(provider_id or "").strip().lower() == "antigravity"
-        else RENDER_VARIANT_COUNT
-    )
+def provider_variant_cap(provider_id: str) -> int:
+    return (ANTIGRAVITY_RENDER_VARIANT_COUNT
+            if str(provider_id or "").strip().lower() == "antigravity" else RENDER_VARIANT_COUNT)
+
+
+def render_variant_count(provider_id: str, props=None) -> int:
+    """Images per generation: the user's 1/2/3/4 choice, capped by the provider."""
+    cap = provider_variant_cap(provider_id)
+    try:
+        wanted = int(getattr(props, "render_count", "") or 0) if props is not None else 0
+    except (TypeError, ValueError):
+        wanted = 0
+    if wanted <= 0:
+        return cap
+    return max(1, min(cap, wanted))
 
 
 _ACTIVE_LOCK = threading.Lock()
@@ -96,6 +108,16 @@ def _status(props, status, error=""):
     props.last_error = error
     if status not in {"POLISHING", "RENDERING"}:
         props.task_phase = ""
+
+
+def _apply_model_notice(props):
+    """1.2.2: surface a 推理-model fallback (old Codex CLI) in step ⑤."""
+    try:
+        notice = codex_pop_model_notice()
+        if notice:
+            props.model_notice = notice
+    except Exception:
+        pass
 
 
 def reset_stale_task_status(props) -> bool:
@@ -161,6 +183,10 @@ def _analysis_provider(props, prefs):
             "render_timeout": int(prefs.antigravity_render_timeout),
             "reference_limit": MAX_ANTIGRAVITY_IMAGE_PATHS,
         }
+    try:  # 1.2.2: run-time fallback chain if the local CLI rejects the chosen 推理 model
+        codex_set_model_fallbacks([item.name for item in getattr(props, "codex_models", [])])
+    except Exception:
+        pass
     return {
         "id": "codex",
         "label": "Codex",
@@ -525,6 +551,12 @@ class _BaseAsyncOperator(Operator):
     def poll(cls, context):
         return not _ACTIVE_LOCK.locked()
 
+    def report(self, type, message):
+        # 1.2.2: remember why an operator refused (e.g. a chained, timer-started render), for the panel.
+        if "ERROR" in type or "WARNING" in type:
+            _LAST_REPORT[self.bl_idname] = str(message)
+        return super().report(type, message)
+
     def _start_thread(self, context, target):
         if not _ACTIVE_LOCK.acquire(blocking=False):
             self.report({"WARNING"}, "已有 AI / 登录任务正在运行。")
@@ -642,6 +674,11 @@ class _BaseAsyncOperator(Operator):
         self._detached.set()
         if not self._thread or not self._thread.is_alive():
             self._release_lock()
+        try:
+            if self._origin_scene is not None:
+                _apply_model_notice(self._origin_scene.wondful_ai)
+        except (ReferenceError, AttributeError):
+            pass
 
     def cancel(self, context):
         self._cleanup(context)
@@ -726,26 +763,65 @@ class WONDFUL_OT_autofill_product_look(_BaseAsyncOperator):
         return {"FINISHED"}
 
 
-def _schedule_operator(idname):
-    """Run a modal operator once the current one has released the task lock."""
+_LAST_REPORT = {}
+
+
+def _redraw_all():
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
+    except Exception:
+        pass
+
+
+def _schedule_operator(idname, scene=None, *, label="AI 渲染"):
+    """Run a modal operator once the current one has released the task lock.
+
+    1.2.2: robust chain (see op_chain): tries every 3D View / window context, retries
+    transient context errors, and when the operator cannot start shows the reason in
+    the panel instead of stopping silently.  Returns the ChainRunner (for tests)."""
+    from . import op_chain
+    from .op_chain import ChainRunner, OperatorRefused
     module, name = idname.split(".")
+    scene_name = getattr(scene, "name", "") if scene is not None else ""
 
-    def run():
-        if _ACTIVE_LOCK.locked():
-            return 0.3
-        wm = bpy.context.window_manager
-        for window in getattr(wm, "windows", []):
-            area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None)
-            if area is None:
-                continue
-            region = next((r for r in area.regions if r.type == "UI"), None) or area.regions[-1]
-            with bpy.context.temp_override(window=window, area=area, region=region):
-                getattr(getattr(bpy.ops, module), name)("INVOKE_DEFAULT")
-            return None
-        getattr(getattr(bpy.ops, module), name)()
-        return None
+    def target_scene():
+        sc = bpy.data.scenes.get(scene_name) if scene_name else None
+        return sc or getattr(bpy.context, "scene", None)
 
-    bpy.app.timers.register(run, first_interval=0.3)
+    def invoke(ctx):
+        _LAST_REPORT.pop(idname, None)
+        try:
+            with bpy.context.temp_override(**ctx):
+                return getattr(getattr(bpy.ops, module), name)("INVOKE_DEFAULT")
+        except RuntimeError as exc:
+            # bpy.ops raises RuntimeError when the operator reports an ERROR.  Before
+            # 1.2.2 that exception escaped the timer callback and was only printed to the
+            # (hidden on Windows) system console: the chain stopped silently.
+            refused = _LAST_REPORT.get(idname, "")
+            if refused:
+                raise OperatorRefused(refused) from exc
+            raise
+
+    def contexts():
+        return op_chain.candidate_contexts(list(getattr(bpy.context.window_manager, "windows", []) or []), target_scene())
+
+    def on_fail(message):
+        sc = target_scene()
+        props = getattr(sc, "wondful_ai", None) if sc is not None else None
+        text = f"提示词已写好，但没能自动开始{label}：{message}。处理后点「生成」即可继续。"
+        print(f"[Wondful] {text}")
+        if props is not None:
+            props.pending_generate = False
+            _status(props, "ERROR", text)
+        _redraw_all()
+
+    runner = ChainRunner(invoke=invoke, contexts=contexts, locked=_ACTIVE_LOCK.locked, on_fail=on_fail,
+                         on_started=lambda ctx, result: _redraw_all(),
+                         last_report=lambda: _LAST_REPORT.get(idname, ""))
+    bpy.app.timers.register(runner.step, first_interval=0.3)
+    return runner
 
 
 def generate_needs_polish(props, prefs):
@@ -781,6 +857,7 @@ class WONDFUL_OT_generate(Operator):
     def execute(self, context):
         props = context.scene.wondful_ai
         prefs = _addon_prefs(context)
+        props.model_notice = ""
         brief = (props.scene_brief or "").strip()
         if generate_needs_polish(props, prefs):
             if brief != (props.scene_brief_used or "").strip() or not (props.prompt or "").strip():
@@ -788,6 +865,7 @@ class WONDFUL_OT_generate(Operator):
                 props.prompt = brief
                 props.last_ai_prompt = ""
             props.pending_generate = not props.two_step
+            _LAST_REPORT.pop("wondful.polish_prompt", None)
             try:
                 result = bpy.ops.wondful.polish_prompt("INVOKE_DEFAULT")
             except RuntimeError as exc:
@@ -796,14 +874,21 @@ class WONDFUL_OT_generate(Operator):
                 _status(props, "ERROR", message)
             if "RUNNING_MODAL" not in result and "FINISHED" not in result:
                 props.pending_generate = False
+                if props.status != "ERROR":
+                    _status(props, "ERROR", _LAST_REPORT.get("wondful.polish_prompt", "") or "没能开始写提示词，请重试。")
                 return {"CANCELLED"}
             return {"FINISHED"}
+        _LAST_REPORT.pop("wondful.ai_render", None)
         try:
             result = bpy.ops.wondful.ai_render("INVOKE_DEFAULT")
         except RuntimeError as exc:
             _status(props, "ERROR", str(exc).replace("Error: ", "").strip())
             return {"CANCELLED"}
-        return {"FINISHED"} if ("RUNNING_MODAL" in result or "FINISHED" in result) else {"CANCELLED"}
+        if "RUNNING_MODAL" in result or "FINISHED" in result:
+            return {"FINISHED"}
+        if props.status != "ERROR":
+            _status(props, "ERROR", _LAST_REPORT.get("wondful.ai_render", "") or "生图前检查未通过")
+        return {"CANCELLED"}
 
 
 class WONDFUL_OT_refresh_models(_BaseAsyncOperator):
@@ -846,7 +931,9 @@ class WONDFUL_OT_refresh_models(_BaseAsyncOperator):
             item = collection.add()
             item.name, item.label = model["id"], model["label"]
             item.description, item.is_default = model["description"], model["default"]
-        setattr(props, attr, f"已读取 {len(collection)} 个模型 · 点击模型框选择")
+        live = sum(1 for model in self._result if model.get("live"))
+        setattr(props, attr, f"已读取 {len(collection)} 个模型" + (f"（账号最新 {live} 个在前）" if live else "")
+                + " · 点击模型框选择")
         _status(props, "IDLE")
         return {"FINISHED"}
 
@@ -1818,6 +1905,9 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 props.progress = 1.0
                 props.eta_seconds = 0
                 _status(props, "IDLE")
+                if chain_render:  # 1.2.2: the chain stops here on purpose; say so in ⑤
+                    _status(props, "ERROR", "写提示词期间你修改了提示词：已保留你的修改，AI 版本在“AI 润色建议”里；"
+                                            "没有自动生图，确认后点「生成」继续。")
                 self.report({"WARNING"}, props.prompt_notice)
                 return {"FINISHED"}
             _set_prompt_text(props, polished)
@@ -1876,10 +1966,13 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             props.scene_brief_used = (getattr(props, "scene_brief", "") or "").strip()
             if props.style_prompt_dirty:
                 self.report({"WARNING"}, "提示词已生成，但风格图在生成期间又发生变化；请再次重新生成提示词。")
+                if chain_render:  # 1.2.2: never stop the 生成 chain without a visible reason
+                    _status(props, "ERROR", "环境参考图在写提示词期间变了，没有自动生图。再点一次「生成」即可。")
             else:
                 self.report({"INFO"}, f"{getattr(self, '_provider_label', 'Codex')} 提示词生成完成，可以开始 AI 渲染。")
                 if chain_render and not getattr(props, "two_step", False):
-                    _schedule_operator("wondful.ai_render")
+                    props.task_phase = "提示词已完成，正在开始生图…"
+                    _schedule_operator("wondful.ai_render", self._origin_scene)
             return {"FINISHED"}
         return {"PASS_THROUGH"}
 
@@ -1963,8 +2056,15 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 props.last_detail_note = "细节回贴需要先在 ② 选择产品集合，本次已跳过"
                 return None
             work = Path(self._session.viewport_reference).parent
-            from .viewport_capture import keep_exact_slots, keep_exact_texts
+            from .viewport_capture import keep_exact_slots, keep_exact_texts, mirrored_keep_parts
             slots = keep_exact_slots(coll)
+            try:
+                mirrored = mirrored_keep_parts(coll, getattr(getattr(context, "scene", None), "camera", None))
+            except Exception as exc:
+                print(f"[Wondful] 镜像贴图检查失败：{exc}")
+                mirrored = []
+            if mirrored:
+                print(f"[Wondful] 细节回贴：这些标识在模型里就是镜像的：{mirrored}")
             return {
                 "detail": str(work / "01_detail_pass.png"),
                 "keep": str(work / "01_keep_mask.png"),
@@ -1975,6 +2075,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                     if bool(getattr(props, "detail_colour_fix", True)) else 0.0),
                 "keep_slots": len(slots),
                 "keep_texts": keep_exact_texts(coll),
+                "mirrored": mirrored,
                 "work_dir": str(self._session.directory),
                 "reports": [],
             }
@@ -1988,7 +2089,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         if not spec or not Path(spec["detail"]).is_file() or not Path(spec["mask"]).is_file():
             return variant_final, None
         try:
-            from .detail_paste import paste_file, summarize
+            from .detail_paste import mirrored_note, paste_file, summarize
             out = self._session.directory / f"output_variant_{variant_index:02d}_detail.png"
             matid = spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else ""
             raw_score = self._identity_score(props, variant_final, spec, matid)
@@ -1998,7 +2099,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                              matid_path=spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else "",
                              colour_strength=float(spec.get("colour_strength", 0.0) or 0.0))
             spec["reports"].append(rep)
-            props.last_detail_note = summarize(rep)
+            props.last_detail_note = summarize(rep) + mirrored_note(spec.get("mirrored"))
             if rep.get("skipped"):
                 return variant_final, None
             self._identity_score(props, out, spec, matid, raw=raw_score, variant_index=variant_index)
@@ -2043,7 +2144,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 plate_fn = layered_output.make_plate_fn(
                     model=spec["model"], client_version=spec["client_version"], log_dir=spec["work_dir"],
                     vehicle=spec["vehicle"], long_edge=min(2048, max(1024, spec["long_edge"])))
-            layered_output.RUNNER.submit(exported, spec["mask"], spec["mode"], plate_fn, work_dir=spec["work_dir"])
+            detail = (getattr(self, "_detail", None) or {}).get("detail", "")
+            layered_output.RUNNER.submit(exported, spec["mask"], spec["mode"], plate_fn, work_dir=spec["work_dir"],
+                                         detail_path=detail if detail and Path(detail).is_file() else "")
             _watch_layers(spec["scene"])
             props.last_layers_note = "分层输出处理中…" + ("（含干净背景，约 30–50 秒）" if plate_fn else "")
         except Exception as exc:
@@ -2132,7 +2235,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         props = context.scene.wondful_ai
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
-        planned_variant_count = render_variant_count(provider["id"])
+        planned_variant_count = render_variant_count(provider["id"], props)
         if not provider["imagegen_enabled"]:
             self.report({"ERROR"}, f"{provider['label']} 生图已在插件偏好设置中关闭。")
             return {"CANCELLED"}
@@ -2453,7 +2556,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         self._provider_id = provider_id
         self._provider_label = provider_label
         timing_suffix = "strict" if auto_alignment_retry else ("fast" if render_mode == "FAST" else "standard")
-        variant_count = render_variant_count(provider_id)
+        variant_count = render_variant_count(provider_id, props)
         self._variant_count = variant_count
         self._completed_variants = Queue()
         self._exported_by_variant = {}

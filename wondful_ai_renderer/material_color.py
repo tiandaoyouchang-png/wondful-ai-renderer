@@ -285,7 +285,7 @@ def correct_colours(image: np.ndarray, model: np.ndarray, labels: np.ndarray, ma
                     strength: float = DEFAULT_STRENGTH, model_alpha=None, protect=None,
                     max_ab: float = MAX_AB_SHIFT, max_desat: float = MAX_AB_DESAT, max_l: float = MAX_L_SHIFT,
                     l_amount: float = L_AMOUNT,
-                    cast=None) -> dict:
+                    cast=None, occluder=None) -> dict:
     """Shift each material region of ``image`` (AI or pasted result, float RGB 0..1) towards the
     model colour of ``model`` (detail pass, same canvas). ``labels``: int map (-1 = none);
     ``materials``: [{"index", "name", "kind"}]; ``weight``: where the image may change at all
@@ -304,6 +304,8 @@ def correct_colours(image: np.ndarray, model: np.ndarray, labels: np.ndarray, ma
         valid &= model_alpha > 0.5
     if protect is not None:
         valid &= protect < 0.5
+    if occluder is not None:          # 1.2.2: mud / spray / dust never vote for a region's colour
+        valid &= occluder < 0.5
     min_area = max(MIN_AREA_PX, int(MIN_AREA_FRAC * h * w))
     stats = region_stats(lab, mlab, labels, materials, valid, min_area)
     if cast is None:
@@ -348,6 +350,14 @@ def correct_colours(image: np.ndarray, model: np.ndarray, labels: np.ndarray, ma
     if protect is not None:
         wpx = wpx * (1.0 - np.clip(protect, 0, 1))
     wpx = np.where(labels >= 0, wpx, wpx * (allm > 0.5))               # never past the product
+    if occluder is not None:
+        wpx = wpx * (1.0 - np.clip(occluder, 0, 1))
+    # 1.2.2: never lift dark / dirty pixels — well below the region's typical lightness they
+    # are left alone, and below it the lightness may only go down.
+    dark = np.clip((0.5 * lmed_f - Lp) / (0.2 * lmed_f + 1e-3), 0, 1)
+    wpx = wpx * (1.0 - dark)
+    field = field.copy()
+    field[..., 2] = np.where(Lp < 0.6 * lmed_f, np.minimum(field[..., 2], 0.0), field[..., 2])
     a_, b_ = lab[..., 1], lab[..., 2]
     C = np.hypot(a_, b_)
     H = np.arctan2(b_, a_)

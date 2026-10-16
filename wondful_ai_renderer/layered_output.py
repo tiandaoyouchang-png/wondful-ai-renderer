@@ -9,10 +9,11 @@ Pipeline (works for any product, not only cars):
    base) is fitted to the AI image with a similarity transform (scale + shift),
    scored by chamfer distance of the mask outline to the image's edges. Image
    models sometimes enlarge or nudge the product by a few percent.
-2. ``refine_alpha``: trimap from the fitted mask (core / band / outside), a local
-   colour model in the band (projection onto local foreground/background means)
-   blended with the mask prior where colours are ambiguous, then a guided filter
-   that snaps the soft edge to image edges.
+2. ``refine_alpha`` (1.2.2): the fitted Blender mask's own anti-aliased edge is the
+   matte; only a 2–3 px band is refined by a local colour model, used only where it
+   agrees with the mask; detached far-away mask pieces are dropped; edge colours are
+   unmixed against the local background and lean on the local product colour.
+   (With a detail pass the mask is placed by the inner-structure fit, as 产品还原度.)
 3. Plate (background without the product):
    - SHADOW mode: ``inpaint_pushpull`` fills the product region from the
      surrounding pixels (pyramid push-pull diffusion, no model call).
@@ -306,30 +307,128 @@ def _sample_offsets(radius: int, count: int, seed: int = 7) -> np.ndarray:
     return np.stack([np.rint(np.sin(ang) * rad), np.rint(np.cos(ang) * rad)], 1).astype(int)
 
 
-def refine_alpha(image: np.ndarray, fitted: np.ndarray, samples: int = 64) -> dict:
-    """Soft subject alpha from the fitted mask. Returns dict(alpha, core, band, bg_local).
+EDGE_BAND_MAX_PX = 3     # 1.2.2: refinement only this close to the Blender mask edge
+AGREE_TOL = 0.35         # colour-model alpha is used only within this of the mask's alpha
+STRAY_KEEP_FRAC = 0.10   # a detached mask piece this big (vs the main body) is product
+STRAY_NEAR_FRAC = 0.02   # …or one this close (fraction of the product size) to the main body
 
-    Trimap from the fitted mask; for every band pixel, foreground samples (core pixels)
-    and background samples (outside pixels) are taken at random offsets around it; the
-    closest-colour pair gives alpha by projection (shared-sampling matting), trusted only
-    when that pair explains the pixel and the two colours differ. Elsewhere the mask prior
-    wins. A small guided filter then snaps the edge to the image.
+
+def edge_band_px(long_edge: int) -> int:
+    """Refinement band half-width: 2 px up to ~1750 px long edge, 3 px above."""
+    return int(min(EDGE_BAND_MAX_PX, max(2, round(long_edge / 700.0))))
+
+
+def label_components(mask: np.ndarray):
+    """8-connected components of a boolean mask (run-length union-find, no SciPy).
+    Returns (labels int32 H×W with 0 = background, areas dict label -> px)."""
+    m = np.asarray(mask, bool)
+    h, w = m.shape
+    parent = [0]
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    runs_prev = []
+    rows = []
+    for y in range(h):
+        row = m[y]
+        if not row.any():
+            rows.append([]); runs_prev = []
+            continue
+        d = np.diff(np.concatenate(([0], row.view(np.int8), [0])))
+        starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]   # [s, e)
+        cur = []
+        j = 0
+        for s0, e0 in zip(starts.tolist(), ends.tolist()):
+            lab = 0
+            while j < len(runs_prev) and runs_prev[j][1] < s0:   # prev run ends before s0-1
+                j += 1
+            k = j
+            while k < len(runs_prev) and runs_prev[k][0] <= e0:   # overlaps [s0-1, e0]
+                pl = find(runs_prev[k][2])
+                if lab == 0:
+                    lab = pl
+                elif pl != lab:
+                    parent[max(pl, lab)] = min(pl, lab)
+                    lab = min(pl, lab)
+                k += 1
+            if lab == 0:
+                parent.append(len(parent))
+                lab = len(parent) - 1
+            cur.append((s0, e0, lab))
+        rows.append(cur)
+        runs_prev = cur
+    labels = np.zeros((h, w), np.int32)
+    areas = {}
+    for y, cur in enumerate(rows):
+        for s0, e0, lab in cur:
+            r = find(lab)
+            labels[y, s0:e0] = r
+            areas[r] = areas.get(r, 0) + (e0 - s0)
+    return labels, areas
+
+
+def product_pieces(mask: np.ndarray) -> np.ndarray:
+    """The product's own silhouette pieces: the main body plus detached pieces that are big
+    or sit right next to it. Small far-away pieces (a stray mesh in the product collection,
+    a speck) are dropped — they caused a lone blurred blob in the subject layer."""
+    hard = np.asarray(mask) > 0.5
+    labels, areas = label_components(hard)
+    if not areas:
+        return hard
+    main = max(areas, key=areas.get)
+    keep = labels == main
+    b = bbox(keep)
+    size = max(b[1] - b[0] + 1, b[3] - b[2] + 1)
+    near = dilate(keep, max(4, int(round(STRAY_NEAR_FRAC * size))))
+    for lab, area in areas.items():
+        if lab == main:
+            continue
+        piece = labels == lab
+        if area >= STRAY_KEEP_FRAC * areas[main] or (piece & near).any():
+            keep |= piece
+    return keep
+
+
+def refine_alpha(image: np.ndarray, fitted: np.ndarray, samples: int = 48) -> dict:
+    """Subject alpha that trusts the (fitted) Blender product mask. Returns dict(alpha, core,
+    band, bg_local, fg_local, dropped_px).
+
+    1.2.2: the AI product sits within 0–2 px of Blender (产品还原度 readouts), so the mask's
+    own anti-aliased edge is the matte. Only a 2–3 px band around the mask edge is refined:
+    a shared-sampling colour model (closest foreground/background colour pair) is used only
+    where it agrees with the mask (|Δα| ≤ AGREE_TOL) and the pair explains the pixel; the
+    old 10–16 px band with a guided filter followed grass blades and mud into the matte.
+    Detached far-away mask pieces are dropped (``product_pieces``).
     """
     h, w = fitted.shape
     L = max(h, w)
-    hard = fitted > 0.5
-    r_in = max(2, int(round(0.005 * L)))
-    r_out = max(3, int(round(0.008 * L)))
-    core = erode(hard, r_in)
-    outside = ~dilate(hard, r_out)
+    prior = np.clip(np.asarray(fitted, np.float32), 0, 1)
+    pieces = product_pieces(prior)
+    dropped = int(((prior > 0.5) & ~pieces).sum())
+    near_pieces = dilate(pieces, EDGE_BAND_MAX_PX + 1)
+    prior = np.where(near_pieces, prior, 0.0).astype(np.float32)
+    hard = prior > 0.5
+    rb = edge_band_px(L)
+    core = erode(hard, rb)
+    outside = ~dilate(hard, rb)
     band = ~core & ~outside
     I = image[..., :3].astype(np.float32)
-    prior = np.clip(blur(fitted, max(1, r_in // 2), 2), 0, 1)
+    a = np.where(core, 1.0, np.where(outside, 0.0, prior)).astype(np.float32)
+    # Local foreground / background colours (normalised box means of core / outside pixels).
+    rr = 3 * rb + 3
+    fo = outside.astype(np.float32); fc = core.astype(np.float32)
+    nb = box_sum(fo, rr); nf = box_sum(fc, rr)
+    B_mean = box_sum(I * fo[..., None], rr) / np.maximum(nb, 1e-6)[..., None]
+    F_mean = box_sum(I * fc[..., None], rr) / np.maximum(nf, 1e-6)[..., None]
     by, bx = np.nonzero(band)
-    a = np.where(core, 1.0, 0.0).astype(np.float32)
-    bg_local = I.copy()
+    bg_local = np.where((nb > 0.5)[..., None], B_mean, I)
+    fg_local = np.where((nf > 0.5)[..., None], F_mean, I)
     if len(by):
-        offs = _sample_offsets(2 * (r_in + r_out) + 2, samples)
+        offs = _sample_offsets(rr, samples)
         chunk = 40000                                     # bounds memory on 4K canvases
         for lo in range(0, len(by), chunk):
             cy, cx = by[lo:lo + chunk], bx[lo:lo + chunk]
@@ -350,24 +449,31 @@ def refine_alpha(image: np.ndarray, fitted: np.ndarray, samples: int = 64) -> di
             a_col = np.clip(((p - B) * d).sum(-1) / np.maximum(dd, 1e-6), 0, 1)
             resid = np.sqrt(((p - (a_col[:, None] * F + (1 - a_col[:, None]) * B)) ** 2).sum(-1))
             conf = np.clip(np.sqrt(dd) / 0.12, 0, 1) * np.exp(-resid / 0.04)
-            conf = np.where(hasF & hasB, conf, 0.0)
-            a[cy, cx] = conf * a_col + (1 - conf) * prior[cy, cx]
-            bg_local[cy, cx] = np.where(hasB[:, None], B, p)
-    gr = max(2, int(round(L / 500)))
-    a_g = np.clip(guided_filter(luminance(I), a, gr, 1e-3), 0, 1)
-    a = np.where(band, a_g, a)
-    a = np.where(core, 1.0, np.where(outside, 0.0, a)).astype(np.float32)
+            pr = prior[cy, cx]
+            agree = np.abs(a_col - pr) <= AGREE_TOL
+            conf = np.where(hasF & hasB & agree, conf, 0.0)
+            a[cy, cx] = conf * a_col + (1 - conf) * pr
+            bg_local[cy, cx] = np.where((hasB & (conf > 0.2))[:, None], B, bg_local[cy, cx])
+    a = np.where(core, 1.0, np.where(outside | (prior < 0.01), 0.0, a)).astype(np.float32)   # never grows past the mask
     a[a < 0.03] = 0.0
     a[a > 0.97] = 1.0
-    return {"alpha": a, "core": core, "band": band, "bg_local": bg_local}
+    return {"alpha": a, "core": core, "band": band, "bg_local": bg_local, "fg_local": fg_local,
+            "dropped_px": dropped, "band_px": rb}
 
 
-def decontaminate(image: np.ndarray, alpha: np.ndarray, background: np.ndarray) -> np.ndarray:
-    """Foreground colour F with I = a·F + (1-a)·B at soft-edge pixels (clamped)."""
+def decontaminate(image: np.ndarray, alpha: np.ndarray, background: np.ndarray,
+                  foreground: np.ndarray | None = None) -> np.ndarray:
+    """Foreground colour F with I = a·F + (1-a)·B at soft-edge pixels (clamped).
+
+    1.2.2: with ``foreground`` (local product colour), low-alpha pixels lean on it instead
+    of the noisy unmixed estimate, so no grass / mud tint survives on the edge."""
     a = alpha[..., None]
     I = image[..., :3]
-    F = (I - (1 - a) * background) / np.maximum(a, 1e-3)
-    soft = (alpha > 0.05) & (alpha < 0.98)
+    F = np.clip((I - (1 - a) * background) / np.maximum(a, 1e-3), 0, 1)
+    if foreground is not None:
+        t = np.clip((alpha - 0.15) / 0.6, 0, 1)[..., None]     # a ≤ .15 → local product colour
+        F = foreground * (1 - t) + F * t
+    soft = (alpha > 0.0) & (alpha < 0.98)
     out = I.copy()
     out[soft] = np.clip(F[soft], 0, 1)
     return out
@@ -620,8 +726,30 @@ def load_mask(mask_path, size) -> np.ndarray:
     return m
 
 
+def _structure_fitted(I, raw_mask, detail_path):
+    """1.2.2: place the mask with the inner-structure fit (same as 产品还原度) when the Blender
+    detail pass exists; None when unavailable or it does not beat the identity."""
+    if not detail_path or not Path(detail_path).is_file():
+        return None
+    from .identity_score import structure_fit
+    from .detail_paste import warp_image
+    h, w = raw_mask.shape
+    D = read_png(detail_path).astype(np.float32) / 255.0
+    if D.shape[-1] == 3:
+        D = np.dstack([D, np.ones(D.shape[:2], np.float32)])
+    if D.shape[:2] != (h, w):
+        D = np.clip(resize(D, w, h), 0, 1)
+    f = structure_fit(I, D[..., :3], D[..., 3], raw_mask)
+    ys, xs = np.nonzero(raw_mask > 0.5)
+    c = (float(xs.mean()), float(ys.mean()))
+    moved = (f["scale"], f["dx"], f["dy"]) != (1.0, 0.0, 0.0)
+    m = warp_image(raw_mask, (f["scale"], f["scale"]), f["dx"], f["dy"], c) if moved else raw_mask
+    return {"mask": np.clip(m, 0, 1).astype(np.float32), "scale": f["scale"], "scale_x": f["scale"],
+            "scale_y": f["scale"], "dx": f["dx"], "dy": f["dy"], "search": "structure", "ncc": f["ncc"]}
+
+
 def build_layers(image_path, mask_path, *, mode=MODE_SHADOW, plate_fn=None, write=True, log=None,
-                 work_dir="") -> dict:
+                 work_dir="", detail_path="") -> dict:
     """Make the layers for one generated image. ``plate_fn(image_path, mask_rgba_path, region)``
     returns a path to a clean plate (FULL mode). Temporary files go to ``work_dir``
     (default: next to the image). Returns a report (``_arrays`` holds the float layers)."""
@@ -634,7 +762,14 @@ def build_layers(image_path, mask_path, *, mode=MODE_SHADOW, plate_fn=None, writ
     raw_mask = load_mask(mask_path, (w, h))
     timings["load"] = time.time() - t0
     t = time.time()
-    fit = fit_mask(I, raw_mask)
+    fit = None
+    try:
+        fit = _structure_fitted(I, raw_mask, detail_path)
+    except Exception as exc:  # the outline fit below still works
+        if log:
+            log(f"结构对位失败，改用轮廓对位：{exc}")
+    if fit is None:
+        fit = fit_mask(I, raw_mask)
     timings["fit"] = time.time() - t
     t = time.time()
     matte = refine_alpha(I, fit["mask"])
@@ -643,7 +778,8 @@ def build_layers(image_path, mask_path, *, mode=MODE_SHADOW, plate_fn=None, writ
     t = time.time()
     reg = product_region(np.maximum(fit["mask"], (alpha > 0.5).astype(np.float32)))
     region = reg["region"] & (canvas_alpha > 0.5)
-    report = {"mode": mode, "size": [w, h], "fit": {k: v for k, v in fit.items() if k != "mask"}}
+    report = {"mode": mode, "size": [w, h], "fit": {k: v for k, v in fit.items() if k != "mask"},
+              "matte": {"band_px": matte["band_px"], "dropped_px": matte["dropped_px"]}}
     paths = layer_paths(image_path)
     plate = None
     if mode == MODE_FULL and plate_fn is not None:
@@ -681,7 +817,8 @@ def build_layers(image_path, mask_path, *, mode=MODE_SHADOW, plate_fn=None, writ
     shadow = estimate_shadow(I, plate, region, reg["mid_y"], alpha)
     timings["shadow"] = time.time() - t
     t = time.time()
-    fg = decontaminate(I, alpha, plate if report["plate"] == "codex_edit" else matte["bg_local"])
+    fg = decontaminate(I, alpha, plate if report["plate"] == "codex_edit" else matte["bg_local"],
+                       matte["fg_local"])
     # Recomposite: subject over shadow over background vs the original.
     a3 = alpha[..., None]
     rec = fg * a3 + (plate * (1 - shadow[..., None])) * (1 - a3)
@@ -766,9 +903,10 @@ class LayerRunner:
         self._thread = None
         self.pending = 0
 
-    def submit(self, image_path, mask_path, mode, plate_fn=None, work_dir=""):
+    def submit(self, image_path, mask_path, mode, plate_fn=None, work_dir="", detail_path=""):
         with self._lock:
-            self._jobs.append((str(image_path), str(mask_path), mode, plate_fn, str(work_dir or "")))
+            self._jobs.append((str(image_path), str(mask_path), mode, plate_fn, str(work_dir or ""),
+                               str(detail_path or "")))
             self.pending += 1
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._run, daemon=True, name="wondful-layers")
@@ -780,9 +918,10 @@ class LayerRunner:
                 if not self._jobs:
                     self._thread = None
                     return
-                image_path, mask_path, mode, plate_fn, work_dir = self._jobs.pop(0)
+                image_path, mask_path, mode, plate_fn, work_dir, detail_path = self._jobs.pop(0)
             try:
-                rep = build_layers(image_path, mask_path, mode=mode, plate_fn=plate_fn, work_dir=work_dir)
+                rep = build_layers(image_path, mask_path, mode=mode, plate_fn=plate_fn, work_dir=work_dir,
+                                   detail_path=detail_path)
                 rep.pop("_arrays", None)
                 rep["ok"] = True
                 try:

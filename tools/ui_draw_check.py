@@ -205,6 +205,37 @@ def main():
     draw("terrain_custom_level")
     props.clay_ground = "AUTO"
 
+    # 1.2.2: ⑤ 张数 1/2/3/4 right above 生成; Antigravity cap note; 推理 model fallback notice
+    log = draw("count_default")
+    if not any("render_count" in line for line in log):
+        problems.append("count_default: 张数 (render_count) buttons missing")
+    else:
+        i_count = next(i for i, line in enumerate(log) if "render_count" in line)
+        i_go = next((i for i, line in enumerate(log) if "wondful.generate" in line), -1)
+        if i_go < i_count:
+            problems.append("count_default: 张数 row is not above 生成")
+    if props.render_count != "4":
+        problems.append(f"render_count default is {props.render_count}, want 4")
+    from wondful_ai_renderer.operators import render_variant_count
+    for n in ("1", "2", "3", "4"):
+        props.render_count = n
+        if render_variant_count("codex", props) != int(n):
+            problems.append(f"render_variant_count codex N={n}")
+        draw("count_" + n)
+    props.analysis_provider = "ANTIGRAVITY"
+    log = draw("count_antigravity_cap")
+    if render_variant_count("antigravity", props) != 2:
+        problems.append("antigravity cap not applied")
+    if not any("最多 2 张" in line for line in log):
+        problems.append("antigravity cap note missing")
+    props.analysis_provider = "CODEX"
+    props.render_count = "4"
+    props.model_notice = "本机 Codex CLI 不支持推理模型 gpt-6.1-sol，已自动改用 gpt-5.6-sol；请更新 Codex CLI（npm i -g @openai/codex）后即可使用新模型"
+    log = draw("model_notice")
+    if not any("Codex CLI" in line for line in log):
+        problems.append("model_notice not drawn")
+    props.model_notice = ""
+
     # 3. generating: polishing then rendering
     props.status = "POLISHING"
     props.task_phase = "分析当前风格 (1/2)"

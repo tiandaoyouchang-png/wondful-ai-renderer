@@ -125,7 +125,28 @@ def s2_connected_refs(p, scene):
 
 
 @state
+def s2b_count_2(p, scene):
+    """1.2.2: ⑤ 张数 1/2/3/4 above 生成 (2 selected)."""
+    p.render_count = "2"
+
+
+@state
+def s2c_antigravity_cap(p, scene):
+    p.render_count = "4"
+    p.analysis_provider = "ANTIGRAVITY"
+    p.antigravity_account_state = "LOGGED_IN"
+
+
+@state
+def s2d_model_notice(p, scene):
+    p.analysis_provider = "CODEX"
+    p.model_notice = ("本机 Codex CLI 不支持推理模型 gpt-6.1-sol，已自动改用 gpt-5.6-sol；"
+                      "请更新 Codex CLI（npm i -g @openai/codex）后即可使用新模型")
+
+
+@state
 def s3_generating(p, scene):
+    p.model_notice = ""
     p.status = "POLISHING"
     p.task_phase = "分析当前风格 (1/2)"
     p.progress = 0.34

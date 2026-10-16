@@ -96,7 +96,7 @@ def codex_models(cli, *, cwd, timeout=30, process_factory=ManagedProcess):
         raise RuntimeError("读取 Codex 模型列表超时；请检查 CLI 状态后重试。")
 
     try:
-        request(1, "initialize", {"clientInfo": {"name": "wondful_renderer", "title": "Wondful AI Renderer", "version": "1.2.1"}})
+        request(1, "initialize", {"clientInfo": {"name": "wondful_renderer", "title": "Wondful AI Renderer", "version": "1.2.2"}})
         process.write_line(json.dumps({"method": "initialized"}))
         rows, cursor, seen = [], None, set()
         for request_id in range(2, 22):
@@ -121,8 +121,71 @@ def codex_models(cli, *, cwd, timeout=30, process_factory=ManagedProcess):
         process.close()
 
 
+def merge_codex_models(cli_models, live_slugs):
+    """1.2.2: the account's live list (newest first) ahead of what the local CLI knows.
+
+    ``cli_models`` are normalize_models() dicts from the installed CLI (it may be old and
+    only know older models); ``live_slugs`` come from the ChatGPT backend /models (already
+    ranked newest first).  Dedupes by id; CLI-only entries (e.g. chatgpt-web/*) stay after."""
+    cli_by_id = {m["id"]: m for m in (cli_models or []) if isinstance(m, dict) and m.get("id")}
+    out, seen = [], set()
+    for slug in live_slugs or []:
+        slug = str(slug or "").strip()
+        if not slug or slug in seen or re.search(r"\s|[\x00-\x1f\x7f]", slug):
+            continue
+        seen.add(slug)
+        base = cli_by_id.get(slug)
+        row = dict(base) if base else {"id": slug, "label": slug, "description": "", "default": False}
+        row["live"] = True
+        if not base:
+            row["description"] = (row.get("description") or "账号可用（本机 Codex CLI 尚未内置）")
+        out.append(row)
+    for model in cli_models or []:
+        if isinstance(model, dict) and model.get("id") and model["id"] not in seen:
+            seen.add(model["id"])
+            out.append(dict(model, live=False))
+    return out
+
+
+def live_codex_models(timeout=10.0):
+    """Account model list from the Codex backend (same source as 生图). [] on any failure."""
+    try:
+        from . import codex_direct as CD
+        path = CD.find_auth_file()
+        if path is None:
+            return []
+        auth = CD.load_auth(path)
+        try:
+            if CD.token_expiring(CD.access_token(auth)):
+                auth = CD.refresh_auth(auth, path)
+        except Exception:
+            pass
+        CD._MODEL_CACHE.update(at=0.0, models=[])
+        models = CD.available_models(auth, path, timeout=timeout, refresh=True)
+        # FALLBACK_MODELS (nothing read) are not proof the account has them: list only real data.
+        return list(models) if CD._MODEL_CACHE.get("models") else []
+    except Exception:
+        return []
+
+
+def discover_codex_models_merged(cli, *, cwd, live=None):
+    """CLI model/list + live account list. Either source alone is enough."""
+    cli_models, cli_error = [], None
+    try:
+        cli_models = codex_models(cli, cwd=cwd)
+    except Exception as exc:  # an old/broken CLI must not hide the account's models
+        cli_error = exc
+    live_slugs = live_codex_models() if live is None else list(live)
+    merged = merge_codex_models(cli_models, live_slugs)
+    if not merged:
+        raise cli_error or RuntimeError("Codex 当前没有返回可选择的模型。请检查账号与 CLI 配置。")
+    return merged
+
+
 def discover_models(provider, cli, *, cwd):
     if not cli:
         raise RuntimeError("未找到当前服务的 CLI，请先选择 CLI 路径或检测安装。")
     Path(cwd).mkdir(parents=True, exist_ok=True)
-    return (agy_models if provider == "antigravity" else codex_models)(cli, cwd=str(cwd))
+    if provider == "antigravity":
+        return agy_models(cli, cwd=str(cwd))
+    return discover_codex_models_merged(cli, cwd=str(cwd))

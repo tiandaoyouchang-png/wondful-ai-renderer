@@ -12,7 +12,7 @@ from .properties import MAX_REFERENCES_PER_KIND
 from . import prompt_profiles
 from .prompt_engine import needs_reference_policy_refresh
 from .viewport_capture import camera_output_dimensions
-from .operators import render_variant_count
+from .operators import provider_variant_cap, render_variant_count
 
 # Text built from several parts is not a single key in Blender's translation table,
 # so it is translated here (see i18n.py).
@@ -410,7 +410,11 @@ def _draw_detail_paste(adv, context, props, busy):
                       icon="UNLOCKED" if all_marked else "LOCKED")
     note = getattr(props, "last_detail_note", "")
     if note:
-        box.label(text=_short(note, 44), icon="ERROR" if ("失败" in note or "跳过" in note) else "CHECKMARK")
+        main, _sep, warn = note.partition(" · 注意：")
+        box.label(text=_short(main, 44), icon="ERROR" if ("失败" in main or "跳过" in main) else "CHECKMARK")
+        if warn:  # 1.2.2: a plate / logo that reads mirrored in the model itself
+            for index, line in enumerate(wrap(warn, width=42)[:4]):
+                box.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
 
 
 def _draw_massing(adv, context, props, busy):
@@ -738,6 +742,14 @@ class WONDFUL_PT_main(Panel):
                 go_text = "生成提示词" if needs_polish else "渲染"
             else:
                 go_text = "生成"
+            # 1.2.2: images per generation, right above 生成.
+            count_row = step5.row(align=True)
+            count_row.enabled = not busy
+            count_row.label(text="张数")
+            count_row.prop(props, "render_count", expand=True)
+            cap = provider_variant_cap("antigravity" if active_is_antigravity else "codex")
+            if int(props.render_count) > cap:
+                step5.label(text=f"Antigravity 每次最多 {cap} 张，将生成 {cap} 张", icon="INFO")
             go = step5.row(align=True)
             go.scale_y = 2.0
             go.enabled = can_generate
@@ -756,6 +768,9 @@ class WONDFUL_PT_main(Panel):
                 "ImageGen 已在偏好设置里关闭" if not imagegen_enabled else "")
             if next_step:
                 step5.label(text=next_step, icon="INFO")
+        if getattr(props, "model_notice", ""):
+            for index, line in enumerate(wrap(props.model_notice, width=42)[:3]):
+                step5.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
         if props.status == "ERROR" and props.last_error:
             err = step5.box()
             lines = wrap(props.last_error, width=42)[:6]
@@ -764,7 +779,7 @@ class WONDFUL_PT_main(Panel):
             err.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
 
         # ---- 结果（属于 ⑤）------------------------------------------------------
-        provider_variant_count = render_variant_count("antigravity" if active_is_antigravity else "codex")
+        provider_variant_count = render_variant_count("antigravity" if active_is_antigravity else "codex", props)
         if props.result_image:
             result = step5.box()
             title = result.row(align=True)
@@ -790,6 +805,8 @@ class WONDFUL_PT_main(Panel):
             if layers_note:
                 result.label(text=_short(layers_note, 42), icon="ERROR" if "失败" in layers_note else "RENDERLAYERS")
             detail_note = getattr(props, "last_detail_note", "")
+            if "镜像" in detail_note:
+                result.label(text="车牌 / 标识在模型里是镜像的，见 高级 › 细节回贴", icon="ERROR")
             if detail_note and ("完成" in detail_note or "失败" in detail_note or "跳过" in detail_note):
                 result.label(text=_short(detail_note, 42),
                              icon="ERROR" if ("失败" in detail_note or "跳过" in detail_note) else "BRUSH_DATA")

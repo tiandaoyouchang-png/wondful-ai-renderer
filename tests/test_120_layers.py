@@ -127,11 +127,16 @@ class MaskFitTest(unittest.TestCase):
 class AlphaInpaintShadowTest(unittest.TestCase):
     def test_alpha_follows_true_edge(self):
         img, _, true_mask, _, _ = synthetic_scene()
-        # a slightly too large prior mask must be pulled back to the real edge by colour
+        # 1.2.2: the (fitted) Blender mask is trusted; colour may only move alpha within the
+        # 2–3 px band and only where it agrees with the mask, so a 2-px-too-large prior gets
+        # partly (not fully) pulled back, and never grows.
         prior = LO.dilate(true_mask > 0, 2).astype(np.float32)
         a = LO.refine_alpha(img, prior)["alpha"]
         err = np.abs(a - true_mask).mean()
-        self.assertLess(err, 0.01)
+        self.assertLess(err, 0.015)
+        self.assertFalse(((a > 0.02) & (prior < 0.01)).any())
+        exact = LO.refine_alpha(img, true_mask.astype(np.float32))["alpha"]
+        self.assertLess(np.abs(exact - true_mask).mean(), 0.004)
         self.assertTrue((a[true_mask > 0] > 0.9).mean() > 0.98)
 
     def test_pushpull_fills_smoothly(self):

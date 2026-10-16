@@ -28,6 +28,48 @@ class CodexNotLoggedInError(CodexError):
     pass
 
 
+class CodexModelRejectedError(CodexError):
+    """1.2.2: the local Codex CLI / backend refused the chosen 推理 model (old CLI, new model)."""
+
+
+_MODEL_REJECT_RE = re.compile(
+    r"model is not supported|not supported when using codex|model_not_found|unsupported model|unknown model"
+    r"|invalid model|model .{0,80}(?:does not exist|not found|is not available|requires a newer)"
+    r"|requires a newer version of codex|please (?:update|upgrade) codex",
+    re.I,
+)
+# 1.2.2 run-time fallback chain for the 推理 model.  Set on Blender's main thread
+# (operators._analysis_provider) from the merged model list; read by worker threads.
+_MODEL_STATE = {"chain": [], "notice": ""}
+
+
+def is_model_rejection(detail: str) -> bool:
+    return bool(_MODEL_REJECT_RE.search(detail or ""))
+
+
+def set_model_fallbacks(chain) -> None:
+    _MODEL_STATE["chain"] = [str(m).strip() for m in (chain or []) if str(m or "").strip()]
+
+
+def pop_model_notice() -> str:
+    notice, _MODEL_STATE["notice"] = _MODEL_STATE["notice"], ""
+    return notice
+
+
+def model_fallback_candidates(model: str, chain=None) -> list[str]:
+    """Models to try after ``model`` was rejected: the rest of the list (newest first,
+    starting after the rejected one), then "" = the CLI's own default. At most 4."""
+    model = (model or "").strip()
+    chain = list(_MODEL_STATE["chain"] if chain is None else chain)
+    if model in chain:
+        chain = chain[chain.index(model) + 1:]
+    out = []
+    for slug in chain:
+        if slug and slug != model and slug not in out and not slug.startswith("chatgpt-web/"):
+            out.append(slug)
+    return out[:3] + [""]
+
+
 class CodexImageGenerationUnavailable(CodexError):
     pass
 
@@ -212,7 +254,33 @@ def _assert_logged_in(cli: str) -> None:
         raise CodexNotLoggedInError("Codex 尚未使用 ChatGPT 登录。请先点击“使用 ChatGPT 登录”。")
 
 
-def _exec_turn(
+def _exec_turn(*, model: str = "", **kwargs) -> str:
+    """Run one codex exec turn; if the CLI rejects ``model`` fall back down the chain.
+
+    The fallback is recorded in ``_MODEL_STATE["notice"]`` so the panel can tell the
+    user to update Codex CLI (operators pop it into props.model_notice)."""
+    try:
+        return _exec_turn_once(model=model, **kwargs)
+    except CodexModelRejectedError as first:
+        if not (model or "").strip():
+            raise
+        last = first
+        for candidate in model_fallback_candidates(model):
+            try:
+                text = _exec_turn_once(model=candidate, **kwargs)
+            except CodexModelRejectedError as exc:
+                last = exc
+                continue
+            used = candidate or "CLI 默认模型"
+            _MODEL_STATE["notice"] = (f"本机 Codex CLI 不支持推理模型 {model.strip()}，已自动改用 {used}；"
+                                      "请更新 Codex CLI（npm i -g @openai/codex）后即可使用新模型")
+            print(f"[Wondful] {_MODEL_STATE['notice']}")
+            return text
+        raise CodexModelRejectedError(
+            f"本机 Codex CLI 不支持所选推理模型 {model.strip()}，自动降级也失败。请更新 Codex CLI（npm i -g @openai/codex）。{last}")
+
+
+def _exec_turn_once(
     *,
     explicit_path: str,
     prompt: str,
@@ -263,6 +331,8 @@ def _exec_turn(
             raise CodexError("Codex / ImageGen 当前工作区额度已用完（429）。请等待额度恢复或联系工作区管理员补充额度，再重新渲染。重新登录不会恢复额度。")
         if "not logged" in detail.lower() or "unauthorized" in detail.lower() or "401" in detail:
             raise CodexNotLoggedInError(f"Codex 登录已失效，请重新登录。{detail}".strip())
+        if model.strip() and is_model_rejection(detail):
+            raise CodexModelRejectedError(f"Codex 拒绝了模型 {model.strip()}。{detail[-300:]}".strip())
         raise CodexError(f"Codex 执行失败（exit={proc.returncode}）。{detail}".strip())
 
     text = ""

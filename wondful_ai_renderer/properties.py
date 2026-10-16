@@ -476,12 +476,21 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     scene_brief_used: StringProperty(default="", options={"HIDDEN"})
     pending_generate: BoolProperty(default=False, options={"SKIP_SAVE"})
+    render_count: EnumProperty(
+        name="张数",
+        description="每次生成几张图（Codex 最多 4 张，Antigravity 最多 2 张）",
+        items=[("1", "1", "每次生成 1 张"), ("2", "2", "每次生成 2 张"),
+               ("3", "3", "每次生成 3 张"), ("4", "4", "每次生成 4 张")],
+        default="4",
+    )
     two_step: BoolProperty(
         name="分两步",
         description="打开后「生成」只写提示词，确认后再点「渲染」",
         default=False,
     )
     prompt_removed_notice: StringProperty(default="", options={"SKIP_SAVE"})
+    # 1.2.2: set when the local Codex CLI rejected the chosen 推理 model and a fallback ran.
+    model_notice: StringProperty(default="", options={"SKIP_SAVE"})
     ui_show_appearance_lock: BoolProperty(name="产品外观锁定", default=True)
 
     analysis_provider: EnumProperty(
@@ -505,10 +514,10 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_expanded: BoolProperty(name="展开提示词", description="展开自动换行全文或收起为 6 行；完整编辑按钮支持多行输入", default=False)
     render_mode: EnumProperty(
         name="渲染模式",
-        description="控制单次渲染的远程调用数量。Codex 每次生成 4 张，Antigravity 每次生成 2 张；严格对齐才执行远程构图验收和自动修复",
+        description="控制单次渲染的远程调用数量。张数在 ⑤ 选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
         items=[
-            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；Codex 生成 4 张，Antigravity 生成 2 张；用于快速看方向"),
-            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；Codex 生成 4 张，Antigravity 生成 2 张；推荐默认"),
+            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按 ⑤ 的选择；用于快速看方向"),
+            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按 ⑤ 的选择；推荐默认"),
             ("STRICT", "严格对齐", "使用完整 Structure Packet（含 Part ID），生成后远程验收；未达阈值时按设置自动修复重试"),
         ],
         default="STANDARD",

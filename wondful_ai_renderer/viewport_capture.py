@@ -869,6 +869,43 @@ def keep_exact_slots(collection, with_glass=False):
     return out
 
 
+def mirrored_keep_parts(collection, camera, threshold: float = 0.6) -> list:
+    """1.2.2: keep-exact parts (plates / badges / logos) whose texture reads mirrored from the
+    scene camera in Blender itself (mirrored UVs or a negative object scale). 细节回贴 pastes
+    these exactly as Blender shows them, so a mirrored model plate stays mirrored in the
+    result — the panel warns instead of silently "fixing" the user's model."""
+    from .detail_paste import mirrored_text_fraction
+    if collection is None or camera is None:
+        return []
+    cam_pos = tuple(camera.matrix_world.translation)
+    found = []
+    for (obj, slot), kind in keep_exact_slots(collection, with_glass=False).items():
+        if kind not in {"explicit", "auto"} or obj.type != "MESH" or obj.data is None:
+            continue
+        me = obj.data
+        uv = me.uv_layers.active
+        if uv is None:
+            continue
+        try:
+            me.calc_loop_triangles()
+        except Exception:
+            continue
+        mw = obj.matrix_world
+        pos, uvs = [], []
+        for tri in me.loop_triangles:
+            if slot >= 0 and tri.material_index != slot:
+                continue
+            pos.append([tuple(mw @ me.vertices[v].co) for v in tri.vertices])
+            uvs.append([tuple(uv.data[l].uv) for l in tri.loops])
+        if not pos:
+            continue
+        frac = mirrored_text_fraction(pos, uvs, cam_pos, negative_scale=mw.determinant() < 0)
+        if frac >= threshold:
+            mat = obj.material_slots[slot].material if 0 <= slot < len(obj.material_slots) else None
+            found.append({"object": obj.name, "material": mat.name if mat else "", "fraction": round(frac, 2)})
+    return found
+
+
 def _material_is_matte(mat) -> bool:
     """Matte / textile material (fabric, velvet, wood, leather, rubber): it shows no sharp
     reflections, so any fine texture the AI draws on it is invented; 细节回贴 uses the

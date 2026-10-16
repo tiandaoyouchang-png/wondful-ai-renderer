@@ -111,6 +111,33 @@ def keep_prompt(vehicle: bool, texts=()) -> str:
     return base
 
 
+def mirrored_text_fraction(tri_pos: np.ndarray, tri_uv: np.ndarray, cam_pos, negative_scale: bool = False) -> float:
+    """1.2.2: share (by screen-facing area) of a textured part whose image texture reads
+    mirrored from the camera. ``tri_pos`` (N, 3, 3) world-space triangles (object transform
+    applied, so a negative scale counts), ``tri_uv`` (N, 3, 2). Seen from the side where the
+    vertices run counter-clockwise, a texture reads correctly iff its UV triangle is
+    counter-clockwise too. Only triangles whose (outward) normal faces the camera count —
+    the far plate of a car seen from the front is hidden behind the body anyway. With a
+    negative object scale the world-space winding flips while Blender keeps the shading
+    normal outward, so ``negative_scale`` flips which side is the outside."""
+    P = np.asarray(tri_pos, np.float64)
+    U = np.asarray(tri_uv, np.float64)
+    if P.size == 0:
+        return 0.0
+    n = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    view = ((np.asarray(cam_pos, np.float64)[None, :] - P.mean(1)) * n).sum(-1)
+    e1, e2 = U[:, 1] - U[:, 0], U[:, 2] - U[:, 0]
+    uv_area = e1[:, 0] * e2[:, 1] - e1[:, 1] * e2[:, 0]
+    to_cam = np.asarray(cam_pos, np.float64)[None, :] - P.mean(1)
+    facing = np.abs(view) / np.maximum(np.linalg.norm(to_cam, axis=1), 1e-9)   # projected area
+    outward = -view if negative_scale else view
+    ok = (np.abs(uv_area) > 1e-12) & (facing > 1e-12) & (outward > 0)
+    if not ok.any():
+        return 0.0
+    mirrored = (uv_area * view < 0) & ok
+    return float(facing[mirrored].sum() / facing[ok].sum())
+
+
 def merge_keep_masks(rgba: np.ndarray, product: np.ndarray, max_auto_frac: float = HEURISTIC_MAX_FRAC):
     """Part masks from the keep render: R = explicit keep-exact, G = automatic keep-exact,
     B = glass / transparent, black with alpha = matte / textile; A = coverage.
@@ -280,7 +307,8 @@ def denoise_detail(detail: np.ndarray, L: int) -> np.ndarray:
 
 
 def frequency_blend(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray, weight: np.ndarray,
-                    r: int, strength: float = DEFAULT_STRENGTH, flat=(0.012, 0.04), matte=None):
+                    r: int, strength: float = DEFAULT_STRENGTH, flat=(0.012, 0.04), matte=None,
+                    occluder=None, expected=None):
     """Low frequencies of ``ai`` + high frequencies of ``detail`` inside ``weight``.
 
     ``detail`` is brightness-normalised to the AI locally (ratio of low-pass luminance,
@@ -301,7 +329,16 @@ def frequency_blend(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray
     hf_a = ai - a_low
     hf_d = (detail - d_low) * inside[..., None]
     la, ld = luminance(a_low), luminance(d_low)
-    gain = np.clip((la + 0.02) / (ld + 0.02), 0.25, 3.0)[..., None]
+    # 1.2.2 "in shadow": the AI is much darker here than the (levels-matched) detail pass.
+    if expected is not None:
+        le = luminance(_norm_blur(expected.astype(np.float32), np.maximum(support, 1e-3), r))
+        shade = np.clip((SHADE[0] - (la + 0.02) / (le + 0.02)) / (SHADE[0] - SHADE[1]), 0, 1)
+    else:
+        shade = np.zeros_like(la)
+    occ = np.zeros_like(la) if occluder is None else np.clip(occluder, 0, 1).astype(np.float32)
+    calm = np.maximum(shade, occ)                     # shadowed or occluded: no extra punch
+    gain = np.clip((la + 0.02) / (ld + 0.02), 0.25, 3.0)
+    gain = np.minimum(gain, 3.0 - 2.0 * calm)[..., None]
     hf_d = hf_d * gain
     er = max(1, r // 3)
     energy = blur(np.abs(luminance(hf_d)) * inside, er, 2) / np.maximum(blur(inside, er, 2), 1e-3)
@@ -312,11 +349,19 @@ def frequency_blend(ai: np.ndarray, detail: np.ndarray, detail_alpha: np.ndarray
     # towards the AI's local contrast (never lower, at most ×2.5) so edges keep their punch.
     e_ai = blur(np.abs(luminance(hf_a)), r, 2)
     e_d = blur(np.abs(luminance(hf_d)) * inside, r, 2) / np.maximum(blur(inside, r, 2), 1e-3)
-    hf_d = hf_d * np.clip((e_ai + 1e-3) / (e_d + 1e-3), 1.0, 2.5)[..., None]
-    wd = (strength * structure * np.clip(weight, 0, 1) * inside)[..., None]
+    lift = np.clip((e_ai + 1e-3) / (e_d + 1e-3), 1.0, 2.5)
+    hf_d = hf_d * (1.0 + (lift - 1.0) * (1.0 - calm))[..., None]   # mud speckle energy is not "contrast"
+    wd = (strength * structure * np.clip(weight, 0, 1) * inside * (1.0 - occ))[..., None]
     out = a_low + wd * hf_d + (1 - wd) * hf_a
+    # Never brighten past the AI's own shading where it is shadowed / occluded: the paste only
+    # adds detail there, it does not wash dirt or shadow out.
+    up = np.maximum(luminance(out) - luminance(ai), 0.0)
+    cap = up * calm
+    out = out - (cap / np.maximum(luminance(out), 1e-4))[..., None] * out * (up > 0)[..., None]
     sel = weight > 0.5
-    return np.clip(out, 0, 1), {"r": int(r), "structure_mean": round(float(structure[sel].mean()) if sel.any() else 0.0, 3),
+    return np.clip(out, 0, 1), {"r": int(r), "occluded_frac": round(float((occ[sel] > 0.5).mean()) if sel.any() else 0.0, 3),
+                                "shade_frac": round(float((shade[sel] > 0.5).mean()) if sel.any() else 0.0, 3),
+                                "structure_mean": round(float(structure[sel].mean()) if sel.any() else 0.0, 3),
                                 "wd_mean": round(float(wd[..., 0][sel].mean()) if sel.any() else 0.0, 3)}
 
 
@@ -340,6 +385,69 @@ def colour_match(src: np.ndarray, ref: np.ndarray, region: np.ndarray, amount: f
     g = np.clip((mr + 0.01) / (ms + 0.01), cast[0], cast[1])
     out = out * g[None, None, :]
     return np.clip(src + amount * (out - src), 0, 1)
+
+
+OCC_HUE = (25.0, 50.0)       # hue departure ramp (degrees) vs the material's expected hue
+OCC_DESAT = (0.40, 0.20)     # chroma ratio ramp (AI / expected) for colour that is "lost" (grey mud, spray)
+OCC_DARK = (0.55, 0.35)      # lightness ratio ramp (AI / material median), lower body only
+OCC_LOWER = (0.40, 0.65)     # lower-body ramp: fraction of the product's height from the top
+SHADE = (0.62, 0.32)         # AI / expected low-pass luminance ratio ramp → "in shadow"
+
+
+def occluder_mask(ai: np.ndarray, detail: np.ndarray, region: np.ndarray, L: int, labels=None) -> np.ndarray:
+    """1.2.2: soft 0..1 map of AI pixels that sit *in front of* / *on* the product (mud, dust,
+    water, particles, contact shadow) — where the paste and the colour correction fade to 0.
+
+    Per material (material-ID labels when available, else the colour-matched detail pass)
+    the expected hue / chroma / lightness is the material's typical value. A pixel is an
+    occluder when its hue departs strongly (brown mud on green paint), when it lost most of
+    its colour without getting brighter (grey spray / dust; a sky reflection is brighter and
+    does not count), or — in the lower body / ground-contact band — when it is much darker
+    than the material's typical lightness (dirt, splash shadow)."""
+    from .material_color import srgb_to_lab
+    sel = region > 0.5
+    h, w = region.shape
+    if sel.sum() < 50:
+        return np.zeros((h, w), np.float32)
+    li = srgb_to_lab(ai)
+    Li, Ci, Hi = li[..., 0], np.hypot(li[..., 1], li[..., 2]), np.arctan2(li[..., 2], li[..., 1])
+    le = srgb_to_lab(colour_match(detail, ai, region, amount=1.0))
+    Ce, He = np.hypot(le[..., 1], le[..., 2]), np.arctan2(le[..., 2], le[..., 1])
+    Lm = np.full((h, w), float(np.median(Li[sel])), np.float32)
+    groups = []
+    if labels is not None:
+        groups = [sel & (labels == k) for k in np.unique(labels[sel & (labels >= 0)])]
+    if not groups:
+        groups = [sel]
+    for m in groups:
+        if m.sum() < 30:
+            continue
+        lm = float(np.median(Li[m]))
+        Lm[m] = lm
+        if labels is not None:
+            mid = m & (np.abs(Li - lm) < 0.35 * lm + 5)        # typical tones of this material
+            mid = mid if mid.sum() >= 20 else m
+            a, b = float(np.median(li[..., 1][mid])), float(np.median(li[..., 2][mid]))
+            Ce[m], He[m] = np.hypot(a, b), np.arctan2(b, a)
+    dh = np.degrees(np.abs(np.angle(np.exp(1j * (Hi - He)))))
+    chromatic = np.clip((np.minimum(Ci, Ce) - 10.0) / 8.0, 0, 1)
+    hue = np.clip((dh - OCC_HUE[0]) / (OCC_HUE[1] - OCC_HUE[0]), 0, 1) * chromatic
+    not_brighter = np.clip((1.05 * Lm + 5.0 - Li) / 6.0, 0, 1)
+    desat = (np.clip((OCC_DESAT[0] - Ci / np.maximum(Ce, 1.0)) / (OCC_DESAT[0] - OCC_DESAT[1]), 0, 1)
+             * np.clip((Ce - 20.0) / 10.0, 0, 1) * not_brighter)       # only colourful materials (paint)
+    ratio = (Li + 2.0) / (Lm + 2.0)
+    dark = np.clip((OCC_DARK[0] - ratio) / (OCC_DARK[0] - OCC_DARK[1]), 0, 1)
+    # only on light / colourful materials: rims and black trim are dark by design
+    dark *= np.clip((Lm - 30.0) / 10.0, 0, 1) * np.clip((Ce - 12.0) / 10.0, 0, 1)
+    ys = np.nonzero(sel.any(1))[0]
+    y0, y1 = int(ys.min()), int(ys.max())
+    t = (np.arange(h, dtype=np.float32) - y0) / max(1.0, y1 - y0)
+    lower = np.clip((t - OCC_LOWER[0]) / (OCC_LOWER[1] - OCC_LOWER[0]), 0, 1)[:, None]
+    occ = np.maximum(np.maximum(hue, desat), dark * lower) * sel
+    occ = blur(occ.astype(np.float32), 1, 1)                          # single noisy pixels do not count
+    hard = dilate(occ > 0.4, max(1, int(round(L / 900))))
+    soft = np.clip(blur(hard.astype(np.float32), max(2, int(round(L / 450))), 2) * 1.6, 0, 1)
+    return (np.maximum(occ, soft) * sel).astype(np.float32)
 
 
 def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
@@ -413,7 +521,12 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     diag = product_size(fitted)
     r = blur_radius(diag)
     D = denoise_detail(D, L)
-    blended, binfo = frequency_blend(I, D, Da, weight, r, strength, matte=matte)
+    occ_region = (fitted > 0.5) & (Da > 0.5)
+    if canvas_alpha is not None:
+        occ_region &= canvas_alpha > 0.5
+    occ = occluder_mask(I, D, occ_region.astype(np.float32), L, labels=labels)
+    expected = colour_match(D, I, occ_region.astype(np.float32), amount=1.0)
+    blended, binfo = frequency_blend(I, D, Da, weight, r, strength, matte=matte, occluder=occ, expected=expected)
     out = I * (1 - weight[..., None]) + blended * weight[..., None]
     timings["blend"] = round(time.time() - t, 2)
     t = time.time()
@@ -434,6 +547,7 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
         k = np.where(erode(fitted > 0.5, max(1, r_e // 2)), k, 0.0)
         if canvas_alpha is not None:
             k = k * (canvas_alpha > 0.5)
+        k = k * (1.0 - occ)          # 1.2.2: a plate / scuff plate under mud stays muddy
         stats = k_core if k_core.sum() >= 30 else (dilate(k_core, max(2, r)) & (fitted > 0.5))
         matched = colour_match(D, I, stats)
         out = out * (1 - k[..., None]) + matched * k[..., None]
@@ -453,8 +567,9 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
         cw = cw * np.clip((Da - 0.5) * 2.0, 0, 1)
         if canvas_alpha is not None:
             cw = cw * (canvas_alpha > 0.5)
+        cw = cw * (1.0 - occ)        # 1.2.2: never recolour mud / spray / dust towards clean paint
         cres = correct_colours(np.clip(out, 0, 1), D, labels, materials, cw.astype(np.float32), colour_strength,
-                               model_alpha=Da, protect=protect)
+                               model_alpha=Da, protect=protect, occluder=occ)
         out = cres["image"]
         colour = {"cast": cres["cast"], "regions": cres["regions"], "changed_px": cres["changed_px"],
                   "strength": round(float(colour_strength), 3)}
@@ -464,7 +579,7 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     return {"image": out, "fit": {k: v for k, v in fit.items() if k != "mask"}, "align": align,
             "keep": dict(keep_info, pasted_px=keep_px), "colour": colour,
             "blend": dict(binfo, erode=r_e, feather=r_f, strength=round(float(strength), 3), diag=round(diag, 1)),
-            "changed_px": int(changed.sum()), "weight": weight, "keep_mask": keep,
+            "changed_px": int(changed.sum()), "weight": weight, "keep_mask": keep, "occluder": occ,
             "timings": dict(timings, total=round(time.time() - t0, 2))}
 
 
@@ -533,10 +648,19 @@ def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="",
         write_png(str(Path(debug_dir) / f"{stem}_weight.png"), gray(res["weight"]))
         if res["keep_mask"] is not None:
             write_png(str(Path(debug_dir) / f"{stem}_keep.png"), gray(res["keep_mask"]))
-    rep = {k: v for k, v in res.items() if k not in {"image", "weight", "keep_mask"}}
+    rep = {k: v for k, v in res.items() if k not in {"image", "weight", "keep_mask", "occluder"}}
     rep["seconds"] = round(time.time() - t0, 2)
     rep["output"] = str(output_path)
     return rep
+
+
+def mirrored_note(parts) -> str:
+    """Panel warning for keep-exact parts whose texture reads mirrored in Blender itself."""
+    if not parts:
+        return ""
+    names = "、".join(str(p.get("object", ""))[:24] for p in parts[:2])
+    return (f" · 注意：{names} 的贴图在模型里就是镜像的（从相机看文字是反的，UV 或缩放为负），"
+            "细节回贴会照模型贴回；请在 Blender 里修正该物体的 UV / 缩放")
 
 
 def summarize(report) -> str:

@@ -275,6 +275,7 @@ class WiringTest(unittest.TestCase):
         fake_vc = types.ModuleType("wondful_ai_renderer.viewport_capture")
         fake_vc.keep_exact_slots = lambda coll: {}
         fake_vc.keep_exact_texts = lambda coll: []
+        fake_vc.mirrored_keep_parts = lambda coll, cam: []
         saved = sys.modules.get("wondful_ai_renderer.viewport_capture")
         sys.modules["wondful_ai_renderer.viewport_capture"] = fake_vc
         try:
