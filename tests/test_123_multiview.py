@@ -246,5 +246,65 @@ class Wiring(unittest.TestCase):
         self.assertFalse(any(p.suffix == ".onnx" for p in PKG.rglob("*")))
 
 
+class CameraList(unittest.TestCase):
+    """「相机 1/2/3…」 rows: explicit input; no rows = the old selected-camera behaviour."""
+
+    @staticmethod
+    def cam(name, kind="CAMERA"):
+        from types import SimpleNamespace
+        return SimpleNamespace(name=name, type=kind)
+
+    def test_empty_list_falls_back_to_selection(self):
+        m, a, b, cube = self.cam("M"), self.cam("A"), self.cam("B"), self.cam("Cube", "MESH")
+        r = MV.pick_cameras([], [m, a, cube, b, a], m)
+        self.assertEqual(r["source"], "selected")
+        self.assertEqual([c.name for c in r["cameras"]], ["A", "B"])
+
+    def test_list_skips_master_duplicates_disabled_missing(self):
+        m, a, b, c, gone = (self.cam(n) for n in ("M", "A", "B", "C", "Gone"))
+        slots = [(a, True), (None, True), (m, True), (a, True), (b, False), (gone, True), (c, True)]
+        r = MV.pick_cameras(slots, [b], m, is_present=lambda o: o.name != "Gone")
+        self.assertEqual(r["source"], "list")
+        self.assertEqual([x.name for x in r["cameras"]], ["A", "C"])     # selection ignored when rows exist
+        self.assertEqual(r["missing"], [2, 6])
+        self.assertEqual(r["master_rows"], [3])
+        self.assertEqual(r["duplicate_rows"], [4])
+        self.assertEqual(r["disabled_rows"], [5])
+
+    def test_disabled_row_does_not_shadow_a_later_enabled_duplicate(self):
+        a = self.cam("A")
+        r = MV.pick_cameras([(a, False), (a, True)], [], None)
+        self.assertEqual([x.name for x in r["cameras"]], ["A"])
+        self.assertEqual((r["disabled_rows"], r["duplicate_rows"]), ([1], []))
+
+    def test_rows_but_none_filled(self):
+        r = MV.pick_cameras([(None, True)], [self.cam("A")], None)
+        self.assertEqual((r["source"], r["cameras"], r["missing"]), ("list", [], [1]))
+
+    def test_non_camera_in_slot_is_missing(self):
+        r = MV.pick_cameras([(self.cam("Cube", "MESH"), True)], [], None)
+        self.assertEqual(r["missing"], [1])
+
+    def test_view_names(self):
+        self.assertEqual(MV.next_view_name([]), "Wondful 视角 1")
+        self.assertEqual(MV.next_view_name(["Wondful 视角 1", "Wondful 视角 3"]), "Wondful 视角 2")
+
+    def test_wiring(self):
+        init = (PKG / "__init__.py").read_text(encoding="utf-8")
+        for name in ("WONDFUL_MVCameraItem", "WONDFUL_OT_mv_camera_add", "WONDFUL_OT_mv_camera_remove",
+                     "WONDFUL_OT_mv_camera_from_view"):
+            self.assertEqual(init.count(name), 2, name)                  # imported + registered
+        self.assertLess(init.index("    WONDFUL_MVCameraItem,"), init.index("    WONDFUL_AISettings,"))
+        props = (PKG / "properties.py").read_text(encoding="utf-8")
+        self.assertIn("mv_cameras: CollectionProperty(type=WONDFUL_MVCameraItem", props)
+        ops = (PKG / "operators.py").read_text(encoding="utf-8")
+        body = ops[ops.index("class WONDFUL_OT_multiview_render"):]
+        self.assertIn("picked = mv_pick(context, props, master)", body)
+        self.assertIn("MV.order_views(", body)                          # nearest-to-master order kept
+        ui = (PKG / "ui.py").read_text(encoding="utf-8")
+        for text in ("＋ 添加相机槽", "＋ 从当前视图新建相机", 'f"相机 {n}"', 'text="启用"', 'f"渲染 {len(others)} 个相机"'):
+            self.assertIn(text, ui)
+
+
 if __name__ == "__main__":
     unittest.main()

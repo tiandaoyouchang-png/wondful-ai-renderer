@@ -371,6 +371,13 @@ class WONDFUL_ModelItem(PropertyGroup):
     is_default: BoolProperty(default=False)
 
 
+class WONDFUL_MVCameraItem(PropertyGroup):
+    """1.2.3 多角度场景一致: one 「相机 N」 row (camera picker + 启用)."""
+    camera: PointerProperty(name="相机", type=bpy.types.Object, description="要和主视角保持一致的相机",
+                            poll=lambda self, obj: getattr(obj, "type", "") == "CAMERA")
+    enabled: BoolProperty(name="启用", default=True, description="取消勾选 = 这次不渲染这个相机，但保留在列表里")
+
+
 class WONDFUL_AISettings(PropertyGroup):
     codex_models: CollectionProperty(type=WONDFUL_ModelItem)
     antigravity_models: CollectionProperty(type=WONDFUL_ModelItem)
@@ -809,6 +816,7 @@ class WONDFUL_AISettings(PropertyGroup):
         subtype="FILE_PATH",
         default="",
     )
+    mv_cameras: CollectionProperty(type=WONDFUL_MVCameraItem, name="其他相机")
     mv_widen: BoolProperty(
         name="加宽体块",
         description="临时补齐主视角以外的环境：室内补上看不到的墙，建筑场景在外圈补朴素的普通楼；渲染完自动删除",

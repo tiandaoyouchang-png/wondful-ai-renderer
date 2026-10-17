@@ -116,6 +116,52 @@ def orbit_angle(rec_a, rec_b, centre) -> float:
     return d
 
 
+def pick_cameras(slots, selected, master, is_present=lambda obj: True):
+    """Which other cameras 多角度场景一致 renders (no bpy; ``obj`` only needs ``name`` and ``type``).
+
+    ``slots`` are the panel's camera rows as (camera_or_None, enabled).  With at least one row the list is the
+    input: enabled rows with a camera present in the scene, minus the master and duplicates (first enabled row wins).
+    With no rows at all the old behaviour stays: the selected cameras except the master.
+    Returns {"cameras", "source": "list" | "selected", "missing": [row numbers], "master_rows", "duplicate_rows",
+    "disabled_rows"} (row numbers 1-based) so the panel can say why a row is skipped."""
+    mname = getattr(master, "name", None)
+    out = {"cameras": [], "source": "list" if slots else "selected", "missing": [], "master_rows": [],
+           "duplicate_rows": [], "disabled_rows": []}
+    if not slots:
+        seen = set()
+        for o in selected or []:
+            if getattr(o, "type", "") == "CAMERA" and o.name != mname and o.name not in seen:
+                seen.add(o.name)
+                out["cameras"].append(o)
+        return out
+    seen = set()
+    for row, (cam, enabled) in enumerate(slots, 1):
+        if cam is None or getattr(cam, "type", "") != "CAMERA" or not is_present(cam):
+            out["missing"].append(row)
+            continue
+        if cam.name == mname:
+            out["master_rows"].append(row)
+            continue
+        if not enabled:
+            out["disabled_rows"].append(row)
+            continue
+        if cam.name in seen:
+            out["duplicate_rows"].append(row)
+            continue
+        seen.add(cam.name)
+        out["cameras"].append(cam)
+    return out
+
+
+def next_view_name(existing, prefix="Wondful 视角"):
+    """「Wondful 视角 N」 with the smallest N ≥ 1 not in ``existing``."""
+    names = set(existing)
+    n = 1
+    while f"{prefix} {n}" in names:
+        n += 1
+    return f"{prefix} {n}"
+
+
 def order_views(master, others, centre):
     """Nearest angle to the master first (each view can reuse every view accepted before it)."""
     return sorted(others, key=lambda r: (orbit_angle(master, r, centre), r["name"]))

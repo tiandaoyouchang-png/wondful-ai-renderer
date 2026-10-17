@@ -448,7 +448,64 @@ def main():
         problems.append(f"mv_set_master did not set the master: {res}")
     for o in bpy.context.view_layer.objects:
         o.select_set(o == other)
-    draw("multiview_ready")
+    log = draw("multiview_ready")          # empty list: falls back to the selected camera
+    text = "\n".join(log)
+    if "列表为空：用视图里选中的相机（1 个）" not in text or "渲染 1 个相机" not in text \
+            or "＋ 添加相机槽" not in text or "＋ 从当前视图新建相机" not in text:
+        problems.append("multiview empty list: fallback hint / add buttons / count missing")
+    # 3 slots: other, a second camera, the master (skipped)
+    second = bpy.data.objects.new("MV侧面", cam_data.copy())
+    bpy.context.scene.collection.objects.link(second)
+    for _ in range(3):
+        bpy.ops.wondful.mv_camera_add()
+    if len(props.mv_cameras) != 3:
+        problems.append(f"mv_camera_add: {len(props.mv_cameras)} rows")
+    props.mv_cameras[0].camera, props.mv_cameras[1].camera, props.mv_cameras[2].camera = other, second, master
+    log = draw("multiview_three_slots")
+    text = "\n".join(log)
+    for want in ("相机 1", "相机 2", "相机 3", "渲染 2 个相机", "相机 3：与主视角相同，跳过", "op wondful.mv_camera_remove X"):
+        if want not in text:
+            problems.append(f"multiview 3 slots: missing {want!r}")
+    if "列表为空" in text:
+        problems.append("multiview 3 slots: still shows the selection fallback")
+    props.mv_cameras[1].enabled = False
+    if "渲染 1 个相机" not in "\n".join(draw("multiview_slot_disabled")):
+        problems.append("disabled slot still counted")
+    props.mv_cameras[1].enabled = True
+    # one missing camera: row 2's camera removed from the scene
+    bpy.context.scene.collection.objects.unlink(second)
+    log = draw("multiview_missing_camera")
+    text = "\n".join(log)
+    if "相机 2：未选相机或相机已不在场景里" not in text or "渲染 1 个相机" not in text:
+        problems.append("multiview missing camera: hint / count wrong")
+    bpy.context.scene.collection.objects.link(second)
+    bpy.ops.wondful.mv_camera_remove(index=2)
+    if len(props.mv_cameras) != 2 or props.mv_cameras[1].camera != second:
+        problems.append("mv_camera_remove removed the wrong row")
+    from wondful_ai_renderer import operators as _OPS
+    from mathutils import Matrix
+    cam_new = _OPS.mv_new_view_camera(bpy.context, Matrix.Translation((1, 2, 3)), 25.0)
+    if cam_new.name != "Wondful 视角 1" or props.mv_cameras[-1].camera != cam_new or cam_new.type != "CAMERA":
+        problems.append(f"mv_new_view_camera: {cam_new.name} {len(props.mv_cameras)}")
+    if _OPS.mv_new_view_camera(bpy.context, Matrix.Identity(4), 25.0).name != "Wondful 视角 2":
+        problems.append("second view camera not numbered 2")
+    rows_before = len(props.mv_cameras)
+    try:
+        res = bpy.ops.wondful.mv_camera_from_view()   # factory screen has a 3D view; without one it refuses
+    except RuntimeError:
+        res = {"CANCELLED"}
+    made = bpy.data.objects.get("Wondful 视角 3")
+    if res == {"FINISHED"}:
+        if made is None or made.type != "CAMERA" or len(props.mv_cameras) != rows_before + 1 \
+                or props.mv_cameras[-1].camera != made or made.name not in bpy.context.scene.objects:
+            problems.append("mv_camera_from_view did not create + list 「Wondful 视角 3」")
+        print("camera from view", made.name, tuple(round(v, 2) for v in made.location), round(made.data.lens, 2))
+    elif res != {"CANCELLED"} or made is not None:
+        problems.append(f"mv_camera_from_view: {res}")
+    draw("multiview_view_cameras")
+    props.mv_cameras.clear()
+    for o in [o for o in bpy.data.objects if o.name.startswith("Wondful 视角")] + [second]:
+        bpy.data.objects.remove(o, do_unlink=True)
     props.last_mv_note = ("多角度场景一致：2/2 个相机完成 · 图像调用 3 次 · 重试：MV其他（细节边缘 7.1px） · "
                           "注意：产品前方有遮挡物（MV其他 遮挡 38%），可移动相机")
     draw("multiview_done")

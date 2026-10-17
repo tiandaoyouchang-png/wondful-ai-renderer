@@ -562,15 +562,16 @@ def _draw_multiview(adv, context, props, busy):
     row.enabled = not busy
     row.prop(props, "mv_master_image", text="主视角图")
     master = getattr(props, "mv_master_camera", None)
-    try:
-        others = [o for o in (getattr(context, "selected_objects", None) or [])
-                  if getattr(o, "type", "") == "CAMERA" and o != master]
-    except Exception:
-        others = []
     if master is None:
         box.label(text="先用 ⑤ 渲染一个满意的相机，再点「设为主视角」", icon="INFO")
-    box.label(text=f"选中的其他相机：{len(others)} 个" + ("（在视图里选中要渲染的相机）" if not others else ""),
-              icon="CHECKMARK" if others else "INFO")
+    try:
+        from .operators import mv_pick
+        picked = mv_pick(context, props, master)
+    except Exception:
+        picked = {"cameras": [], "source": "list", "missing": [], "master_rows": [], "duplicate_rows": [],
+                  "disabled_rows": []}
+    others = picked["cameras"]
+    _draw_mv_cameras(box, context, props, busy, picked)
     _draw_mv_block_name(box, context, props, busy)
     row = box.row(align=True)
     row.enabled = not busy
@@ -579,13 +580,44 @@ def _draw_multiview(adv, context, props, busy):
     box.label(text="离主视角最近的先渲染；每个相机 1 次生图，产品超标最多重试 1 次", icon="INFO")
     act = box.row(align=True)
     act.enabled = bool(master is not None and others) and not busy
-    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机" if others else "渲染选中的相机",
+    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机",
                  icon="RENDER_STILL")
     note = getattr(props, "last_mv_note", "")
     if note:
         bad = ("失败" in note) or ("未完成" in note) or ("超标" in note) or ("注意" in note)
         for index, line in enumerate(wrap(note, width=44)[:5]):
             box.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+
+
+def _draw_mv_cameras(box, context, props, busy, picked):
+    """「相机 1/2/3…」 rows (camera picker + 启用 + ✕), 添加相机槽 / 从当前视图新建相机; no rows = selected cameras."""
+    cams = box.column(align=True)
+    cams.enabled = not busy
+    slots = list(getattr(props, "mv_cameras", []) or [])
+    why = {}
+    for key, text in (("missing", "未选相机或相机已不在场景里"), ("master_rows", "与主视角相同，跳过"),
+                      ("duplicate_rows", "与上面重复，跳过")):
+        for n in picked.get(key, []):
+            why[n] = text
+    for index, item in enumerate(slots):
+        row = cams.row(align=True)
+        n = index + 1
+        row.alert = n in picked.get("missing", [])
+        row.label(text=f"相机 {n}")
+        row.prop(item, "camera", text="")
+        row.prop(item, "enabled", text="启用")
+        row.operator("wondful.mv_camera_remove", text="", icon="X").index = index
+        if n in why:
+            cams.label(text=f"相机 {n}：{why[n]}", icon="ERROR" if n in picked.get("missing", []) else "INFO")
+    add = cams.row(align=True)
+    add.operator("wondful.mv_camera_add", text="＋ 添加相机槽", icon="ADD")
+    add.operator("wondful.mv_camera_from_view", text="＋ 从当前视图新建相机", icon="VIEW_CAMERA")
+    count = len(picked.get("cameras", []))
+    if picked.get("source") == "selected":
+        box.label(text=f"列表为空：用视图里选中的相机（{count} 个）" + ("，或添加相机槽" if not count else ""),
+                  icon="CHECKMARK" if count else "INFO")
+    elif not count:
+        box.label(text="在「相机 N」里选相机并勾选启用", icon="INFO")
 
 
 def _draw_mv_block_name(box, context, props, busy):

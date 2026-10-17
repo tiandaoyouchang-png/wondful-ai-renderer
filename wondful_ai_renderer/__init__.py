@@ -50,6 +50,9 @@ from .operators import (
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
     WONDFUL_OT_mv_set_master,
+    WONDFUL_OT_mv_camera_add,
+    WONDFUL_OT_mv_camera_remove,
+    WONDFUL_OT_mv_camera_from_view,
     WONDFUL_OT_multiview_render,
     WONDFUL_OT_mark_keep_exact,
     WONDFUL_OT_load_reference,
@@ -71,7 +74,7 @@ from .operators import (
     WONDFUL_OT_copy_conversation_id,
     reset_stale_task_status,
 )
-from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, sync_prompt_editor
+from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, WONDFUL_MVCameraItem, sync_prompt_editor
 from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items
 
 
@@ -80,6 +83,7 @@ CLASSES = (
     WONDFUL_PromptLine,
     WONDFUL_ReferenceItem,
     WONDFUL_ModelItem,
+    WONDFUL_MVCameraItem,
     WONDFUL_AISettings,
     WONDFUL_UL_prompt_lines,
     WONDFUL_UL_reference_items,
@@ -102,6 +106,9 @@ CLASSES = (
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
     WONDFUL_OT_mv_set_master,
+    WONDFUL_OT_mv_camera_add,
+    WONDFUL_OT_mv_camera_remove,
+    WONDFUL_OT_mv_camera_from_view,
     WONDFUL_OT_multiview_render,
     WONDFUL_OT_mark_keep_exact,
     WONDFUL_OT_polish_prompt,

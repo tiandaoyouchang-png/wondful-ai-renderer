@@ -3879,6 +3879,110 @@ def _mv_selected_cameras(context, master):
             if getattr(o, "type", "") == "CAMERA" and o != master]
 
 
+def mv_pick(context, props, master):
+    """The 「相机 N」 rows (or, with no rows, the selected cameras) → multiview.pick_cameras result."""
+    from . import multiview as MV
+    scene = context.scene
+    slots = [(item.camera, bool(item.enabled)) for item in getattr(props, "mv_cameras", [])]
+    try:
+        selected = list(getattr(context, "selected_objects", None) or [])
+    except Exception:
+        selected = []
+    return MV.pick_cameras(slots, selected, master, is_present=lambda o: o.name in scene.objects)
+
+
+def _mv_find_view3d(context):
+    """(space, region_3d) of the 3D view the button was pressed in, else the first 3D view on screen."""
+    space, rv3d = getattr(context, "space_data", None), getattr(context, "region_data", None)
+    if getattr(space, "type", "") == "VIEW_3D" and rv3d is not None:
+        return space, rv3d
+    screen = getattr(context, "screen", None) or getattr(getattr(context, "window", None), "screen", None)
+    for area in getattr(screen, "areas", []) or []:
+        if area.type == "VIEW_3D":
+            sp = area.spaces.active
+            if getattr(sp, "region_3d", None) is not None:
+                return sp, sp.region_3d
+    return None, None
+
+
+def mv_new_view_camera(context, view_matrix_world, lens_mm, sensor_mm=36.0):
+    """Create 「Wondful 视角 N」 at ``view_matrix_world`` (camera → world) and add it as a 「相机 N」 row."""
+    from . import multiview as MV
+    scene = context.scene
+    name = MV.next_view_name([o.name for o in bpy.data.objects])
+    data = bpy.data.cameras.new(name)
+    data.type = "PERSP"
+    data.sensor_fit = "AUTO"
+    data.sensor_width = float(sensor_mm)
+    data.lens = max(1.0, float(lens_mm))
+    ref = scene.camera.data if (scene.camera is not None and scene.camera.type == "CAMERA") else None
+    if ref is not None:
+        data.clip_start, data.clip_end = ref.clip_start, ref.clip_end
+    cam = bpy.data.objects.new(name, data)
+    scene.collection.objects.link(cam)
+    cam.matrix_world = view_matrix_world
+    item = scene.wondful_ai.mv_cameras.add()
+    item.camera = cam
+    item.enabled = True
+    return cam
+
+
+class WONDFUL_OT_mv_camera_add(Operator):
+    bl_idname = "wondful.mv_camera_add"
+    bl_label = "添加相机槽"
+    bl_description = "在其他相机列表里加一行，再在这一行里选一个相机"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        item = context.scene.wondful_ai.mv_cameras.add()
+        item.enabled = True
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_mv_camera_remove(Operator):
+    bl_idname = "wondful.mv_camera_remove"
+    bl_label = "移除相机槽"
+    bl_description = "从列表里移除这一行（相机本身不会被删除）"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        cams = context.scene.wondful_ai.mv_cameras
+        if not 0 <= self.index < len(cams):
+            return {"CANCELLED"}
+        cams.remove(self.index)
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_mv_camera_from_view(Operator):
+    bl_idname = "wondful.mv_camera_from_view"
+    bl_label = "从当前视图新建相机"
+    bl_description = "在当前 3D 视图的位置和视角新建一个相机（Wondful 视角 N），并加到其他相机列表"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        space, rv3d = _mv_find_view3d(context)
+        if rv3d is None:
+            self.report({"ERROR"}, "没有找到 3D 视图：请在 3D 视图的侧栏里点这个按钮。")
+            return {"CANCELLED"}
+        scene = context.scene
+        if rv3d.view_perspective == "CAMERA" and scene.camera is not None and scene.camera.type == "CAMERA":
+            # looking through the scene camera: copy it exactly
+            src = scene.camera
+            cam = mv_new_view_camera(context, src.matrix_world.copy(), src.data.lens, src.data.sensor_width)
+            cam.data.sensor_fit = src.data.sensor_fit
+            cam.data.shift_x, cam.data.shift_y = src.data.shift_x, src.data.shift_y
+        else:
+            # the viewport's lens is drawn with a 72 mm-wide frame (Blender's view zoom 2), i.e. half on a 36 mm sensor
+            cam = mv_new_view_camera(context, rv3d.view_matrix.inverted(), float(getattr(space, "lens", 50.0)) / 2.0)
+        if rv3d.view_perspective == "ORTHO":
+            self.report({"WARNING"}, f"已新建 {cam.name}（视图是正交的，相机按透视处理）")
+        else:
+            self.report({"INFO"}, f"已新建 {cam.name} 并加入列表")
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_mv_set_master(Operator):
     """多角度场景一致: the current scene camera becomes 主视角, its latest result the master image."""
     bl_idname = "wondful.mv_set_master"
@@ -3905,7 +4009,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
     """1.2.3 多角度场景一致: render the other selected cameras so they agree with the master view."""
     bl_idname = "wondful.multiview_render"
     bl_label = "多角度场景一致渲染"
-    bl_description = ("按主视角渲染选中的其他相机：离主视角最近的先渲染，已完成的视角投影到环境体块上作为底图，"
+    bl_description = ("按主视角渲染列表里启用的其他相机（列表为空时用视图里选中的相机）：离主视角最近的先渲染，已完成的视角投影到环境体块上作为底图，"
                       "光照方向在世界里固定；每个相机 1 次生图，产品超标时最多重试 1 次")
 
     def execute(self, context):
@@ -3936,11 +4040,14 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         if coll is None:
             self.report({"ERROR"}, "多角度场景一致需要先在 ② 选择产品集合。")
             return {"CANCELLED"}
-        others = _mv_selected_cameras(context, master)
+        picked = mv_pick(context, props, master)
+        others = picked["cameras"]
         skipped = [o.name for o in others if getattr(o.data, "type", "PERSP") != "PERSP"]
         others = [o for o in others if o.name not in skipped]
         if not others:
-            self.report({"ERROR"}, "请在视图里选中要渲染的其他相机（主视角以外，透视相机）。")
+            self.report({"ERROR"}, "请在「相机 1/2/3…」里选好并启用要渲染的其他相机（主视角以外，透视相机）。"
+                        if picked["source"] == "list" else
+                        "请添加相机槽并选择相机，或在视图里选中要渲染的其他相机（主视角以外，透视相机）。")
             return {"CANCELLED"}
         configured = (props.output_directory or "").strip() or (prefs.output_directory or "").strip()
         try:
