@@ -822,6 +822,18 @@ def store_label(obj, label) -> None:
     obj[AUTO_HINT_FLAG] = 1
 
 
+def scene_note_of(objs) -> str:
+    """1.2.3 场景粗模: the season / colour line the analysis stored on its terrain block ("" when none)."""
+    for o in objs or ():
+        try:
+            note = str(o.get("wondful_sb_scene_note", "") or "").strip()
+        except Exception:
+            note = ""
+        if note:
+            return note
+    return ""
+
+
 def describe_blocks(context, objs, product_pts):
     """Placement items (camera projection) for the prompt; blocks fully off-screen are skipped."""
     from bpy_extras.object_utils import world_to_camera_view

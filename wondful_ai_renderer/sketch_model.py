@@ -223,6 +223,10 @@ def view_silhouette(rgba, threshold: float = 0.0):
 
 # --------------------------------------------------------------------------- three-view sheet
 
+SHEET_HELP = ("能拆分的拼图：白底或透明底；正视 / 侧视 / 俯视三个视图分开排列，彼此之间留出明显空白；"
+              "图里不要有边框、文字、尺寸线或标注。拆不开时请改用「分开的图」分别导入三张图。")
+
+
 def split_sheet(rgba, threshold: float = 0.0, gap: int = 0):
     """Split one three-view sheet into front / side / top crops.
 
@@ -249,13 +253,13 @@ def split_sheet(rgba, threshold: float = 0.0, gap: int = 0):
         groups.append({"label": lab, "area": cnt, "box": (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)})
     groups.sort(key=lambda g_: -g_["area"])
     if len(groups) < 2:
-        raise ValueError("三视图拼图里只找到 1 个轮廓：请把正视 / 侧视 / 俯视分开排列，中间留白，或分别导入三张图")
+        raise ValueError("三视图拼图里只找到 1 个轮廓（视图连在一起了）。" + SHEET_HELP)
     big = [g_ for g_ in groups[:3] if g_["area"] >= 0.08 * groups[0]["area"]]
     if len(big) < 2:
-        raise ValueError("三视图拼图里只有一个主要轮廓，其他都太小：请分别导入三张图")
+        raise ValueError("三视图拼图里只有一个主要轮廓，其他都太小。" + SHEET_HELP)
     extra = groups[len(big):]
     if extra and extra[0]["area"] > 0.25 * big[-1]["area"]:
-        raise ValueError("三视图拼图里有超过 3 个大小相近的轮廓（文字、尺寸标注或多余视图？），无法可靠拆分：请分别导入三张图")
+        raise ValueError("三视图拼图里有超过 3 个大小相近的轮廓（多半是边框、文字、尺寸线或多余的视图）。" + SHEET_HELP)
     dims = [(g_["box"][2] - g_["box"][0], g_["box"][3] - g_["box"][1]) for g_ in big]
 
     def rel(p, q):
@@ -287,7 +291,7 @@ def split_sheet(rgba, threshold: float = 0.0, gap: int = 0):
             perm = perm[::-1]
     limit = 0.35 if len(big) == 3 else 0.2
     if cost > limit:
-        raise ValueError(f"三个轮廓的尺寸对不上（误差 {cost:.2f}），无法判断哪张是正视 / 侧视 / 俯视：请分别导入三张图")
+        raise ValueError(f"三个轮廓的尺寸对不上（误差 {cost:.2f}），分不出哪个是正视 / 侧视 / 俯视。" + SHEET_HELP)
     out = {}
     for k, name in enumerate(names):
         g_ = big[perm[k]]

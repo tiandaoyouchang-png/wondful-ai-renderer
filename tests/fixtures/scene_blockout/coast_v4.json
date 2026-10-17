@@ -1,0 +1,901 @@
+{
+"scene_kind": "outdoor",
+"scene_summary": "A narrow coastal asphalt road curls behind a sheer orange sandstone cliff, above steep scrub-covered rock slopes and a blue-grey sea.",
+"environment_description": "This Cape Peninsula-style coastline has late-summer olive-green coastal scrub, sparse straw-coloured grasses and extensive exposed bedrock. A towering, horizontally layered orange sandstone road cutting fills the left foreground, its fractured face illuminated by low golden sunlight from the right. The charcoal asphalt road has a white centreline, narrow yellow margins and a low reddish rubble-stone parapet along its ocean edge. Beyond the bend, pale grey granite slabs and ochre sandstone slopes descend steeply into blue-grey water with narrow white breakers. The sky is clear pale cream-blue, with warm haze over a distant low coastal plateau.",
+"palette": {
+"season": "late_summer",
+"season_evidence": "Coastal shrubs remain olive green while sparse grasses are straw coloured; there is no snow or autumn-coloured foliage.",
+"grass_hex": "#93805A",
+"grass_words": "Sparse muted straw and ochre grasses mixed with olive groundcover.",
+"foliage_hex": "#555C32",
+"foliage_words": "Low subdued olive-green and dark moss-green coastal scrub.",
+"ground_hex": "#A66A36",
+"ground_words": "Rusty-orange stratified sandstone, pale grey granite, dusty brown soil and charcoal asphalt.",
+"sky_words": "Clear pale cream-blue sky with a warm hazy horizon.",
+"snow_cover": false,
+"autumn_colours": false
+},
+"camera": {
+"height_m": 6,
+"pitch_deg": -11.5,
+"roll_deg": 0,
+"hfov_deg": 66,
+"horizon_y_frac": 0.2215
+},
+"terrain": {
+"far_m": 4000,
+"base_slope_deg": -45,
+"base_slope_dir_deg": 90,
+"smoothness": 0.12,
+"surface": "Steep exposed coastal bedrock: orange stratified sandstone ledges and fractured pale grey granite, with sparse olive scrub and straw grass in cracks. The terrain drops eastward into the sea.",
+"bumps": [
+{
+"x": 17,
+"y": 55,
+"height_m": 8,
+"radius_m": 24
+},
+{
+"x": 40,
+"y": 145,
+"height_m": 24,
+"radius_m": 65
+},
+{
+"x": 86,
+"y": 300,
+"height_m": 48,
+"radius_m": 110
+},
+{
+"x": 120,
+"y": 420,
+"height_m": 48,
+"radius_m": 115
+}
+],
+"ridges": [
+{
+"points": [
+{
+"x": 4,
+"y": 47
+},
+{
+"x": 18,
+"y": 80
+},
+{
+"x": 35,
+"y": 125
+},
+{
+"x": 56,
+"y": 190
+}
+],
+"height_m": 7,
+"width_m": 26
+}
+],
+"has_sea": true,
+"sea_level_m": -65
+},
+"roads": [
+{
+"id": "foreground_hairpin",
+"kind": "road",
+"width_m": 5.8,
+"follow_terrain": false,
+"points": [
+{
+"x": -5.9,
+"y": 6,
+"z": -3
+},
+{
+"x": -5.8,
+"y": 15,
+"z": -3.3
+},
+{
+"x": -5.7,
+"y": 20,
+"z": -3.8
+},
+{
+"x": -4.8,
+"y": 25,
+"z": -4.6
+},
+{
+"x": -3.9,
+"y": 29,
+"z": -5
+},
+{
+"x": -3.7,
+"y": 32,
+"z": -5.2
+},
+{
+"x": -4.4,
+"y": 35,
+"z": -5.3
+},
+{
+"x": -6.3,
+"y": 37.5,
+"z": -5.3
+},
+{
+"x": -10.5,
+"y": 39.5,
+"z": -5.3
+},
+{
+"x": -16,
+"y": 42,
+"z": -5.2
+}
+],
+"surface": "Dark charcoal asphalt, single narrow solid white centreline and mustard-yellow edge lines; a shallow stone drainage strip lies against the inner cliff."
+},
+{
+"id": "distant_cliff_road",
+"kind": "road",
+"width_m": 5.8,
+"follow_terrain": false,
+"points": [
+{
+"x": -28,
+"y": 102,
+"z": -3
+},
+{
+"x": -12,
+"y": 123,
+"z": -5
+},
+{
+"x": 11,
+"y": 157,
+"z": -10
+},
+{
+"x": 43,
+"y": 208,
+"z": -17
+},
+{
+"x": 78,
+"y": 267,
+"z": -24
+},
+{
+"x": 114,
+"y": 328,
+"z": -30
+},
+{
+"x": 141,
+"y": 374,
+"z": -32
+}
+],
+"surface": "Narrow dark asphalt ledge across layered sandstone with a thin sunlit stone parapet on its ocean edge."
+}
+],
+"mountain_bands": [
+{
+"id": "main_coastal_cliff_skyline",
+"kind": "rocky",
+"distance_m": 460,
+"depth_m": 170,
+"profile": [
+{
+"x_frac": 0,
+"y_frac": -0.54
+},
+{
+"x_frac": 0.12,
+"y_frac": -0.48
+},
+{
+"x_frac": 0.24,
+"y_frac": -0.39
+},
+{
+"x_frac": 0.34,
+"y_frac": -0.28
+},
+{
+"x_frac": 0.44,
+"y_frac": -0.17
+},
+{
+"x_frac": 0.52,
+"y_frac": -0.09
+},
+{
+"x_frac": 0.588,
+"y_frac": -0.025
+},
+{
+"x_frac": 0.606,
+"y_frac": 0.012
+},
+{
+"x_frac": 0.624,
+"y_frac": 0.033
+},
+{
+"x_frac": 0.65,
+"y_frac": 0.049
+},
+{
+"x_frac": 0.668,
+"y_frac": 0.079
+},
+{
+"x_frac": 0.676,
+"y_frac": 0.108
+},
+{
+"x_frac": 0.7,
+"y_frac": 0.125
+},
+{
+"x_frac": 0.72,
+"y_frac": 0.145
+},
+{
+"x_frac": 0.745,
+"y_frac": 0.177
+},
+{
+"x_frac": 0.764,
+"y_frac": 0.196
+},
+{
+"x_frac": 0.78,
+"y_frac": 0.232
+},
+{
+"x_frac": 0.793,
+"y_frac": 0.271
+},
+{
+"x_frac": 0.804,
+"y_frac": 0.302
+},
+{
+"x_frac": 0.818,
+"y_frac": 0.332
+},
+{
+"x_frac": 0.824,
+"y_frac": 0.359
+}
+],
+"surface": "Orange-brown horizontally stratified sandstone escarpment with dark gullies and sparse olive scrub; exposed rocky vertical terraces rather than smooth soil."
+},
+{
+"id": "far_low_headland",
+"kind": "rocky",
+"distance_m": 3300,
+"depth_m": 850,
+"profile": [
+{
+"x_frac": 0.757,
+"y_frac": 0.2
+},
+{
+"x_frac": 0.778,
+"y_frac": 0.199
+},
+{
+"x_frac": 0.797,
+"y_frac": 0.2
+},
+{
+"x_frac": 0.816,
+"y_frac": 0.201
+},
+{
+"x_frac": 0.834,
+"y_frac": 0.202
+},
+{
+"x_frac": 0.851,
+"y_frac": 0.205
+},
+{
+"x_frac": 0.867,
+"y_frac": 0.203
+},
+{
+"x_frac": 0.877,
+"y_frac": 0.214
+},
+{
+"x_frac": 0.887,
+"y_frac": 0.229
+},
+{
+"x_frac": 0.897,
+"y_frac": 0.239
+},
+{
+"x_frac": 0.912,
+"y_frac": 0.248
+},
+{
+"x_frac": 0.933,
+"y_frac": 0.251
+},
+{
+"x_frac": 0.954,
+"y_frac": 0.252
+},
+{
+"x_frac": 0.977,
+"y_frac": 0.253
+},
+{
+"x_frac": 1,
+"y_frac": 0.253
+}
+],
+"surface": "Low distant grey-brown coastal plateau softened by golden atmospheric haze."
+},
+{
+"id": "ocean_horizon",
+"kind": "sea",
+"distance_m": 1600,
+"depth_m": 12000,
+"profile": [
+{
+"x_frac": 0,
+"y_frac": 0.2215
+},
+{
+"x_frac": 0.5,
+"y_frac": 0.2215
+},
+{
+"x_frac": 1,
+"y_frac": 0.2215
+}
+],
+"surface": "Blue-grey ocean, pale and hazy at the horizon, darker slate-teal near the rocky coastline."
+}
+],
+"foliage_masses": [
+{
+"id": "lower_right_scrub",
+"kind": "shrub",
+"x": 46,
+"y": 88,
+"crown_w": 27,
+"crown_d": 10,
+"crown_h": 2,
+"crown_base_h": 0,
+"trunk_w": 0,
+"lean_deg": 0,
+"lumpiness": 0.9,
+"outline": [
+{
+"x_frac": 0.65,
+"y_frac": 1.02
+},
+{
+"x_frac": 0.665,
+"y_frac": 0.941
+},
+{
+"x_frac": 0.691,
+"y_frac": 0.922
+},
+{
+"x_frac": 0.704,
+"y_frac": 0.867
+},
+{
+"x_frac": 0.73,
+"y_frac": 0.824
+},
+{
+"x_frac": 0.752,
+"y_frac": 0.835
+},
+{
+"x_frac": 0.765,
+"y_frac": 0.884
+},
+{
+"x_frac": 0.79,
+"y_frac": 0.894
+},
+{
+"x_frac": 0.807,
+"y_frac": 0.942
+},
+{
+"x_frac": 0.838,
+"y_frac": 0.963
+},
+{
+"x_frac": 0.855,
+"y_frac": 1.025
+}
+],
+"material": "Low dark olive coastal scrub cushions among ochre rock."
+},
+{
+"id": "scrub_outside_bend",
+"kind": "shrub",
+"x": 5,
+"y": 37,
+"crown_w": 4.5,
+"crown_d": 3,
+"crown_h": 1.1,
+"crown_base_h": 0,
+"trunk_w": 0,
+"lean_deg": 0,
+"lumpiness": 0.8,
+"outline": [
+{
+"x_frac": 0.467,
+"y_frac": 0.597
+},
+{
+"x_frac": 0.478,
+"y_frac": 0.577
+},
+{
+"x_frac": 0.493,
+"y_frac": 0.574
+},
+{
+"x_frac": 0.506,
+"y_frac": 0.584
+},
+{
+"x_frac": 0.515,
+"y_frac": 0.61
+},
+{
+"x_frac": 0.503,
+"y_frac": 0.627
+},
+{
+"x_frac": 0.483,
+"y_frac": 0.619
+},
+{
+"x_frac": 0.471,
+"y_frac": 0.616
+}
+],
+"material": "Small dark green wind-shaped shrubs immediately beyond the road parapet."
+}
+],
+"primitives": [
+{
+"id": "parapet_near",
+"type": "wall",
+"shape": "box",
+"x": -2.6,
+"y": 14,
+"z_offset": -5.8,
+"w": 0.38,
+"d": 8,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": -3,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Low reddish sandstone rubble parapet with pale worn coping."
+},
+{
+"id": "parapet_lower_curve",
+"type": "wall",
+"shape": "box",
+"x": -1.9,
+"y": 21,
+"z_offset": -6,
+"w": 0.38,
+"d": 6.4,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": -12,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Low orange-brown rubble stone parapet."
+},
+{
+"id": "parapet_middle_curve",
+"type": "wall",
+"shape": "box",
+"x": -0.8,
+"y": 26.5,
+"z_offset": -6,
+"w": 0.38,
+"d": 5.2,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": -12,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Coarse sandstone parapet with narrow sunlit coping."
+},
+{
+"id": "parapet_apex",
+"type": "wall",
+"shape": "box",
+"x": -0.5,
+"y": 31,
+"z_offset": -5.7,
+"w": 0.38,
+"d": 4.2,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": 3,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Low reddish rubble-stone roadside parapet."
+},
+{
+"id": "parapet_upper_turn",
+"type": "wall",
+"shape": "box",
+"x": -1.6,
+"y": 34.5,
+"z_offset": -7,
+"w": 0.38,
+"d": 3.7,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": 32,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Rough sandstone parapet following the bend."
+},
+{
+"id": "parapet_return",
+"type": "wall",
+"shape": "box",
+"x": -4.1,
+"y": 37,
+"z_offset": -9.4,
+"w": 0.38,
+"d": 4,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": 58,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Sunlit brown rubble-stone parapet returning behind the cliff."
+},
+{
+"id": "near_roadside_post",
+"type": "pole",
+"shape": "cylinder",
+"x": -3.3,
+"y": 17.5,
+"z_offset": -6.8,
+"w": 0.15,
+"d": 0.15,
+"h": 3,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Slender weathered ochre-brown roadside post."
+},
+{
+"id": "bend_signpost",
+"type": "pole",
+"shape": "cylinder",
+"x": -1.5,
+"y": 28,
+"z_offset": -6.5,
+"w": 0.15,
+"d": 0.15,
+"h": 3,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Brown metal roadside sign support."
+},
+{
+"id": "mid_slope_boulders",
+"type": "rock",
+"shape": "dome",
+"x": 31,
+"y": 105,
+"z_offset": 0,
+"w": 4,
+"d": 5,
+"h": 4,
+"roof_h": 0,
+"rot_z_deg": 18,
+"repeat": 3,
+"repeat_dx": 4,
+"repeat_dy": 7,
+"material": "Rounded light grey granite boulders among brown-green scrub."
+},
+{
+"id": "coastal_granite_slabs",
+"type": "rock",
+"shape": "dome",
+"x": 71,
+"y": 166,
+"z_offset": 0,
+"w": 11,
+"d": 17,
+"h": 6,
+"roof_h": 0,
+"rot_z_deg": -24,
+"repeat": 3,
+"repeat_dx": 5,
+"repeat_dy": 16,
+"material": "Broad pale grey granite slabs with dark wet bases and narrow white surf."
+}
+],
+"product_spot": {
+"x": -5.5,
+"y": 18.5,
+"rot_z_deg": -7,
+"on": "Open foreground asphalt before the tight left bend.",
+"reason": "A car would be visible in the lower-middle road corridor, aligned with the lane and clear of the parapet."
+},
+"cliffs": [
+{
+"id": "towering_foreground_sandstone_face",
+"base_points": [
+{
+"x": -8.8,
+"y": 4,
+"z": -3
+},
+{
+"x": -8.8,
+"y": 10,
+"z": -3.1
+},
+{
+"x": -8.7,
+"y": 15,
+"z": -3.3
+},
+{
+"x": -8.6,
+"y": 20,
+"z": -3.8
+},
+{
+"x": -7.65,
+"y": 25.5,
+"z": -4.6
+},
+{
+"x": -6.75,
+"y": 29.5,
+"z": -5
+},
+{
+"x": -6.6,
+"y": 32,
+"z": -5.2
+},
+{
+"x": -7,
+"y": 33.8,
+"z": -5.3
+},
+{
+"x": -8.2,
+"y": 35.4,
+"z": -5.3
+},
+{
+"x": -11.5,
+"y": 37,
+"z": -5.3
+},
+{
+"x": -16.5,
+"y": 39.1,
+"z": -5.2
+},
+{
+"x": -20,
+"y": 42,
+"z": -5.2
+}
+],
+"top_z_m": 80,
+"side": "left",
+"thickness_m": 45,
+"lean_deg": 5,
+"roughness": 0.7,
+"surface": "Massive near-vertical orange sandstone road cutting, strongly horizontal thin bedding, angular fractured blocks, dark recessed cracks, golden sunlit projections and occasional sparse olive plants at its foot."
+},
+{
+"id": "granite_face_beyond_hairpin",
+"base_points": [
+{
+"x": -3,
+"y": 49,
+"z": -6
+},
+{
+"x": 2,
+"y": 54,
+"z": -9
+},
+{
+"x": 8,
+"y": 61,
+"z": -12
+},
+{
+"x": 13,
+"y": 69,
+"z": -14
+}
+],
+"top_z_m": 7,
+"side": "left",
+"thickness_m": 8,
+"lean_deg": 9,
+"roughness": 0.85,
+"surface": "Pale grey granite outcrop split into tall upright slabs, with dark vertical joints and warm ochre sunlit edges."
+},
+{
+"id": "distant_road_sandstone_cutting",
+"base_points": [
+{
+"x": -30.4,
+"y": 103.7,
+"z": -3
+},
+{
+"x": -14.4,
+"y": 124.7,
+"z": -5
+},
+{
+"x": 8.6,
+"y": 158.7,
+"z": -10
+},
+{
+"x": 40.6,
+"y": 209.7,
+"z": -17
+},
+{
+"x": 75.6,
+"y": 268.7,
+"z": -24
+},
+{
+"x": 111.6,
+"y": 329.7,
+"z": -30
+},
+{
+"x": 138.6,
+"y": 375.7,
+"z": -32
+}
+],
+"top_z_m": 78,
+"side": "left",
+"thickness_m": 55,
+"lean_deg": 14,
+"roughness": 0.7,
+"surface": "Receding terraced sandstone escarpment with horizontally bedded orange-brown rock, dark gullies and sparse olive coastal scrub."
+}
+],
+"surface_zones": [
+{
+"id": "outer_rock_and_scrub_slope",
+"kind": "shrub_slope",
+"points": [
+{
+"x": 0,
+"y": 9
+},
+{
+"x": 4,
+"y": 34
+},
+{
+"x": 18,
+"y": 65
+},
+{
+"x": 40,
+"y": 115
+},
+{
+"x": 69,
+"y": 175
+},
+{
+"x": 77,
+"y": 130
+},
+{
+"x": 60,
+"y": 72
+},
+{
+"x": 49,
+"y": 20
+}
+],
+"surface": "Predominantly exposed ochre sandstone ledges and pale fractured granite, with scattered low olive-green scrub cushions and sparse straw grass; not a continuous grassy slope."
+},
+{
+"id": "pale_granite_waterline",
+"kind": "rock",
+"points": [
+{
+"x": 58,
+"y": 75
+},
+{
+"x": 76,
+"y": 130
+},
+{
+"x": 99,
+"y": 220
+},
+{
+"x": 132,
+"y": 310
+},
+{
+"x": 162,
+"y": 395
+},
+{
+"x": 187,
+"y": 440
+},
+{
+"x": 160,
+"y": 295
+},
+{
+"x": 115,
+"y": 170
+},
+{
+"x": 78,
+"y": 75
+}
+],
+"surface": "Bare pale grey coastal granite slabs and angular boulders, with dark wet rock at sea level and fine white foam around exposed edges."
+}
+],
+"_frame": {
+"w": 1600,
+"h": 900
+}
+}

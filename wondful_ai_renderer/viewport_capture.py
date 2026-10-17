@@ -285,8 +285,10 @@ def _user_ground(context, collection, product_pts):
     foot = max(max(xs) - min(xs), max(ys) - min(ys), 1e-3)
     bottom = min(zs)
     for obj in context.scene.objects:
-        if obj in members or obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_") \
-                or _excluded(obj):
+        if obj in members or obj.type != "MESH" or obj.hide_render or obj.name.startswith("_wondful_"):
+            continue
+        if _excluded(obj) and not obj.get("wondful_terrain"):
+            # 1.2.3: a blockout heightfield (场景粗模 terrain) in 环境体块 is the ground; other blocks are not
             continue
         try:
             if not obj.visible_get():
@@ -1623,6 +1625,9 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             veh = names_look_like_vehicle(collection_names(collection)) if collection is not None else False
             LAST_CLAY_INFO["massing"] = items
             LAST_CLAY_INFO["massing_text"] = MS.build_massing_text(items, vehicle=veh)
+            note = MS.scene_note_of(blocks)
+            if note and LAST_CLAY_INFO["massing_text"]:
+                LAST_CLAY_INFO["massing_text"] += "\n" + note
         sun_data = bpy.data.lights.new("_wondful_clay_sun", type="SUN")
         sun_data.energy = 4.0
         try:

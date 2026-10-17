@@ -1,0 +1,1030 @@
+{
+"scene_kind": "outdoor",
+"scene_summary": "A broad asphalt junction in a tropical Thai town, looking along a narrower street between a peach corner building and pastel pink and green shophouses.",
+"environment_description": "A tropical Thai neighborhood lies beneath dense layered blue-gray storm clouds, with a luminous silver-white opening above the distant street. Wet-season planting is lush deep green, with clipped hedges, yellow-green ornamental leaves and scattered magenta flowers rather than autumn colors. Weathered peach, pale-pink, mint-green and off-white plaster buildings have barred windows, recessed concrete balconies, dark tiled roofs and corrugated shop awnings. Coarse charcoal asphalt fills the broad foreground junction, bordered by stained concrete gutters, potted plants and a descending side street on the left. Soft cool daylight comes from the upper-left and central sky, leaving covered shopfronts dark; fine black utility cables run diagonally across the upper-right sky.",
+"palette": {
+"season": "wet_season",
+"season_evidence": "Healthy dense green tropical planting beneath heavily clouded stormy skies, without snow or autumn leaf discoloration.",
+"grass_hex": "#49613C",
+"grass_words": "Sparse muted dark-green weeds along concrete edges, with almost no open lawn.",
+"foliage_hex": "#294323",
+"foliage_words": "Lush deep-green clipped hedges and broadleaf plants, with yellow-green ornamental leaves and small magenta flowers.",
+"ground_hex": "#444747",
+"ground_words": "Coarse charcoal-gray asphalt, dusty gray concrete gutters and pale worn sidewalk edges.",
+"sky_words": "Heavy blue-gray and slate-gray clouds surrounding a luminous silver-white opening toward the upper center-left.",
+"snow_cover": false,
+"autumn_colours": false
+},
+"camera": {
+"height_m": 1.7,
+"pitch_deg": -2.3,
+"roll_deg": 0,
+"hfov_deg": 84,
+"horizon_y_frac": 0.4604
+},
+"terrain": {
+"far_m": 300,
+"base_slope_deg": 0.15,
+"base_slope_dir_deg": 0,
+"smoothness": 0.8,
+"surface": "Urban roadside ground concealed largely by asphalt and concrete, with dark soil in narrow planted strips.",
+"bumps": [
+{
+"x": -27,
+"y": 21,
+"height_m": -3.4,
+"radius_m": 25
+},
+{
+"x": -9,
+"y": 8,
+"height_m": -0.55,
+"radius_m": 7
+}
+],
+"ridges": [],
+"has_sea": false,
+"sea_level_m": 0
+},
+"roads": [
+{
+"id": "main_street",
+"kind": "road",
+"width_m": 13,
+"follow_terrain": false,
+"points": [
+{
+"x": -3.8,
+"y": -12,
+"z": -0.05
+},
+{
+"x": -3.1,
+"y": 5,
+"z": 0
+},
+{
+"x": -0.1,
+"y": 13,
+"z": 0.03
+},
+{
+"x": 1.5,
+"y": 23,
+"z": 0.08
+},
+{
+"x": 1.2,
+"y": 43,
+"z": 0.14
+},
+{
+"x": 0.4,
+"y": 75,
+"z": 0.2
+},
+{
+"x": -0.7,
+"y": 150,
+"z": 0.3
+}
+],
+"surface": "Unmarked dark-gray coarse asphalt with patch repairs and subtle tire-darkened areas."
+},
+{
+"id": "foreground_cross_street",
+"kind": "road",
+"width_m": 12,
+"follow_terrain": false,
+"points": [
+{
+"x": -45,
+"y": 0,
+"z": -2.4
+},
+{
+"x": -24,
+"y": 3,
+"z": -1.2
+},
+{
+"x": -12,
+"y": 5.5,
+"z": -0.45
+},
+{
+"x": 0,
+"y": 7,
+"z": 0
+},
+{
+"x": 22,
+"y": 5,
+"z": -0.08
+},
+{
+"x": 45,
+"y": 4,
+"z": -0.1
+}
+],
+"surface": "Broad continuous charcoal asphalt intersection without painted lane markings."
+},
+{
+"id": "descending_left_branch",
+"kind": "road",
+"width_m": 6,
+"follow_terrain": false,
+"points": [
+{
+"x": -4,
+"y": 13,
+"z": 0
+},
+{
+"x": -11,
+"y": 12,
+"z": -0.65
+},
+{
+"x": -22,
+"y": 17,
+"z": -2.4
+},
+{
+"x": -43,
+"y": 28,
+"z": -3.5
+}
+],
+"surface": "Narrow descending asphalt side street, partly hidden behind the corner building and red canopies."
+},
+{
+"id": "left_curving_gutter",
+"kind": "sidewalk",
+"width_m": 0.65,
+"follow_terrain": false,
+"points": [
+{
+"x": -12,
+"y": 5.5,
+"z": -0.6
+},
+{
+"x": -7.7,
+"y": 7.7,
+"z": -0.25
+},
+{
+"x": -6.1,
+"y": 16,
+"z": 0.16
+},
+{
+"x": -4.9,
+"y": 25,
+"z": 0.24
+},
+{
+"x": -4.6,
+"y": 43,
+"z": 0.28
+},
+{
+"x": -4.5,
+"y": 65,
+"z": 0.3
+}
+],
+"surface": "Weathered pale-gray concrete curb and gutter with dark drainage staining."
+},
+{
+"id": "right_frontage_strip",
+"kind": "sidewalk",
+"width_m": 1.1,
+"follow_terrain": true,
+"points": [
+{
+"x": 19,
+"y": 11,
+"z": 0
+},
+{
+"x": 10,
+"y": 17,
+"z": 0
+},
+{
+"x": 8,
+"y": 26,
+"z": 0
+},
+{
+"x": 7.1,
+"y": 42,
+"z": 0
+},
+{
+"x": 6.7,
+"y": 65,
+"z": 0
+}
+],
+"surface": "Irregular gray concrete frontage with gravel, weeds and parking access."
+}
+],
+"mountain_bands": [],
+"foliage_masses": [
+{
+"id": "left_corner_clipped_hedge",
+"kind": "hedge",
+"x": -5.5,
+"y": 11,
+"crown_w": 8,
+"crown_d": 0.8,
+"crown_h": 1.1,
+"crown_base_h": 0.25,
+"trunk_w": 0.08,
+"lean_deg": 0,
+"lumpiness": 0.2,
+"outline": [
+{
+"x_frac": 0.19,
+"y_frac": 0.53
+},
+{
+"x_frac": 0.208,
+"y_frac": 0.517
+},
+{
+"x_frac": 0.262,
+"y_frac": 0.512
+},
+{
+"x_frac": 0.305,
+"y_frac": 0.502
+},
+{
+"x_frac": 0.342,
+"y_frac": 0.501
+},
+{
+"x_frac": 0.378,
+"y_frac": 0.491
+},
+{
+"x_frac": 0.407,
+"y_frac": 0.495
+},
+{
+"x_frac": 0.4,
+"y_frac": 0.535
+},
+{
+"x_frac": 0.351,
+"y_frac": 0.553
+},
+{
+"x_frac": 0.289,
+"y_frac": 0.578
+},
+{
+"x_frac": 0.222,
+"y_frac": 0.597
+},
+{
+"x_frac": 0.19,
+"y_frac": 0.58
+}
+],
+"material": "Dense neatly clipped deep-green small-leaved hedge."
+},
+{
+"id": "left_verge_ornamentals",
+"kind": "shrub",
+"x": -4.5,
+"y": 8.5,
+"crown_w": 9,
+"crown_d": 0.45,
+"crown_h": 0.7,
+"crown_base_h": 0.1,
+"trunk_w": 0.04,
+"lean_deg": 0,
+"lumpiness": 0.65,
+"outline": [
+{
+"x_frac": 0.112,
+"y_frac": 0.596
+},
+{
+"x_frac": 0.14,
+"y_frac": 0.572
+},
+{
+"x_frac": 0.166,
+"y_frac": 0.56
+},
+{
+"x_frac": 0.193,
+"y_frac": 0.568
+},
+{
+"x_frac": 0.213,
+"y_frac": 0.58
+},
+{
+"x_frac": 0.263,
+"y_frac": 0.553
+},
+{
+"x_frac": 0.307,
+"y_frac": 0.54
+},
+{
+"x_frac": 0.351,
+"y_frac": 0.523
+},
+{
+"x_frac": 0.396,
+"y_frac": 0.508
+},
+{
+"x_frac": 0.432,
+"y_frac": 0.48
+},
+{
+"x_frac": 0.448,
+"y_frac": 0.48
+},
+{
+"x_frac": 0.431,
+"y_frac": 0.528
+},
+{
+"x_frac": 0.349,
+"y_frac": 0.571
+},
+{
+"x_frac": 0.251,
+"y_frac": 0.62
+},
+{
+"x_frac": 0.151,
+"y_frac": 0.657
+},
+{
+"x_frac": 0.112,
+"y_frac": 0.65
+}
+],
+"material": "Potted tropical ornamentals with dark-green foliage, yellow-green spear-shaped leaves and scattered magenta bougainvillea flowers."
+},
+{
+"id": "cropped_upper_left_tree",
+"kind": "deciduous",
+"x": -9,
+"y": 7,
+"crown_w": 5,
+"crown_d": 3,
+"crown_h": 5,
+"crown_base_h": 3,
+"trunk_w": 0.25,
+"lean_deg": 0,
+"lumpiness": 0.65,
+"outline": [
+{
+"x_frac": -0.035,
+"y_frac": 0.023
+},
+{
+"x_frac": 0.008,
+"y_frac": 0.052
+},
+{
+"x_frac": 0.003,
+"y_frac": 0.101
+},
+{
+"x_frac": 0.03,
+"y_frac": 0.126
+},
+{
+"x_frac": 0.05,
+"y_frac": 0.16
+},
+{
+"x_frac": 0.073,
+"y_frac": 0.201
+},
+{
+"x_frac": 0.06,
+"y_frac": 0.239
+},
+{
+"x_frac": 0.033,
+"y_frac": 0.257
+},
+{
+"x_frac": 0.011,
+"y_frac": 0.239
+},
+{
+"x_frac": -0.025,
+"y_frac": 0.276
+}
+],
+"material": "Dark-green tropical broadleaf branches with small gaps against the gray sky."
+},
+{
+"id": "distant_left_trees",
+"kind": "forest_edge",
+"x": -27,
+"y": 75,
+"crown_w": 18,
+"crown_d": 8,
+"crown_h": 6,
+"crown_base_h": 0.2,
+"trunk_w": 0.2,
+"lean_deg": 0,
+"lumpiness": 0.5,
+"outline": [
+{
+"x_frac": 0.049,
+"y_frac": 0.492
+},
+{
+"x_frac": 0.058,
+"y_frac": 0.467
+},
+{
+"x_frac": 0.072,
+"y_frac": 0.454
+},
+{
+"x_frac": 0.084,
+"y_frac": 0.435
+},
+{
+"x_frac": 0.094,
+"y_frac": 0.444
+},
+{
+"x_frac": 0.106,
+"y_frac": 0.482
+},
+{
+"x_frac": 0.102,
+"y_frac": 0.506
+},
+{
+"x_frac": 0.049,
+"y_frac": 0.512
+}
+],
+"material": "Dense dark-green trees behind the descending side street."
+},
+{
+"id": "left_canopy_potted_greenery",
+"kind": "shrub",
+"x": -7.5,
+"y": 10,
+"crown_w": 2,
+"crown_d": 0.6,
+"crown_h": 1.3,
+"crown_base_h": 0.1,
+"trunk_w": 0.04,
+"lean_deg": 0,
+"lumpiness": 0.65,
+"outline": [
+{
+"x_frac": 0.087,
+"y_frac": 0.566
+},
+{
+"x_frac": 0.105,
+"y_frac": 0.552
+},
+{
+"x_frac": 0.122,
+"y_frac": 0.565
+},
+{
+"x_frac": 0.142,
+"y_frac": 0.559
+},
+{
+"x_frac": 0.157,
+"y_frac": 0.58
+},
+{
+"x_frac": 0.15,
+"y_frac": 0.615
+},
+{
+"x_frac": 0.132,
+"y_frac": 0.636
+},
+{
+"x_frac": 0.108,
+"y_frac": 0.646
+},
+{
+"x_frac": 0.091,
+"y_frac": 0.625
+}
+],
+"material": "Dark-green potted tropical foliage and trailing flowering shrubs in the shade beside the red shop canopy."
+}
+],
+"primitives": [
+{
+"id": "left_tall_corner_block",
+"type": "building",
+"shape": "box",
+"x": -17.6,
+"y": 36,
+"z_offset": 0,
+"w": 12,
+"d": 23,
+"h": 9.5,
+"roof_h": 0,
+"rot_z_deg": 43,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Three-storey pale peach and weathered off-white concrete block with a flat parapet, recessed balconies, dark window openings and black rain stains."
+},
+{
+"id": "left_low_peach_corner_house",
+"type": "building",
+"shape": "gable",
+"x": -6.9,
+"y": 23,
+"z_offset": 0,
+"w": 6,
+"d": 8.6,
+"h": 3.75,
+"roof_h": 1.4,
+"rot_z_deg": 83,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Peach plaster corner frontage with cream trim, shallow red-brown tiled roof, white horizontal front gable cladding and broad curtained windows."
+},
+{
+"id": "right_large_pink_shophouse",
+"type": "building",
+"shape": "gable",
+"x": 19,
+"y": 26,
+"z_offset": 0,
+"w": 15,
+"d": 8,
+"h": 6.2,
+"roof_h": 3.6,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Two-storey faded pale-pink and gray-blue plaster shophouse with a tall triangular gable, broad dark reddish-brown tiled roof, shaded balcony openings and weathered white trim."
+},
+{
+"id": "right_green_shophouse",
+"type": "building",
+"shape": "gable",
+"x": 9.5,
+"y": 36,
+"z_offset": 0,
+"w": 5.5,
+"d": 8,
+"h": 6,
+"roof_h": 1.6,
+"rot_z_deg": -5,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Mint-green plaster two-storey shophouse with broad nearly blank side wall, dark tiled roof and wall-mounted air conditioner."
+},
+{
+"id": "receding_right_shop_row",
+"type": "building",
+"shape": "gable",
+"x": 6.8,
+"y": 48,
+"z_offset": 0,
+"w": 4.3,
+"d": 6.2,
+"h": 5.1,
+"roof_h": 1.2,
+"rot_z_deg": 0,
+"repeat": 5,
+"repeat_dx": -0.12,
+"repeat_dy": 7.2,
+"material": "Narrow attached weathered cream, gray and pastel plaster shophouses with dark tiled gables, small balconies and shaded ground-floor shops."
+},
+{
+"id": "left_receding_white_block",
+"type": "building",
+"shape": "box",
+"x": -24,
+"y": 47,
+"z_offset": 0,
+"w": 7,
+"d": 15,
+"h": 7.4,
+"roof_h": 0,
+"rot_z_deg": 20,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Weather-stained white concrete shophouse elevation with narrow dark windows and a flat stepped parapet."
+},
+{
+"id": "far_left_street_buildings",
+"type": "building",
+"shape": "box",
+"x": -6.9,
+"y": 65,
+"z_offset": 0,
+"w": 5,
+"d": 6,
+"h": 3.4,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 4,
+"repeat_dx": 0.1,
+"repeat_dy": 8,
+"material": "Low off-white and gray concrete street-front buildings with shallow metal roofs and dark shop openings."
+},
+{
+"id": "right_white_boundary_wall",
+"type": "wall",
+"shape": "box",
+"x": 16,
+"y": 19.5,
+"z_offset": 0,
+"w": 18,
+"d": 0.2,
+"h": 1.45,
+"roof_h": 0,
+"rot_z_deg": -22,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Low off-white plaster boundary wall with gray grime, flaking pale-blue patches and stained base."
+},
+{
+"id": "right_continuous_metal_awning",
+"type": "awning",
+"shape": "box",
+"x": 15.7,
+"y": 20.3,
+"z_offset": 3.25,
+"w": 18,
+"d": 3.1,
+"h": 0.12,
+"roof_h": 0,
+"rot_z_deg": -22,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Dark blue-gray corrugated metal canopy with thin scalloped edge and black steel supports."
+},
+{
+"id": "right_balcony_dark_windows",
+"type": "window",
+"shape": "box",
+"x": 18.5,
+"y": 21.92,
+"z_offset": 3.9,
+"w": 12,
+"d": 0.12,
+"h": 1.8,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Recessed dark balcony windows and door openings divided by pale gray-blue concrete piers."
+},
+{
+"id": "pink_balcony_parapet",
+"type": "wall",
+"shape": "box",
+"x": 18.5,
+"y": 21.8,
+"z_offset": 3.25,
+"w": 12,
+"d": 0.24,
+"h": 0.8,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Pale-pink solid balcony parapet with thick white concrete coping."
+},
+{
+"id": "left_large_curtained_window",
+"type": "window",
+"shape": "box",
+"x": -8.15,
+"y": 19.82,
+"z_offset": 0.85,
+"w": 4.05,
+"d": 0.09,
+"h": 2.3,
+"roof_h": 0,
+"rot_z_deg": -7,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Large aluminum-framed glass windows with closed ivory curtains and dim sky reflections."
+},
+{
+"id": "left_small_barred_window",
+"type": "window",
+"shape": "box",
+"x": -3.95,
+"y": 19.38,
+"z_offset": 1.4,
+"w": 1.8,
+"d": 0.1,
+"h": 1.1,
+"roof_h": 0,
+"rot_z_deg": -7,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Small gray window with closely spaced white-painted security bars."
+},
+{
+"id": "left_red_lower_shop_awning",
+"type": "awning",
+"shape": "box",
+"x": -7.8,
+"y": 13.2,
+"z_offset": 1.15,
+"w": 8,
+"d": 2,
+"h": 0.12,
+"roof_h": 0,
+"rot_z_deg": -8,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Faded red corrugated shop awning with white scalloped front edge, partly screened by the hedge."
+},
+{
+"id": "far_left_red_canopy",
+"type": "awning",
+"shape": "box",
+"x": -8.2,
+"y": 9,
+"z_offset": 1.1,
+"w": 5,
+"d": 2.3,
+"h": 0.12,
+"roof_h": 0,
+"rot_z_deg": 5,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Red fabric and painted-metal roadside canopy over a dark motorcycle parking bay."
+},
+{
+"id": "white_sedan_right",
+"type": "vehicle",
+"shape": "box",
+"x": 7.05,
+"y": 18.4,
+"z_offset": 0,
+"w": 1.82,
+"d": 4.6,
+"h": 1.48,
+"roof_h": 0,
+"rot_z_deg": -58,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "White modern sedan with dark tinted glazing, black grille and silver wheels, pointing toward the right foreground."
+},
+{
+"id": "dark_hatchback_right",
+"type": "vehicle",
+"shape": "box",
+"x": 6.55,
+"y": 25,
+"z_offset": 0,
+"w": 1.75,
+"d": 4.1,
+"h": 1.55,
+"roof_h": 0,
+"rot_z_deg": -12,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Dark charcoal compact hatchback with black rear glazing and red tail lamps."
+},
+{
+"id": "white_suv_right",
+"type": "vehicle",
+"shape": "box",
+"x": 6.3,
+"y": 32.2,
+"z_offset": 0,
+"w": 1.85,
+"d": 4.45,
+"h": 1.75,
+"roof_h": 0,
+"rot_z_deg": -8,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "White compact SUV parked along the frontage with dark rear glazing."
+},
+{
+"id": "distant_dark_car",
+"type": "vehicle",
+"shape": "box",
+"x": -1.2,
+"y": 66,
+"z_offset": 0,
+"w": 1.75,
+"d": 4.2,
+"h": 1.5,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Small dark blue-gray car near the distant center of the street."
+},
+{
+"id": "right_near_utility_pole",
+"type": "pole",
+"shape": "cylinder",
+"x": 14.4,
+"y": 15,
+"z_offset": 0,
+"w": 0.15,
+"d": 0.15,
+"h": 7.4,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Slender weathered utility pole at the extreme right edge."
+},
+{
+"id": "midstreet_concrete_pole",
+"type": "pole",
+"shape": "cylinder",
+"x": 5.1,
+"y": 40,
+"z_offset": 0,
+"w": 0.21,
+"d": 0.21,
+"h": 8.3,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Gray concrete utility pole with dark insulators and a short crossarm."
+},
+{
+"id": "far_utility_poles",
+"type": "pole",
+"shape": "cylinder",
+"x": 3.5,
+"y": 65,
+"z_offset": 0,
+"w": 0.16,
+"d": 0.16,
+"h": 7.1,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 4,
+"repeat_dx": -0.25,
+"repeat_dy": 18,
+"material": "Receding gray concrete electrical poles."
+},
+{
+"id": "left_tall_upper_windows",
+"type": "window",
+"shape": "box",
+"x": -12.2,
+"y": 25.4,
+"z_offset": 5.8,
+"w": 2.05,
+"d": 0.1,
+"h": 1.2,
+"roof_h": 0,
+"rot_z_deg": 43,
+"repeat": 2,
+"repeat_dx": 5.2,
+"repeat_dy": 4.8,
+"material": "Dark barred upper-floor windows beneath small mauve-purple projecting rain hoods."
+},
+{
+"id": "left_verge_plant_pots",
+"type": "plant",
+"shape": "cylinder",
+"x": -6.1,
+"y": 8.5,
+"z_offset": 0,
+"w": 0.3,
+"d": 0.3,
+"h": 0.3,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 14,
+"repeat_dx": 0.12,
+"repeat_dy": 1.05,
+"material": "Closely spaced dark cement and black plastic plant pots lining the raised planted curb."
+},
+{
+"id": "left_parked_motorcycle",
+"type": "vehicle",
+"shape": "box",
+"x": -6.9,
+"y": 7.8,
+"z_offset": 0,
+"w": 0.65,
+"d": 1.9,
+"h": 1,
+"roof_h": 0,
+"rot_z_deg": 76,
+"repeat": 2,
+"repeat_dx": -1.2,
+"repeat_dy": 0.7,
+"material": "Small black and red motor scooters parked in shade under the left canopy."
+},
+{
+"id": "center_motorcycle_and_sidecart",
+"type": "vehicle",
+"shape": "box",
+"x": 0.8,
+"y": 44,
+"z_offset": 0,
+"w": 1.6,
+"d": 2,
+"h": 0.9,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Small dark motorcycle with an open metal sidecart traveling away along the street."
+},
+{
+"id": "center_motorcycle_rider",
+"type": "person",
+"shape": "cylinder",
+"x": 1.15,
+"y": 44,
+"z_offset": 0.65,
+"w": 0.45,
+"d": 0.45,
+"h": 1.05,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Distant rider seen from behind wearing a pale shirt and dark trousers."
+},
+{
+"id": "right_awning_support_posts",
+"type": "pole",
+"shape": "cylinder",
+"x": 9.2,
+"y": 22.9,
+"z_offset": 0,
+"w": 0.15,
+"d": 0.15,
+"h": 3.25,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 5,
+"repeat_dx": 3.1,
+"repeat_dy": -1.25,
+"material": "Thin dark painted steel canopy support posts in front of shaded shopfronts."
+}
+],
+"product_spot": {
+"x": 0.1,
+"y": 8.2,
+"rot_z_deg": -18,
+"on": "Open asphalt in the foreground junction",
+"reason": "The unobstructed lower-middle asphalt naturally accommodates a five-metre car aligned toward the street and occupying approximately a quarter of the frame width."
+},
+"cliffs": [],
+"surface_zones": [],
+"_frame": {
+"w": 1600,
+"h": 900
+}
+}

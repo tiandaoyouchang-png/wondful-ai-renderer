@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -344,6 +344,48 @@ def main():
     draw("massing_hull_sheet_failed")
     props.last_hull_note = ""
     props.ui_show_massing_hull = False
+
+    # 4a. 1.2.3 环境体块 › 从参考图生成场景粗模: closed / no reference / file reference / after a build / failed
+    draw("scene_blockout_closed")
+    props.ui_show_scene_blockout = True
+    props.style_images.clear()
+    props.sb_image_path = ""
+    draw("scene_blockout_no_ref")
+    try:
+        res = bpy.ops.wondful.scene_blockout_build()
+    except RuntimeError:          # an ERROR report raises in bpy.ops
+        res = {"CANCELLED"}
+    if res != {"CANCELLED"} or "③" not in props.last_sb_note:
+        problems.append(f"scene_blockout_build without a reference should refuse: {res} {props.last_sb_note}")
+    draw("scene_blockout_refused")
+    ref_png = os.path.join(tmp, "env_ref.png")
+    png_io.write_png(ref_png, np.full((90, 160, 4), 180, np.uint8))
+    props.sb_image_path = ref_png
+    props.last_sb_note = ""
+    draw("scene_blockout_ready")
+    import json as _json
+    from pathlib import Path as _P
+    fixture = _P(__file__).resolve().parents[1] / "tests" / "fixtures" / "scene_blockout" / "desert_v3.json"
+    from wondful_ai_renderer import scene_blockout_build as SBB, scene_blockout as SB
+    parent, _c = MS.ensure_collection(scene, props)
+    info = SBB.build(bpy.context, _json.loads(fixture.read_text(encoding="utf-8")), product_collection=props.product_collection,
+                     parent_collection=parent, set_camera=True)
+    info["scores"] = [0.612, 0.664]
+    info["round"] = 2
+    props.last_sb_note = SB.summary(info)
+    sbc = bpy.data.collections.get(SB.COLLECTION_NAME)
+    if sbc is None or sbc.name not in [c.name for c in parent.children] or MS.find_collection(scene, props) != parent:
+        problems.append("场景粗模 collection is not inside the massing collection")
+    if bpy.context.scene.camera is None or bpy.context.scene.camera.name != SB.CAMERA_NAME:
+        problems.append("场景粗模 did not set its reference camera")
+    print("scene blockout", props.last_sb_note)
+    draw("scene_blockout_built")
+    props.last_sb_note = "场景粗模失败：未找到 Codex 登录文件，请先在 ① 连接 Codex"
+    draw("scene_blockout_failed")
+    props.last_sb_note = ""
+    props.sb_image_path = ""
+    props.ui_show_scene_blockout = False
+    SBB.remove_existing()
 
     # 4b. 1.2.3 多角度一致: closed, open without master, with master + selected cameras, after a run
     props.ui_show_multiview = True

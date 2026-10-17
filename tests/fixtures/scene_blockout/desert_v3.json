@@ -1,0 +1,1332 @@
+{
+"scene_kind": "outdoor",
+"scene_summary": "A broad asphalt highway curves right through golden desert dunes, beside a palm-planted median, cable barriers and tall streetlights, with an orange truck and a white delivery van.",
+"environment_description": "Large, overlapping pale-golden sand dunes surround a curving desert highway, with almost no natural ground vegetation. The visible dry season has warm beige sand, dusty olive-green date palms, no autumn colours and no snow. Dark brown-grey asphalt carries faded white markings and is bordered by sandy shoulders, black steel posts and thin galvanized barrier cables. Tall galvanized streetlights, brown utility poles and a delicate distant transmission tower punctuate the landscape. Low warm sunlight from the left highlights the dune crests and palm fronds, casting long shadows toward the right foreground beneath a clear pale cyan sky.",
+"palette": {
+"season": "dry_season",
+"season_evidence": "Exposed golden desert sand, sparse dusty green palms, clear sky and no visible seasonal flowers, autumn leaves or snow.",
+"grass_hex": "#A99F74",
+"grass_words": "Almost no grass; only occasional sparse, dusty straw-coloured roadside tufts.",
+"foliage_hex": "#596342",
+"foliage_words": "Muted olive-green date-palm fronds with dark green shaded centres and some tan lower fronds.",
+"ground_hex": "#DCC194",
+"ground_words": "Pale warm beige and golden sand beside dark brown-grey asphalt.",
+"sky_words": "Clear, very pale cyan-blue sky with a slightly warm, hazy horizon.",
+"snow_cover": false,
+"autumn_colours": false
+},
+"camera": {
+"height_m": 2,
+"pitch_deg": -1.15,
+"roll_deg": 0,
+"hfov_deg": 48,
+"horizon_y_frac": 0.4599
+},
+"terrain": {
+"far_m": 2400,
+"base_slope_deg": 0,
+"base_slope_dir_deg": 0,
+"smoothness": 0.8,
+"surface": "Flat fine pale golden roadside desert sand and lightly gravelly shoulders. The rising dune field is represented by overlapping distant dune bands, with no grass carpet.",
+"bumps": [],
+"ridges": []
+},
+"roads": [
+{
+"id": "main_curving_highway",
+"kind": "road",
+"width_m": 12,
+"follow_terrain": false,
+"points": [
+{
+"x": -1,
+"y": 2,
+"z": 0
+},
+{
+"x": 0,
+"y": 10,
+"z": 0
+},
+{
+"x": 2.3,
+"y": 20,
+"z": 0
+},
+{
+"x": 7.3,
+"y": 32,
+"z": 0
+},
+{
+"x": 10,
+"y": 43,
+"z": 0
+},
+{
+"x": 8.8,
+"y": 54,
+"z": 0
+},
+{
+"x": 2.5,
+"y": 70,
+"z": 0
+},
+{
+"x": -12,
+"y": 105,
+"z": 0
+},
+{
+"x": -35,
+"y": 155,
+"z": 0
+}
+],
+"surface": "Dark warm charcoal-brown asphalt with fine aggregate, subtle wear and long diagonal pole shadows."
+},
+{
+"id": "opposite_carriageway",
+"kind": "road",
+"width_m": 7.2,
+"follow_terrain": false,
+"points": [
+{
+"x": -15,
+"y": 9,
+"z": 0
+},
+{
+"x": -11,
+"y": 24,
+"z": 0
+},
+{
+"x": -7.8,
+"y": 42,
+"z": 0
+},
+{
+"x": -6.5,
+"y": 59,
+"z": 0
+},
+{
+"x": -13,
+"y": 86,
+"z": 0
+},
+{
+"x": -34,
+"y": 140,
+"z": 0
+}
+],
+"surface": "Dark grey asphalt partly hidden by the sandy palm median and cable barriers."
+},
+{
+"id": "median_edge_white_line",
+"kind": "path",
+"width_m": 0.06,
+"follow_terrain": false,
+"points": [
+{
+"x": -7,
+"y": 2,
+"z": 0.012
+},
+{
+"x": -6,
+"y": 10,
+"z": 0.012
+},
+{
+"x": -3.7,
+"y": 20,
+"z": 0.012
+},
+{
+"x": 1.3,
+"y": 32,
+"z": 0.012
+},
+{
+"x": 4,
+"y": 43,
+"z": 0.012
+},
+{
+"x": 2.8,
+"y": 54,
+"z": 0.012
+},
+{
+"x": -3.5,
+"y": 70,
+"z": 0.012
+},
+{
+"x": -18,
+"y": 105,
+"z": 0.012
+}
+],
+"surface": "Thin weathered off-white painted asphalt edge line, not a raised curb."
+},
+{
+"id": "curving_lane_divider",
+"kind": "path",
+"width_m": 0.035,
+"follow_terrain": false,
+"points": [
+{
+"x": -0.7,
+"y": 6,
+"z": 0.016
+},
+{
+"x": 2.3,
+"y": 12,
+"z": 0.016
+},
+{
+"x": 6.1,
+"y": 21,
+"z": 0.016
+},
+{
+"x": 9.7,
+"y": 32,
+"z": 0.016
+},
+{
+"x": 11.3,
+"y": 43,
+"z": 0.016
+},
+{
+"x": 9.4,
+"y": 54,
+"z": 0.016
+},
+{
+"x": 3,
+"y": 70,
+"z": 0.016
+}
+],
+"surface": "Extremely faded grey-white lane paint nearly matching the asphalt; no raised strip."
+}
+],
+"mountain_bands": [
+{
+"id": "continuous_high_dune_skyline",
+"kind": "dune",
+"distance_m": 720,
+"depth_m": 950,
+"profile": [
+{
+"x_frac": 0,
+"y_frac": 0.212
+},
+{
+"x_frac": 0.04,
+"y_frac": 0.2
+},
+{
+"x_frac": 0.09,
+"y_frac": 0.205
+},
+{
+"x_frac": 0.14,
+"y_frac": 0.214
+},
+{
+"x_frac": 0.19,
+"y_frac": 0.213
+},
+{
+"x_frac": 0.24,
+"y_frac": 0.207
+},
+{
+"x_frac": 0.28,
+"y_frac": 0.198
+},
+{
+"x_frac": 0.32,
+"y_frac": 0.197
+},
+{
+"x_frac": 0.37,
+"y_frac": 0.189
+},
+{
+"x_frac": 0.4,
+"y_frac": 0.192
+},
+{
+"x_frac": 0.423,
+"y_frac": 0.183
+},
+{
+"x_frac": 0.46,
+"y_frac": 0.195
+},
+{
+"x_frac": 0.49,
+"y_frac": 0.186
+},
+{
+"x_frac": 0.53,
+"y_frac": 0.181
+},
+{
+"x_frac": 0.57,
+"y_frac": 0.19
+},
+{
+"x_frac": 0.61,
+"y_frac": 0.211
+},
+{
+"x_frac": 0.65,
+"y_frac": 0.203
+},
+{
+"x_frac": 0.69,
+"y_frac": 0.21
+},
+{
+"x_frac": 0.72,
+"y_frac": 0.204
+},
+{
+"x_frac": 0.755,
+"y_frac": 0.205
+},
+{
+"x_frac": 0.787,
+"y_frac": 0.196
+},
+{
+"x_frac": 0.82,
+"y_frac": 0.205
+},
+{
+"x_frac": 0.86,
+"y_frac": 0.215
+},
+{
+"x_frac": 0.9,
+"y_frac": 0.215
+},
+{
+"x_frac": 0.94,
+"y_frac": 0.226
+},
+{
+"x_frac": 0.973,
+"y_frac": 0.215
+},
+{
+"x_frac": 1,
+"y_frac": 0.224
+}
+],
+"surface": "Bare golden-beige sand dunes with sweeping crests, cream sunlit faces and broad grey-tan lee-side shadows."
+},
+{
+"id": "middle_scalloped_dune_range",
+"kind": "dune",
+"distance_m": 260,
+"depth_m": 340,
+"profile": [
+{
+"x_frac": 0,
+"y_frac": 0.265
+},
+{
+"x_frac": 0.05,
+"y_frac": 0.277
+},
+{
+"x_frac": 0.1,
+"y_frac": 0.29
+},
+{
+"x_frac": 0.15,
+"y_frac": 0.273
+},
+{
+"x_frac": 0.2,
+"y_frac": 0.282
+},
+{
+"x_frac": 0.25,
+"y_frac": 0.3
+},
+{
+"x_frac": 0.3,
+"y_frac": 0.285
+},
+{
+"x_frac": 0.35,
+"y_frac": 0.316
+},
+{
+"x_frac": 0.4,
+"y_frac": 0.302
+},
+{
+"x_frac": 0.45,
+"y_frac": 0.324
+},
+{
+"x_frac": 0.5,
+"y_frac": 0.282
+},
+{
+"x_frac": 0.55,
+"y_frac": 0.272
+},
+{
+"x_frac": 0.6,
+"y_frac": 0.297
+},
+{
+"x_frac": 0.65,
+"y_frac": 0.266
+},
+{
+"x_frac": 0.7,
+"y_frac": 0.281
+},
+{
+"x_frac": 0.75,
+"y_frac": 0.304
+},
+{
+"x_frac": 0.8,
+"y_frac": 0.285
+},
+{
+"x_frac": 0.85,
+"y_frac": 0.299
+},
+{
+"x_frac": 0.9,
+"y_frac": 0.319
+},
+{
+"x_frac": 0.95,
+"y_frac": 0.292
+},
+{
+"x_frac": 1,
+"y_frac": 0.309
+}
+],
+"surface": "Overlapping golden sand ridges with rounded wind-carved saddles, steep shaded slip faces and warm sunlit crests."
+},
+{
+"id": "lower_overlapping_dune_faces",
+"kind": "dune",
+"distance_m": 85,
+"depth_m": 125,
+"profile": [
+{
+"x_frac": 0,
+"y_frac": 0.405
+},
+{
+"x_frac": 0.055,
+"y_frac": 0.416
+},
+{
+"x_frac": 0.1,
+"y_frac": 0.438
+},
+{
+"x_frac": 0.16,
+"y_frac": 0.419
+},
+{
+"x_frac": 0.22,
+"y_frac": 0.409
+},
+{
+"x_frac": 0.28,
+"y_frac": 0.432
+},
+{
+"x_frac": 0.33,
+"y_frac": 0.418
+},
+{
+"x_frac": 0.39,
+"y_frac": 0.439
+},
+{
+"x_frac": 0.45,
+"y_frac": 0.406
+},
+{
+"x_frac": 0.5,
+"y_frac": 0.415
+},
+{
+"x_frac": 0.55,
+"y_frac": 0.451
+},
+{
+"x_frac": 0.6,
+"y_frac": 0.461
+},
+{
+"x_frac": 0.65,
+"y_frac": 0.428
+},
+{
+"x_frac": 0.7,
+"y_frac": 0.438
+},
+{
+"x_frac": 0.75,
+"y_frac": 0.41
+},
+{
+"x_frac": 0.8,
+"y_frac": 0.426
+},
+{
+"x_frac": 0.86,
+"y_frac": 0.413
+},
+{
+"x_frac": 0.91,
+"y_frac": 0.431
+},
+{
+"x_frac": 0.96,
+"y_frac": 0.454
+},
+{
+"x_frac": 1,
+"y_frac": 0.445
+}
+],
+"surface": "Low pale beige-gold dune faces extending down behind the roadside barrier, with scalloped slopes, grey-tan shadow hollows and fine wind ripples."
+}
+],
+"foliage_masses": [
+{
+"id": "large_left_date_palm",
+"kind": "palm",
+"x": -5.7,
+"y": 17,
+"crown_w": 7,
+"crown_d": 4.8,
+"crown_h": 3.6,
+"crown_base_h": 1.5,
+"trunk_w": 0.45,
+"lean_deg": 3,
+"lumpiness": 0.85,
+"outline": [
+{
+"x_frac": 0.012,
+"y_frac": 0.269
+},
+{
+"x_frac": 0.04,
+"y_frac": 0.252
+},
+{
+"x_frac": 0.03,
+"y_frac": 0.16
+},
+{
+"x_frac": 0.075,
+"y_frac": 0.188
+},
+{
+"x_frac": 0.065,
+"y_frac": 0.141
+},
+{
+"x_frac": 0.09,
+"y_frac": 0.15
+},
+{
+"x_frac": 0.098,
+"y_frac": 0.108
+},
+{
+"x_frac": 0.126,
+"y_frac": 0.144
+},
+{
+"x_frac": 0.151,
+"y_frac": 0.111
+},
+{
+"x_frac": 0.17,
+"y_frac": 0.155
+},
+{
+"x_frac": 0.193,
+"y_frac": 0.139
+},
+{
+"x_frac": 0.205,
+"y_frac": 0.183
+},
+{
+"x_frac": 0.231,
+"y_frac": 0.188
+},
+{
+"x_frac": 0.218,
+"y_frac": 0.254
+},
+{
+"x_frac": 0.254,
+"y_frac": 0.254
+},
+{
+"x_frac": 0.244,
+"y_frac": 0.303
+},
+{
+"x_frac": 0.276,
+"y_frac": 0.345
+},
+{
+"x_frac": 0.24,
+"y_frac": 0.35
+},
+{
+"x_frac": 0.258,
+"y_frac": 0.39
+},
+{
+"x_frac": 0.185,
+"y_frac": 0.39
+},
+{
+"x_frac": 0.148,
+"y_frac": 0.437
+},
+{
+"x_frac": 0.136,
+"y_frac": 0.487
+},
+{
+"x_frac": 0.126,
+"y_frac": 0.698
+},
+{
+"x_frac": 0.111,
+"y_frac": 0.701
+},
+{
+"x_frac": 0.116,
+"y_frac": 0.478
+},
+{
+"x_frac": 0.103,
+"y_frac": 0.414
+},
+{
+"x_frac": 0.063,
+"y_frac": 0.39
+},
+{
+"x_frac": 0.015,
+"y_frac": 0.365
+},
+{
+"x_frac": -0.009,
+"y_frac": 0.33
+},
+{
+"x_frac": 0.017,
+"y_frac": 0.306
+}
+],
+"material": "Date palm with dusty olive-green finely divided fronds, dark shaded foliage, tan dead frond bases and a rough diamond-patterned brown trunk."
+},
+{
+"id": "central_median_palm",
+"kind": "palm",
+"x": -2.5,
+"y": 30,
+"crown_w": 4.8,
+"crown_d": 4,
+"crown_h": 3.1,
+"crown_base_h": 1.2,
+"trunk_w": 0.42,
+"lean_deg": -3,
+"lumpiness": 0.8,
+"outline": [
+{
+"x_frac": 0.331,
+"y_frac": 0.468
+},
+{
+"x_frac": 0.351,
+"y_frac": 0.433
+},
+{
+"x_frac": 0.348,
+"y_frac": 0.39
+},
+{
+"x_frac": 0.38,
+"y_frac": 0.393
+},
+{
+"x_frac": 0.376,
+"y_frac": 0.36
+},
+{
+"x_frac": 0.411,
+"y_frac": 0.37
+},
+{
+"x_frac": 0.428,
+"y_frac": 0.348
+},
+{
+"x_frac": 0.448,
+"y_frac": 0.371
+},
+{
+"x_frac": 0.467,
+"y_frac": 0.374
+},
+{
+"x_frac": 0.477,
+"y_frac": 0.415
+},
+{
+"x_frac": 0.492,
+"y_frac": 0.422
+},
+{
+"x_frac": 0.485,
+"y_frac": 0.468
+},
+{
+"x_frac": 0.491,
+"y_frac": 0.501
+},
+{
+"x_frac": 0.45,
+"y_frac": 0.513
+},
+{
+"x_frac": 0.432,
+"y_frac": 0.54
+},
+{
+"x_frac": 0.435,
+"y_frac": 0.606
+},
+{
+"x_frac": 0.418,
+"y_frac": 0.61
+},
+{
+"x_frac": 0.415,
+"y_frac": 0.545
+},
+{
+"x_frac": 0.398,
+"y_frac": 0.525
+},
+{
+"x_frac": 0.337,
+"y_frac": 0.536
+},
+{
+"x_frac": 0.34,
+"y_frac": 0.488
+}
+],
+"material": "Dense olive-green date-palm fronds with yellow-green sunlit tips and a short thick textured tan trunk."
+},
+{
+"id": "right_median_palm_group",
+"kind": "palm",
+"x": 0.8,
+"y": 39,
+"crown_w": 4,
+"crown_d": 5,
+"crown_h": 3.3,
+"crown_base_h": 0.9,
+"trunk_w": 0.35,
+"lean_deg": 0,
+"lumpiness": 0.85,
+"outline": [
+{
+"x_frac": 0.465,
+"y_frac": 0.442
+},
+{
+"x_frac": 0.479,
+"y_frac": 0.414
+},
+{
+"x_frac": 0.489,
+"y_frac": 0.388
+},
+{
+"x_frac": 0.501,
+"y_frac": 0.396
+},
+{
+"x_frac": 0.512,
+"y_frac": 0.372
+},
+{
+"x_frac": 0.533,
+"y_frac": 0.4
+},
+{
+"x_frac": 0.552,
+"y_frac": 0.402
+},
+{
+"x_frac": 0.558,
+"y_frac": 0.43
+},
+{
+"x_frac": 0.568,
+"y_frac": 0.445
+},
+{
+"x_frac": 0.575,
+"y_frac": 0.482
+},
+{
+"x_frac": 0.555,
+"y_frac": 0.525
+},
+{
+"x_frac": 0.53,
+"y_frac": 0.541
+},
+{
+"x_frac": 0.524,
+"y_frac": 0.578
+},
+{
+"x_frac": 0.506,
+"y_frac": 0.583
+},
+{
+"x_frac": 0.503,
+"y_frac": 0.547
+},
+{
+"x_frac": 0.48,
+"y_frac": 0.54
+},
+{
+"x_frac": 0.463,
+"y_frac": 0.492
+}
+],
+"material": "Overlapping small date palms with dense dark olive foliage, dusty yellow-green outer fronds and rough brown trunks."
+},
+{
+"id": "small_background_palm",
+"kind": "palm",
+"x": -15.8,
+"y": 65,
+"crown_w": 2.4,
+"crown_d": 2.5,
+"crown_h": 1.5,
+"crown_base_h": 1.5,
+"trunk_w": 0.23,
+"lean_deg": 0,
+"lumpiness": 0.7,
+"outline": [],
+"material": "Small dusty green date palm with a slender tan trunk."
+}
+],
+"primitives": [
+{
+"id": "white_delivery_van_cargo_box",
+"type": "vehicle",
+"shape": "box",
+"x": 6.2,
+"y": 27,
+"z_offset": 0.35,
+"w": 2.05,
+"d": 4.1,
+"h": 2.2,
+"roof_h": 0,
+"rot_z_deg": -8,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "White delivery cargo box with twin grey-white rear doors, silver hinges, black perimeter seals and small red rear lamps."
+},
+{
+"id": "white_van_cab",
+"type": "vehicle",
+"shape": "box",
+"x": 6.45,
+"y": 29.6,
+"z_offset": 0.3,
+"w": 2,
+"d": 1.65,
+"h": 1.8,
+"roof_h": 0,
+"rot_z_deg": -8,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "White commercial van cab with dark side windows and black mirrors."
+},
+{
+"id": "van_rear_tyres",
+"type": "vehicle",
+"shape": "box",
+"x": 5.35,
+"y": 25.7,
+"z_offset": 0,
+"w": 0.36,
+"d": 0.75,
+"h": 0.67,
+"roof_h": 0,
+"rot_z_deg": -8,
+"repeat": 2,
+"repeat_dx": 1.7,
+"repeat_dy": 0.24,
+"material": "Black rubber tyres and dark undercarriage."
+},
+{
+"id": "orange_truck_cab",
+"type": "vehicle",
+"shape": "box",
+"x": -7.2,
+"y": 43,
+"z_offset": 0.65,
+"w": 2.65,
+"d": 2.5,
+"h": 2.35,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Orange heavy maintenance-truck cab facing the camera, with black lower grille and bumper."
+},
+{
+"id": "orange_truck_windscreen",
+"type": "vehicle",
+"shape": "box",
+"x": -7.2,
+"y": 41.73,
+"z_offset": 2,
+"w": 2.28,
+"d": 0.04,
+"h": 0.76,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Very dark blue-black windscreen with narrow black sun visor."
+},
+{
+"id": "truck_rear_body",
+"type": "vehicle",
+"shape": "box",
+"x": -7.2,
+"y": 46,
+"z_offset": 0.8,
+"w": 2.5,
+"d": 4.5,
+"h": 1.9,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Pale cream industrial truck body partly concealed behind the cab and palms."
+},
+{
+"id": "truck_front_tyres",
+"type": "vehicle",
+"shape": "box",
+"x": -8.2,
+"y": 42.2,
+"z_offset": 0,
+"w": 0.48,
+"d": 0.9,
+"h": 0.9,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 2,
+"repeat_dx": 2,
+"repeat_dy": 0,
+"material": "Large black heavy-truck tyres."
+},
+{
+"id": "foreground_left_streetlight",
+"type": "pole",
+"shape": "cylinder",
+"x": -9.3,
+"y": 21,
+"z_offset": 0,
+"w": 0.27,
+"d": 0.27,
+"h": 14,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Pale grey galvanized streetlight shaft cropped by the upper and left frame."
+},
+{
+"id": "central_tall_streetlight",
+"type": "pole",
+"shape": "cylinder",
+"x": -0.92,
+"y": 36,
+"z_offset": 0,
+"w": 0.2,
+"d": 0.2,
+"h": 15,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Tall pale grey metal streetlight shaft extending above the frame."
+},
+{
+"id": "right_central_tall_streetlight",
+"type": "pole",
+"shape": "cylinder",
+"x": 2.65,
+"y": 58,
+"z_offset": 0,
+"w": 0.2,
+"d": 0.2,
+"h": 20,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Slender galvanized highway lighting column."
+},
+{
+"id": "middle_distance_streetlight",
+"type": "pole",
+"shape": "cylinder",
+"x": -0.9,
+"y": 69,
+"z_offset": 0,
+"w": 0.16,
+"d": 0.16,
+"h": 12.6,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Slim grey streetlight pole."
+},
+{
+"id": "middle_distance_light_crossarm",
+"type": "lamp",
+"shape": "box",
+"x": -0.9,
+"y": 69,
+"z_offset": 12.5,
+"w": 1.4,
+"d": 0.26,
+"h": 0.12,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Short double-ended crossarm with dark grey lamp heads."
+},
+{
+"id": "left_background_streetlights",
+"type": "pole",
+"shape": "cylinder",
+"x": -13.2,
+"y": 92,
+"z_offset": 0,
+"w": 0.16,
+"d": 0.16,
+"h": 12,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 3,
+"repeat_dx": -10,
+"repeat_dy": 33,
+"material": "Slender galvanized highway lamp columns."
+},
+{
+"id": "left_background_light_heads",
+"type": "lamp",
+"shape": "box",
+"x": -13.2,
+"y": 92,
+"z_offset": 11.9,
+"w": 2,
+"d": 0.3,
+"h": 0.15,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 3,
+"repeat_dx": -10,
+"repeat_dy": 33,
+"material": "Small paired grey highway light fittings."
+},
+{
+"id": "far_right_utility_poles",
+"type": "pole",
+"shape": "cylinder",
+"x": 6,
+"y": 92,
+"z_offset": 0,
+"w": 0.18,
+"d": 0.18,
+"h": 6.4,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 3,
+"repeat_dx": 18.2,
+"repeat_dy": 7,
+"material": "Weathered brown utility poles with dark insulators and thin sagging wires."
+},
+{
+"id": "utility_crossarms",
+"type": "pole",
+"shape": "box",
+"x": 6,
+"y": 92,
+"z_offset": 6.2,
+"w": 1.5,
+"d": 0.15,
+"h": 0.13,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 3,
+"repeat_dx": 18.2,
+"repeat_dy": 7,
+"material": "Dark timber electrical crossarms with black insulators."
+},
+{
+"id": "distant_transmission_mast",
+"type": "pole",
+"shape": "cylinder",
+"x": 10.5,
+"y": 350,
+"z_offset": 0,
+"w": 0.35,
+"d": 0.35,
+"h": 75,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Fine pale steel lattice electricity tower, delicate and visually open against the sky."
+},
+{
+"id": "near_median_barrier_posts",
+"type": "pole",
+"shape": "box",
+"x": -6.6,
+"y": 11,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.95,
+"roof_h": 0,
+"rot_z_deg": -12,
+"repeat": 8,
+"repeat_dx": 0.49,
+"repeat_dy": 2.2,
+"material": "Dark charcoal steel posts with pale reflective caps."
+},
+{
+"id": "middle_median_barrier_posts",
+"type": "pole",
+"shape": "box",
+"x": -2.6,
+"y": 28,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.88,
+"roof_h": 0,
+"rot_z_deg": -24,
+"repeat": 8,
+"repeat_dx": 0.8,
+"repeat_dy": 2,
+"material": "Dark grey barrier posts with silver caps and small reflectors."
+},
+{
+"id": "median_tip_barrier_posts",
+"type": "pole",
+"shape": "box",
+"x": 3.3,
+"y": 44,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.8,
+"roof_h": 0,
+"rot_z_deg": 5,
+"repeat": 8,
+"repeat_dx": -0.18,
+"repeat_dy": 1.65,
+"material": "Closely spaced dark posts around the rounded sandy median."
+},
+{
+"id": "near_median_lower_cable",
+"type": "fence",
+"shape": "box",
+"x": -4.9,
+"y": 18.8,
+"z_offset": 0.3,
+"w": 0.016,
+"d": 16,
+"h": 0.016,
+"roof_h": 0,
+"rot_z_deg": -12.6,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Thin pale galvanized tension cable."
+},
+{
+"id": "near_median_upper_cable",
+"type": "fence",
+"shape": "box",
+"x": -4.9,
+"y": 18.8,
+"z_offset": 0.74,
+"w": 0.016,
+"d": 16,
+"h": 0.016,
+"roof_h": 0,
+"rot_z_deg": -12.6,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Thin pale galvanized tension cable."
+},
+{
+"id": "middle_median_cables",
+"type": "fence",
+"shape": "box",
+"x": 0.2,
+"y": 35,
+"z_offset": 0.52,
+"w": 0.016,
+"d": 15.1,
+"h": 0.016,
+"roof_h": 0,
+"rot_z_deg": -21.8,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Fine silvery steel safety cable."
+},
+{
+"id": "opposite_side_barrier_posts",
+"type": "pole",
+"shape": "box",
+"x": -10.2,
+"y": 19,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.9,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 14,
+"repeat_dx": 0.32,
+"repeat_dy": 2.2,
+"material": "Black steel barrier posts with silver cable strands."
+},
+{
+"id": "right_outer_barrier_near",
+"type": "pole",
+"shape": "box",
+"x": 15.1,
+"y": 30,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.8,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 12,
+"repeat_dx": 0.03,
+"repeat_dy": 2.1,
+"material": "Dark narrow roadside posts with pale tops and thin metal cables."
+},
+{
+"id": "right_outer_barrier_far",
+"type": "pole",
+"shape": "box",
+"x": 14.8,
+"y": 55,
+"z_offset": 0,
+"w": 0.07,
+"d": 0.1,
+"h": 0.8,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 20,
+"repeat_dx": -0.7,
+"repeat_dy": 2.3,
+"material": "Receding black roadside safety posts and fine grey cables."
+},
+{
+"id": "small_left_road_sign",
+"type": "sign",
+"shape": "box",
+"x": -18,
+"y": 68,
+"z_offset": 1.25,
+"w": 0.65,
+"d": 0.06,
+"h": 0.65,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Dull grey rectangular traffic-sign back on a galvanized post."
+}
+],
+"product_spot": {
+"x": 0.6,
+"y": 12,
+"rot_z_deg": -25,
+"on": "Open foreground asphalt of the near carriageway.",
+"reason": "The unobstructed lower-middle asphalt follows the bend and gives a five-metre vehicle a prominent projected width without covering the distant van or main palms."
+},
+"_frame": {
+"w": 1600,
+"h": 900
+}
+}

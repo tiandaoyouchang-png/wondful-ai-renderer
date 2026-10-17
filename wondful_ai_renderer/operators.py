@@ -1149,6 +1149,258 @@ class WONDFUL_OT_massing_hull_build(Operator):
         return {"FINISHED"}
 
 
+def _sb_reference(props):
+    """从参考图生成场景粗模: the photo to analyse (the file field, else ③'s first environment reference)."""
+    custom = bpy.path.abspath((getattr(props, "sb_image_path", "") or "").strip())
+    if custom:
+        return custom, "file"
+    style = [p for p in _reference_paths(props)["style"] if p]
+    return (bpy.path.abspath(style[0]), "step3") if style else ("", "")
+
+
+def _sb_prepare_png(src, dst, long_edge):
+    """The analysis copy of the photo: a real PNG (also for the numpy fit score), long edge ≤ ``long_edge``;
+    returns (path, (w, h)). Main thread only (bpy.data.images)."""
+    img = bpy.data.images.load(str(src), check_existing=False)
+    try:
+        w, h = int(img.size[0]), int(img.size[1])
+        if not w or not h:
+            raise RuntimeError(f"无法读取参考图：{Path(src).name}")
+        if max(w, h) > long_edge:
+            s = long_edge / float(max(w, h))
+            w, h = max(1, int(round(w * s))), max(1, int(round(h * s)))
+            img.scale(w, h)
+        img.filepath_raw = str(dst)
+        img.file_format = "PNG"
+        img.save()
+    finally:
+        bpy.data.images.remove(img)
+    from .png_io import read_png
+    read_png(str(dst))          # raises when the copy is not a PNG
+    return str(dst), (w, h)
+
+
+class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
+    """1.2.3 高级 › 环境体块 › 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
+    bl_idname = "wondful.scene_blockout_build"
+    bl_label = "从参考图生成场景粗模"
+    bl_description = ("让 AI 分析环境参考图（③ 第一张，或这里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
+                      "放进环境体块里的「Wondful 场景粗模」集合（重新生成会替换它），每个体块都按照片命名；产品位置不变。"
+                      "参考图只用于分析，不会发给生图模型")
+    bl_options = {"REGISTER", "UNDO"}
+
+    analysis_json: StringProperty(name="分析结果", description="（测试 / 离线）直接用这个 JSON 文件，不调用 AI",
+                                  default="", options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        from . import scene_blockout as SB
+        from . import codex_direct as CD
+        scene = context.scene
+        props = scene.wondful_ai
+        prefs = _addon_prefs(context)
+        ref, source = _sb_reference(props)
+        if not ref or not Path(ref).is_file():
+            msg = "请先在 ③ 放一张环境参考图，或在这里选择一张参考图。" if not ref else f"参考图不存在：{ref}"
+            props.last_sb_note = msg
+            self.report({"ERROR"}, msg)
+            return {"CANCELLED"}
+        cached = (self.analysis_json or "").strip()
+        if not cached:
+            provider = _analysis_provider(props, prefs)
+            if provider["id"] != "codex":
+                msg = "从参考图生成场景粗模需要 Codex 登录（① 连接 Codex）。"
+                props.last_sb_note = msg
+                self.report({"ERROR"}, msg)
+                return {"CANCELLED"}
+        session = create_session()
+        try:
+            upload, frame = _sb_prepare_png(ref, session.directory / "scene_ref.png", SB.WORK_LONG)
+        except Exception as exc:
+            props.last_sb_note = f"场景粗模失败：{exc}"
+            self.report({"ERROR"}, props.last_sb_note)
+            return {"CANCELLED"}
+        coll = getattr(props, "product_collection", None)
+        from . import scene_blockout_build as SBB
+        from .massing import massing_objects, find_collection
+        info = SBB.product_info(coll, exclude=massing_objects(find_collection(scene, props), coll))
+        dims = info["dims"] if info else (4.8, 1.9, 1.5)
+        try:
+            from .product_kind import is_vehicle
+            vehicle = bool(is_vehicle(props)) if coll is not None else True
+        except Exception:
+            vehicle = coll is None
+        model = str(getattr(prefs, "codex_model", "") or "")
+        client_version = str(getattr(props, "codex_cli_version", "") or "")
+        self._sb = {"session": session.directory, "upload": upload, "frame": frame, "set_camera": bool(props.sb_set_camera),
+                    "correct": bool(props.sb_correct) and not cached, "stage": 1, "scores": [], "rounds": [],
+                    "model": model, "client_version": client_version, "cached": bool(cached), "source": source}
+        content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
+        self._sb["content"] = content
+        self._phase = "场景粗模：分析参考图…"
+        self._estimated_total = 8.0 if cached else 180.0
+        _status(props, "POLISHING")
+        props.progress = 0.05
+        props.last_sb_note = "场景粗模：分析参考图…"
+
+        def job():
+            from .cli_transport import is_cancellation_requested as cancelled
+            if cached:
+                return json.loads(Path(bpy.path.abspath(cached)).read_text(encoding="utf-8"))
+            return SB.call_analysis(content, effort=SB.EFFORT_FIRST, model=model, client_version=client_version,
+                                    cancel_check=cancelled)
+
+        if not self._start_thread(context, job):
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def _spawn(self, target):
+        """Run the next network step on a new worker thread (the task lock stays with this operator)."""
+        self._result, self._error = None, None
+        self._started_at = time.time()
+
+        def runner():
+            try:
+                self._result = target()
+            except Exception as exc:
+                self._error = (exc, traceback.format_exc())
+            finally:
+                if self._detached.is_set():
+                    self._release_lock()
+        self._thread = threading.Thread(target=runner, daemon=True, name="WondfulAIWorker")
+        self._thread.start()
+
+    def _build(self, context, data):
+        from . import scene_blockout_build as SBB
+        from . import massing as MS
+        scene = context.scene
+        props = scene.wondful_ai
+        if not bool(getattr(props, "massing_enabled", True)):
+            props.massing_enabled = True
+        picked = getattr(props, "massing_collection", None)
+        if picked is not None and picked.get("wondful_scene_blockout"):
+            props.massing_collection = None
+        parent, _created = MS.ensure_collection(scene, props)
+        if parent.get("wondful_scene_blockout"):
+            parent = scene.collection
+        coll = getattr(props, "product_collection", None)
+        data = dict(data)
+        data.setdefault("_frame", {"w": self._sb["frame"][0], "h": self._sb["frame"][1]})
+        own = [o for o in MS.massing_objects(parent, coll) if not any(c.get("wondful_scene_blockout") for c in o.users_collection)]
+        info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
+                         set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
+        if props.massing_collection is None and parent is scene.collection:
+            props.massing_collection = bpy.data.collections.get(info["collection"])
+        return info
+
+    def _score(self, context, info, tag):
+        from . import scene_blockout as SB
+        from . import scene_blockout_build as SBB
+        from .png_io import read_png, write_png
+        d = Path(self._sb["session"])
+        path = d / f"scene_preview_{tag}.png"
+        SBB.render_preview(context, info, str(path))
+        photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
+        render = read_png(str(path)).astype("float32")
+        sc = SB.fit_score(photo, render)
+        import numpy as np
+        flat = render[..., :3] * (render[..., 3:4] / 255.0) + 255.0 * (1.0 - render[..., 3:4] / 255.0)
+        write_png(str(d / f"scene_preview_{tag}_flat.png"), flat.clip(0, 255).astype(np.uint8))
+        write_png(str(d / f"scene_overlay_{tag}.png"), SB.overlay(photo, flat))
+        (d / f"scene_score_{tag}.json").write_text(json.dumps(sc, ensure_ascii=False, indent=1), encoding="utf-8")
+        return sc, d / f"scene_preview_{tag}_flat.png", d / f"scene_overlay_{tag}.png"
+
+    def _finish(self, context, info, round_no):
+        from . import scene_blockout as SB
+        props = self._origin_scene.wondful_ai
+        info["scores"] = self._sb["scores"]
+        info["round"] = round_no
+        info["cached"] = self._sb["cached"]
+        props.last_sb_note = SB.summary(info)
+        try:
+            Path(self._sb["session"], "scene_blockout_info.json").write_text(
+                json.dumps(info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        except Exception:
+            pass
+        props.progress = 0.0
+        props.eta_seconds = 0
+        _status(props, "IDLE")
+        self.report({"INFO"}, props.last_sb_note[:200])
+        _redraw_all()
+        return {"FINISHED"}
+
+    def _modal(self, context, event):
+        from . import scene_blockout as SB
+        from . import codex_direct as CD
+        props = self._origin_scene.wondful_ai
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        if self._thread and self._thread.is_alive():
+            self._progress_update(props, 0.10 if self._sb["stage"] == 1 else 0.55, 0.50 if self._sb["correct"] else 0.92)
+            return {"RUNNING_MODAL"}
+        sb = self._sb
+        if self._error:
+            exc = self._error[0]
+            if sb["stage"] == 2 and sb["rounds"]:
+                # correction failed: keep round 1
+                self._cleanup(context)
+                info = sb["info1"]
+                info.setdefault("notes", []).append(f"校正失败，保留第 1 轮（{str(exc)[:60]}）")
+                return self._finish(context, info, 1)
+            self._cleanup(context)
+            props.progress = 0.0
+            props.eta_seconds = 0
+            props.last_sb_note = f"场景粗模失败：{exc}"
+            _status(props, "ERROR", props.last_sb_note)
+            self.report({"ERROR"}, props.last_sb_note[:200])
+            return {"CANCELLED"}
+        try:
+            data = SB.normalize(self._result)
+            try:
+                Path(sb["session"], f"scene_analysis_r{sb['stage']}.json").write_text(
+                    json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")
+            except Exception:
+                pass
+            props.task_phase = "场景粗模：搭建体块…"
+            info = self._build(context, data)
+            sb["rounds"].append(data)
+            if sb["stage"] == 1 and sb["correct"]:
+                sc, flat, ov = self._score(context, info, "r1")
+                sb["scores"].append(sc["score"])
+                sb["info1"] = info
+                sb["stage"] = 2
+                self._phase = "场景粗模：校正一轮…"
+                self._estimated_total = 120.0
+                content = SB.correction_content(sb["content"], data, {k: v for k, v in sc.items() if k != "hints"},
+                                                sc.get("hints", []), CD.data_url(flat)[0], CD.data_url(ov)[0])
+                model, cv = sb["model"], sb["client_version"]
+
+                def job():
+                    from .cli_transport import is_cancellation_requested as cancelled
+                    return SB.call_analysis(content, effort=SB.EFFORT_CORRECT, model=model, client_version=cv,
+                                            cancel_check=cancelled)
+                self._spawn(job)
+                return {"RUNNING_MODAL"}
+            if sb["stage"] == 2:
+                sc, _f, _o = self._score(context, info, "r2")
+                sb["scores"].append(sc["score"])
+                if sc["score"] <= sb["scores"][0] + SB.MIN_GAIN:
+                    info = self._build(context, sb["rounds"][0])
+                    self._cleanup(context)
+                    return self._finish(context, info, 1)
+                self._cleanup(context)
+                return self._finish(context, info, 2)
+        except Exception as exc:
+            self._cleanup(context)
+            props.progress = 0.0
+            props.last_sb_note = f"场景粗模搭建失败：{exc}"
+            _status(props, "ERROR", props.last_sb_note)
+            print(traceback.format_exc())
+            self.report({"ERROR"}, props.last_sb_note[:200])
+            return {"CANCELLED"}
+        self._cleanup(context)
+        return self._finish(context, info, 1)
+
+
 class WONDFUL_OT_codex_check(_BaseAsyncOperator):
     bl_idname = "wondful.codex_check"
     bl_label = "检测 Codex"

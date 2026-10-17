@@ -1,0 +1,688 @@
+{
+"scene_kind": "outdoor",
+"scene_summary": "A narrow snow-covered woodland road curves gently left beneath densely interlaced, snow-laden bare deciduous branches. Low ploughed snowbanks border the lane and continuous winter woodland fills the background.",
+"environment_description": "A quiet temperate deciduous woodland in winter is covered with fresh white snow, with no exposed grass or green foliage. The narrow road has a compacted snowy surface with faint longitudinal tyre tracks, bordered by irregular banks of ploughed snow. Dark grey-brown hardwood trunks and intricate bare branches carry thick white snow along their upper surfaces, forming an enclosing arch over the lane. Densely overlapping branches and distant trees fill the entire upper background, with no substantial open sky. Clear, cool daylight from the upper left creates bright snow highlights and delicate blue-grey branch shadows across the road.",
+"palette": {
+"season": "winter",
+"season_evidence": "Continuous snow cover on the road and woodland floor, heavy snow resting on branches, and completely leafless deciduous trees.",
+"grass_hex": "#E8EDF2",
+"grass_words": "Grass is entirely concealed beneath white snow with pale blue-grey shadows.",
+"foliage_hex": "#48453F",
+"foliage_words": "Leafless dark grey-brown branches and trunks, heavily accented with white snow; no visible green canopy.",
+"ground_hex": "#E7ECF1",
+"ground_words": "Bright white compacted snow and soft snowbanks, with cool silver-blue shadows and subtle grey tyre impressions.",
+"sky_words": "Pale subdued blue-grey winter sky almost entirely concealed by dense overlapping bare branches and snow.",
+"snow_cover": true,
+"autumn_colours": false
+},
+"camera": {
+"height_m": 1.55,
+"pitch_deg": 3.76,
+"roll_deg": 0,
+"hfov_deg": 66,
+"horizon_y_frac": 0.59
+},
+"terrain": {
+"far_m": 300,
+"base_slope_deg": 0,
+"base_slope_dir_deg": 0,
+"smoothness": 0.65,
+"surface": "Continuous deep white snow over the woodland floor, gently undulating outside the compacted road; cool blue-grey shadows beneath trees.",
+"bumps": [
+{
+"x": -5.5,
+"y": 10,
+"height_m": 0.2,
+"radius_m": 4
+},
+{
+"x": 5.8,
+"y": 11,
+"height_m": 0.25,
+"radius_m": 4.5
+},
+{
+"x": 2.8,
+"y": 24,
+"height_m": 0.18,
+"radius_m": 5
+}
+],
+"ridges": [
+{
+"points": [
+{
+"x": -2.35,
+"y": 3
+},
+{
+"x": -2.55,
+"y": 6
+},
+{
+"x": -3.25,
+"y": 10
+},
+{
+"x": -4.65,
+"y": 16
+},
+{
+"x": -6,
+"y": 24
+},
+{
+"x": -6.2,
+"y": 32
+},
+{
+"x": -5.3,
+"y": 43
+},
+{
+"x": -3.4,
+"y": 58
+}
+],
+"height_m": 0.42,
+"width_m": 1.15
+},
+{
+"points": [
+{
+"x": 2.8,
+"y": 3
+},
+{
+"x": 2.35,
+"y": 6
+},
+{
+"x": 1.45,
+"y": 10
+},
+{
+"x": 0.05,
+"y": 16
+},
+{
+"x": -1.3,
+"y": 24
+},
+{
+"x": -1.5,
+"y": 32
+},
+{
+"x": -0.6,
+"y": 43
+},
+{
+"x": 1.3,
+"y": 58
+}
+],
+"height_m": 0.38,
+"width_m": 1.3
+}
+],
+"has_sea": false,
+"sea_level_m": 0
+},
+"roads": [
+{
+"id": "snow_covered_woodland_lane",
+"kind": "road",
+"width_m": 4.5,
+"follow_terrain": true,
+"points": [
+{
+"x": 0.25,
+"y": 0,
+"z": 0
+},
+{
+"x": 0.1,
+"y": 4,
+"z": 0
+},
+{
+"x": -0.25,
+"y": 7,
+"z": 0
+},
+{
+"x": -0.9,
+"y": 10,
+"z": 0
+},
+{
+"x": -2.25,
+"y": 16,
+"z": 0
+},
+{
+"x": -3.6,
+"y": 24,
+"z": 0
+},
+{
+"x": -3.8,
+"y": 32,
+"z": 0
+},
+{
+"x": -2.9,
+"y": 43,
+"z": 0
+},
+{
+"x": -1,
+"y": 58,
+"z": 0
+},
+{
+"x": 0.5,
+"y": 78,
+"z": 0
+}
+],
+"surface": "Packed white snow, lightly ribbed with parallel tyre traces and scattered small compressed snow clumps; no exposed asphalt. Fine branching blue-grey shadows stripe the surface."
+}
+],
+"mountain_bands": [],
+"foliage_masses": [
+{
+"id": "left_overhanging_bare_woodland",
+"kind": "deciduous",
+"x": -6,
+"y": 12,
+"crown_w": 15,
+"crown_d": 8,
+"crown_h": 13,
+"crown_base_h": 1.3,
+"trunk_w": 0.45,
+"lean_deg": 12,
+"lumpiness": 0.9,
+"outline": [
+{
+"x_frac": -0.08,
+"y_frac": -0.12
+},
+{
+"x_frac": 0.38,
+"y_frac": -0.12
+},
+{
+"x_frac": 0.46,
+"y_frac": 0.025
+},
+{
+"x_frac": 0.4,
+"y_frac": 0.1
+},
+{
+"x_frac": 0.51,
+"y_frac": 0.16
+},
+{
+"x_frac": 0.46,
+"y_frac": 0.23
+},
+{
+"x_frac": 0.54,
+"y_frac": 0.3
+},
+{
+"x_frac": 0.48,
+"y_frac": 0.37
+},
+{
+"x_frac": 0.4,
+"y_frac": 0.4
+},
+{
+"x_frac": 0.44,
+"y_frac": 0.48
+},
+{
+"x_frac": 0.37,
+"y_frac": 0.55
+},
+{
+"x_frac": 0.39,
+"y_frac": 0.626
+},
+{
+"x_frac": 0.27,
+"y_frac": 0.65
+},
+{
+"x_frac": 0.17,
+"y_frac": 0.666
+},
+{
+"x_frac": 0.08,
+"y_frac": 0.681
+},
+{
+"x_frac": -0.06,
+"y_frac": 0.713
+}
+],
+"material": "Leafless hardwood branching: dark brown-grey trunks, dense fine bare twigs, and thick bright white snow ribbons on upper branch surfaces. No leafy or green canopy."
+},
+{
+"id": "right_snow_laden_arching_branches",
+"kind": "deciduous",
+"x": 5.2,
+"y": 10,
+"crown_w": 17,
+"crown_d": 7,
+"crown_h": 13,
+"crown_base_h": 0.9,
+"trunk_w": 0.55,
+"lean_deg": -16,
+"lumpiness": 0.85,
+"outline": [
+{
+"x_frac": 0.32,
+"y_frac": -0.1
+},
+{
+"x_frac": 1.08,
+"y_frac": -0.1
+},
+{
+"x_frac": 1.08,
+"y_frac": 0.825
+},
+{
+"x_frac": 0.956,
+"y_frac": 0.802
+},
+{
+"x_frac": 0.9,
+"y_frac": 0.786
+},
+{
+"x_frac": 0.84,
+"y_frac": 0.798
+},
+{
+"x_frac": 0.817,
+"y_frac": 0.767
+},
+{
+"x_frac": 0.752,
+"y_frac": 0.774
+},
+{
+"x_frac": 0.704,
+"y_frac": 0.723
+},
+{
+"x_frac": 0.657,
+"y_frac": 0.733
+},
+{
+"x_frac": 0.632,
+"y_frac": 0.652
+},
+{
+"x_frac": 0.568,
+"y_frac": 0.636
+},
+{
+"x_frac": 0.561,
+"y_frac": 0.571
+},
+{
+"x_frac": 0.49,
+"y_frac": 0.546
+},
+{
+"x_frac": 0.43,
+"y_frac": 0.474
+},
+{
+"x_frac": 0.355,
+"y_frac": 0.45
+},
+{
+"x_frac": 0.304,
+"y_frac": 0.389
+},
+{
+"x_frac": 0.377,
+"y_frac": 0.359
+},
+{
+"x_frac": 0.478,
+"y_frac": 0.397
+},
+{
+"x_frac": 0.543,
+"y_frac": 0.382
+},
+{
+"x_frac": 0.465,
+"y_frac": 0.29
+},
+{
+"x_frac": 0.39,
+"y_frac": 0.222
+},
+{
+"x_frac": 0.458,
+"y_frac": 0.168
+},
+{
+"x_frac": 0.373,
+"y_frac": 0.098
+}
+],
+"material": "Interwoven bare dark hardwood branches with large horizontal and diagonal limbs reaching left over the road. Thick white snow lies along upper limbs, with lumpy caps at forks; exposed fine twigs overlap the distant woodland."
+},
+{
+"id": "continuous_distant_winter_woodland",
+"kind": "forest_edge",
+"x": 0,
+"y": 62,
+"crown_w": 100,
+"crown_d": 30,
+"crown_h": 38,
+"crown_base_h": 0,
+"trunk_w": 0.2,
+"lean_deg": 0,
+"lumpiness": 0.3,
+"outline": [
+{
+"x_frac": -0.12,
+"y_frac": -0.18
+},
+{
+"x_frac": 0.15,
+"y_frac": -0.18
+},
+{
+"x_frac": 0.35,
+"y_frac": -0.18
+},
+{
+"x_frac": 0.55,
+"y_frac": -0.18
+},
+{
+"x_frac": 0.8,
+"y_frac": -0.18
+},
+{
+"x_frac": 1.12,
+"y_frac": -0.18
+},
+{
+"x_frac": 1.12,
+"y_frac": 0.635
+},
+{
+"x_frac": 0.8,
+"y_frac": 0.635
+},
+{
+"x_frac": 0.67,
+"y_frac": 0.635
+},
+{
+"x_frac": 0.53,
+"y_frac": 0.635
+},
+{
+"x_frac": 0.465,
+"y_frac": 0.631
+},
+{
+"x_frac": 0.406,
+"y_frac": 0.637
+},
+{
+"x_frac": 0.339,
+"y_frac": 0.642
+},
+{
+"x_frac": 0.22,
+"y_frac": 0.648
+},
+{
+"x_frac": 0.1,
+"y_frac": 0.65
+},
+{
+"x_frac": -0.12,
+"y_frac": 0.65
+}
+],
+"material": "Continuous dense background of closely spaced leafless grey-brown hardwood trees and intricate snow-coated twigs. Overlapping distant branches fill gaps behind the foreground crowns all the way beyond the top and side frame edges; mottled dark bark and white branch snow, not green leaves."
+},
+{
+"id": "left_low_snowy_scrub",
+"kind": "shrub",
+"x": -5,
+"y": 14,
+"crown_w": 7,
+"crown_d": 5,
+"crown_h": 2.2,
+"crown_base_h": 0,
+"trunk_w": 0.03,
+"lean_deg": 0,
+"lumpiness": 0.95,
+"outline": [
+{
+"x_frac": -0.04,
+"y_frac": 0.47
+},
+{
+"x_frac": 0.062,
+"y_frac": 0.498
+},
+{
+"x_frac": 0.13,
+"y_frac": 0.53
+},
+{
+"x_frac": 0.18,
+"y_frac": 0.559
+},
+{
+"x_frac": 0.254,
+"y_frac": 0.59
+},
+{
+"x_frac": 0.29,
+"y_frac": 0.635
+},
+{
+"x_frac": 0.17,
+"y_frac": 0.663
+},
+{
+"x_frac": 0.07,
+"y_frac": 0.681
+},
+{
+"x_frac": -0.04,
+"y_frac": 0.708
+}
+],
+"material": "Low tangled bare saplings and thin bent twigs protruding through deep snow, with small white snow ridges resting on branches."
+}
+],
+"primitives": [
+{
+"id": "foreground_right_trunk",
+"type": "tree",
+"shape": "cylinder",
+"x": 4.75,
+"y": 7.9,
+"z_offset": 0,
+"w": 0.35,
+"d": 0.35,
+"h": 11,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Dark rough grey-brown hardwood bark, with a vertical irregular stripe of white snow on the left-facing side."
+},
+{
+"id": "right_foreground_companion_trunks",
+"type": "tree",
+"shape": "cylinder",
+"x": 4.35,
+"y": 8.8,
+"z_offset": 0,
+"w": 0.17,
+"d": 0.17,
+"h": 10,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 3,
+"repeat_dx": 0.3,
+"repeat_dy": 0.9,
+"material": "Slender dark bare deciduous trunks with patchy white snow adhering to the bark."
+},
+{
+"id": "large_right_arch_support",
+"type": "tree",
+"shape": "cylinder",
+"x": 3.1,
+"y": 12.5,
+"z_offset": 0,
+"w": 0.52,
+"d": 0.5,
+"h": 13,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Mature dark brown-grey hardwood trunk with deeply textured bark and patches of snow at branch junctions."
+},
+{
+"id": "right_middle_slender_trees",
+"type": "tree",
+"shape": "cylinder",
+"x": 4.6,
+"y": 17,
+"z_offset": 0,
+"w": 0.2,
+"d": 0.2,
+"h": 12,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 4,
+"repeat_dx": 0.75,
+"repeat_dy": 2.6,
+"material": "Bare grey-brown deciduous trunks, intermittently edged with white snow."
+},
+{
+"id": "left_large_near_trunk",
+"type": "tree",
+"shape": "cylinder",
+"x": -9,
+"y": 18,
+"z_offset": 0,
+"w": 0.65,
+"d": 0.65,
+"h": 22,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Very dark coarse hardwood bark, partly concealed by dense snow-coated bare branches."
+},
+{
+"id": "left_roadside_trunk",
+"type": "tree",
+"shape": "cylinder",
+"x": -6.7,
+"y": 21,
+"z_offset": 0,
+"w": 0.32,
+"d": 0.32,
+"h": 14,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 1,
+"repeat_dx": 0,
+"repeat_dy": 0,
+"material": "Grey-brown rough bark with a narrow white snow stripe and snow at the foot."
+},
+{
+"id": "left_middle_tree_row",
+"type": "tree",
+"shape": "cylinder",
+"x": -7.2,
+"y": 19,
+"z_offset": 0,
+"w": 0.22,
+"d": 0.22,
+"h": 12.5,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 5,
+"repeat_dx": -0.25,
+"repeat_dy": 3.8,
+"material": "Closely spaced leafless hardwood trunks, dark grey-brown against white snow."
+},
+{
+"id": "right_inner_bend_trees",
+"type": "tree",
+"shape": "cylinder",
+"x": 0.9,
+"y": 26,
+"z_offset": 0,
+"w": 0.24,
+"d": 0.24,
+"h": 13,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 5,
+"repeat_dx": 0.65,
+"repeat_dy": 3.4,
+"material": "Dark slender deciduous trunks with small patches of snow and bare branching above."
+},
+{
+"id": "distant_left_trunk_rhythm",
+"type": "tree",
+"shape": "cylinder",
+"x": -7,
+"y": 38,
+"z_offset": 0,
+"w": 0.18,
+"d": 0.18,
+"h": 13,
+"roof_h": 0,
+"rot_z_deg": 0,
+"repeat": 6,
+"repeat_dx": 0.5,
+"repeat_dy": 4,
+"material": "Fine dark grey-brown winter woodland trunks, partially hidden by snow-laden twigs."
+}
+],
+"product_spot": {
+"x": -0.6,
+"y": 8,
+"rot_z_deg": -16,
+"on": "The compacted snow surface in the open centre of the woodland road.",
+"reason": "This visible foreground position sits between the snowbanks and aligns a car with the lane as it begins its gentle leftward bend."
+},
+"cliffs": [],
+"surface_zones": [],
+"_frame": {
+"w": 1600,
+"h": 900
+}
+}

@@ -824,6 +824,16 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.3 环境体块 › 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
+    ui_show_scene_blockout: BoolProperty(name="从参考图生成场景粗模", default=False)
+    sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；这张图只用于分析，不会发给生图模型",
+                                  subtype="FILE_PATH", default="")
+    sb_set_camera: BoolProperty(name="同时设置相机", default=True,
+                                description="按照片估计的机位高度、俯仰、视角新建 / 更新「Wondful 参考相机」并设为场景相机；"
+                                            "不勾选时不动任何相机，体块朝向跟随当前场景相机")
+    sb_correct: BoolProperty(name="自动校正一轮", default=False,
+                             description="搭好后从参考机位渲染粗模、和照片比对吻合度，再让 AI 修正一轮；吻合度变高才采用（多 1–2 分钟）")
+    last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
     # 1.2.0 环境体块 › 从三视图生成建筑体块 (visual hull of a building, into the massing collection)
     ui_show_massing_hull: BoolProperty(name="从三视图生成建筑体块", default=False)
     hull_input: EnumProperty(

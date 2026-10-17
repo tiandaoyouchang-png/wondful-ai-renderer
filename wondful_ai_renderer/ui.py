@@ -465,6 +465,45 @@ def _draw_massing(adv, context, props, busy):
     if coll is not None:
         _draw_block_refs(box, context, props, busy, blocks)
     _draw_massing_hull(box, props, busy)
+    _draw_scene_blockout(box, props, busy)
+
+
+def _draw_scene_blockout(box, props, busy):
+    """1.2.3 从参考图生成场景粗模: one environment photo → a whole blockout (Wondful 场景粗模)."""
+    sub = box.box()
+    if not _disclosure(sub.row(align=True), props, "ui_show_scene_blockout", "从参考图生成场景粗模", icon="WORLD"):
+        return
+    col = sub.column()
+    col.enabled = not busy
+    col.label(text="一张环境照片 → 地形 / 道路 / 建筑 / 树 / 远山体块", icon="INFO")
+    col.prop(props, "sb_image_path", text="参考图")
+    custom = (getattr(props, "sb_image_path", "") or "").strip()
+    first = ""
+    try:
+        items = list(getattr(props, "style_images", []) or [])
+        if items:
+            first = Path(getattr(items[0], "source_path", "") or getattr(getattr(items[0], "image", None), "filepath", "")
+                         or "").name
+    except Exception:
+        first = ""
+    if not custom:
+        col.label(text=f"留空：用 ③ 第一张「{first[:28]}」" if first else "留空：用 ③ 第一张环境参考图（现在还没有）",
+                  icon="BLANK1" if first else "ERROR")
+    row = col.row(align=True)
+    row.prop(props, "sb_set_camera", text="同时设置相机")
+    row.prop(props, "sb_correct", text="自动校正一轮")
+    col.label(text="参考图只用于分析，不发给生图模型；产品位置不变", icon="BLANK1")
+    build = col.row(align=True)
+    build.scale_y = 1.2
+    build.enabled = bool(custom or first)
+    build.operator("wondful.scene_blockout_build", text="从参考图生成场景粗模", icon="MOD_BUILD")
+    note = getattr(props, "last_sb_note", "")
+    if note:
+        bad = "失败" in note or "请先" in note or "不存在" in note or "需要" in note
+        for index, line in enumerate(wrap(note, width=44)[:4]):
+            col.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+    else:
+        col.label(text="约 3 分钟；重新生成会替换上一次的场景粗模", icon="BLANK1")
 
 
 def _draw_multiview(adv, context, props, busy):
@@ -611,7 +650,7 @@ def _draw_massing_hull(box, props, busy):
     build.operator("wondful.massing_hull_build", text="从三视图生成建筑体块", icon="MOD_BUILD")
     note = getattr(props, "last_hull_note", "")
     if note:
-        for index, line in enumerate(wrap(note, width=44)[:3]):
+        for index, line in enumerate(wrap(note, width=44)[:7 if "失败" in note else 3]):
             col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
     else:
         col.label(text="放在 3D 游标处、落在地面上，正立面朝 -Y", icon="BLANK1")
