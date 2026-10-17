@@ -528,8 +528,30 @@ def _conversation_ids(value) -> list[str]:
     return ids
 
 
+IMAGE_SUBAGENT = "image-generator"
+
+
+def _image_subagents(step) -> list[dict]:
+    """The built-in ``image-generator`` entries of an ``invoke_subagent`` step (AGY CLI ≥ 1.2.16)."""
+    if not isinstance(step, dict):
+        return []
+    if str(step.get("tool_name") or "").strip().lower() != "invoke_subagent":
+        return []
+    info = step.get("subagent_info")
+    subagents = info.get("subagents") if isinstance(info, dict) else None
+    out = []
+    for sub in subagents if isinstance(subagents, list) else []:
+        if isinstance(sub, dict) and str(sub.get("type_name") or "").strip().lower() == IMAGE_SUBAGENT:
+            out.append(sub)
+    return out
+
+
 def _generate_image_tool_info(events: list[dict]) -> tuple[list[dict], bool]:
-    """Return generate_image tool payloads and whether AGY invoked that tool."""
+    """Return image-generation tool payloads and whether AGY sent an image request.
+
+    Two shapes count: the direct ``generate_image`` tool (AGY < 1.2.16), and since 1.2.16 an
+    ``invoke_subagent`` step that starts the built-in ``image-generator`` subagent (its child
+    conversation id is in ``subagent_info.subagents[]``).  Other subagent types never count."""
     tool_steps: dict[tuple[str, object], dict] = {}
     tool_called = False
 
@@ -538,6 +560,8 @@ def _generate_image_tool_info(events: list[dict]) -> tuple[list[dict], bool]:
         if isinstance(value, dict):
             name = value.get("tool_name") or value.get("name")
             if isinstance(name, str) and name.strip().lower() == "generate_image":
+                tool_called = True
+            if _image_subagents(value):
                 tool_called = True
             for item in value.values():
                 walk_for_call(item)
@@ -548,7 +572,14 @@ def _generate_image_tool_info(events: list[dict]) -> tuple[list[dict], bool]:
     for event in events:
         walk_for_call(event)
         step = event.get("step_update") if event.get("event") == "step_update" else None
-        if not isinstance(step, dict) or step.get("step_type") != "tool":
+        if not isinstance(step, dict):
+            continue
+        if step.get("step_type") == "subagent" and _image_subagents(step):
+            tool_called = True   # the image request is out: never send a second one automatically
+            key = (str(step.get("conversation_id", "")), step.get("step_index", len(tool_steps)))
+            tool_steps[key] = step
+            continue
+        if step.get("step_type") != "tool":
             continue
         if str(step.get("tool_name") or "").strip().lower() != "generate_image":
             continue
@@ -675,10 +706,12 @@ Mask/Depth/Normal/Silhouette/Part-ID 都是确定性控制数据，不是最终�
     task = f"""
 你是 Wondful AI 渲染器的最终图像生成执行器。当前 Provider 是 Antigravity。
 
-【第一步硬约束】收到本消息后，第一条且唯一允许的工具调用必须是 `generate_image`。不要先调用 `list_dir`、`find_by_name`、`view_file`、`run_command`、Python、浏览器或任何其他工具；插件已经确认输入路径存在，generate_image 会自行读取图像。不要解释、规划或检查文件，直接按下面的 ImageName、ImagePaths 和 Prompt 调用生图工具。
-
-必须调用 Antigravity 内置的 `generate_image` 工具 **恰好一次** 来生成或编辑最终图片，不要用 Python、SVG、HTML、Blender render、外部 API 或 shell 命令伪造图像。
-内置 `generate_image` 支持 Prompt、ImageName、ImagePaths；请把下面所有图像路径放进 ImagePaths。
+【生图方式】优先用 `invoke_subagent` 调用 Antigravity 内置的 `image-generator` 子代理来生成或编辑最终图片，并等待它完成、拿到结果。
+- 只生成 **恰好一张** 图片：不要为了挑质量而重试，也不要生成多张候选。
+- 如果当前 CLI 版本没有 `image-generator` 子代理（较旧版本），可以直接调用内置的 `generate_image` 工具一次。
+- 插件已经确认输入路径存在，生图工具会自行读取图像；不需要先列出、查看或检查文件。
+- 不要用 Python、SVG、HTML、Blender render、外部 API 或 shell 命令伪造图像。
+- 把下面所有图像路径、ImageName 和完整的生成要求（含 Structure Lock 约束）原样交给 image-generator 子代理（或 generate_image 的 Prompt、ImageName、ImagePaths）。
 
 输入图像：
 {chr(10).join(semantic_lines) if semantic_lines else '- 无额外参考图'}
@@ -689,7 +722,7 @@ Mask/Depth/Normal/Silhouette/Part-ID 都是确定性控制数据，不是最终�
 - ImagePaths 只允许上述路径，不要追加图集内部的原始图像，也不要重复添加 Edit Base。
 - Prompt 必须完整包含下面的最终生成要求与 Structure Lock 约束。
 
-核心规则：Blender 负责 Structure，Antigravity generate_image 只负责 Appearance。
+核心规则：Blender 负责 Structure，Antigravity 生图（image-generator / generate_image）只负责 Appearance。
 Reference 1（若存在）是 Blender Camera Base，是原位编辑底图/构图基准；必须保持 Camera / Composition / Geometry / Position / Scale / Rotation / Perspective / Spatial Relationship。
 Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / Normal / Silhouette / Part-ID 分工提供确定性约束；产品图只补充身份与造型识别；环境／风格图决定产品受光；人物图只补充人物身份，均不能改写 Blender 构图。
 
@@ -703,9 +736,8 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
 {prompt.strip()}
 
 禁止：zoom、pan、crop、reframe、换机位、改变焦段观感、改变主体数量、重新安排产品位置。
-完成后请确保 generate_image 真正产生一个位图 Artifact。不要只回复文字描述。
-不要在调用 generate_image 之前读取或列出任何文件；本轮不需要额外的文件操作。
-最后只回复 `WONDFUL_ANTIGRAVITY_IMAGEGEN_OK`；如果 generate_image 不可用/被策略拒绝/失败，则以 `WONDFUL_ANTIGRAVITY_IMAGEGEN_UNAVAILABLE:` 开头说明原因。
+完成后请确保真正产生一个位图文件。不要只回复文字描述。
+成功时回复 `WONDFUL_ANTIGRAVITY_IMAGEGEN_OK`，并在同一条回复里写出生成图片的绝对路径；如果 image-generator 与 generate_image 都不可用/被策略拒绝/失败，则以 `WONDFUL_ANTIGRAVITY_IMAGEGEN_UNAVAILABLE:` 开头说明原因。
 """.strip()
 
     args = [
@@ -735,7 +767,7 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
         # Only generated tool outputs, complete stream events and the final
         # response may nominate artifacts. The tracker rejects echoed inputs or
         # images that predate this invocation.
-        candidate_objects = [info.get("output", {}) for info in tool_infos] + events + [response]
+        candidate_objects = tool_infos + events + [response]
         candidates = [target, workdir / target.name]
         for obj in candidate_objects:
             candidates.extend(_collect_image_candidates(obj, workdir))
@@ -773,6 +805,8 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
                         "engine": "antigravity_oauth_generate_image", "status": "ok",
                         "message": response, "source": str(candidate),
                         "tool_calls": len(tool_infos), "attached_images": len(staged_refs),
+                        "image_tool": ("image-generator" if any(_image_subagents(i) for i in tool_infos)
+                                       else "generate_image"),
                         "conversation_id": conversation_ids[-1] if conversation_ids else "",
                     }
                 except OSError:
@@ -782,13 +816,15 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
     accepted = accept_candidate_paths(candidates)
     # A model may spend its first turn inspecting the workspace and then hit a
     # non-interactive confirmation wall before it reaches generate_image. That
-    # turn has not consumed an image request, so one concise, no-tools-first
-    # retry is safe. Never retry after a generate_image tool call: doing so could
+    # turn has not consumed an image request, so one concise retry is safe.
+    # Never retry after a generate_image call or once the image-generator
+    # subagent has started (AGY ≥ 1.2.16): doing so could
     # double-charge a request whose artifact was merely stored elsewhere.
     if accepted is None and not tool_called:
         retry_task = (
-            "立即执行，不要调用任何其他工具。你的第一条且唯一的工具调用必须是 generate_image；"
-            "不要 list_dir、find_by_name、view_file、run_command 或解释。输入路径已由插件确认存在。\n\n"
+            "立即执行生图：优先用 invoke_subagent 调用内置的 image-generator 子代理并等待它完成；"
+            "旧版本没有该子代理时直接调用 generate_image 一次。只生成一张图，不要重试或生成候选。"
+            "输入路径已由插件确认存在，不需要先列出或查看文件。成功时回复成功标记和生成图片的绝对路径。\n\n"
             + task
         )
         retry_proc = run_task(retry_task)
@@ -824,9 +860,9 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
             "Antigravity generate_image 当前不可用或被权限/区域/账号策略拒绝。" + (f" {reason[:500]}" if reason else "")
         )
     if not tool_called:
-        detail = "本次 Agent turn 未调用 generate_image；插件已自动重试一次仍未得到位图。"
+        detail = "本次 Agent turn 未调用 image-generator 子代理或 generate_image；插件已自动重试一次仍未得到位图。"
     else:
-        detail = "本次已调用 generate_image，但 AGY 没有返回可读取的位图文件。"
+        detail = "本次已发出生图请求（image-generator 子代理或 generate_image），但 AGY 没有返回可读取的位图文件；为避免重复扣费未自动再次请求。"
     raise AntigravityImageGenerationUnavailable(
         "Antigravity 已完成 Agent turn，但没有找到 generate_image 产生的可读取位图。 "
         + detail + (f" 返回：{response[:500]}" if response else "")
