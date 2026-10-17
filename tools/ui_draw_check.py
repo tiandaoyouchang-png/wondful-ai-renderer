@@ -18,6 +18,7 @@ ZIP = argv[0]
 UI = bpy.types.UILayout.bl_rna
 ICONS = set(UI.functions["prop"].parameters["icon"].enum_items.keys())
 problems = []
+ADV_TABS = ("MODEL", "OUTPUT", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
 
 
 def _check_kwargs(fn, kwargs):
@@ -104,6 +105,10 @@ class FakeLayout:
         self._log.append(("  " * self._depth) + f"op {idname} {kw.get('icon', '')} {kw.get('text', '')}")
         return FakeOpProps(idname)
 
+    def progress(self, **kw):
+        _check_kwargs("progress", kw)
+        self._log.append(("  " * self._depth) + f"progress {kw.get('text', '')}")
+
     def template_icon(self, **kw):
         _check_kwargs("template_icon", kw)
         self._log.append(("  " * self._depth) + f"template_icon scale={kw.get('scale')}")
@@ -177,7 +182,12 @@ def main():
     props.ui_show_prompt = True
     props.ui_show_advanced = True
     draw("connected_refs")
-    # 1.1.0: 高级 › 地面 › 自定义 terrain box (presets, four corners, 坡顶 / 凹凸, pose toggle)
+    # 1.2.3: 高级 shows one tab at a time; every tab must draw cleanly in this state
+    for tab in ADV_TABS:
+        props.ui_adv_tab = tab
+        draw("connected_refs_tab_" + tab.lower())
+    # 1.1.0: 高级 › 场景 › 地面 › 自定义 terrain box (presets, four corners, 坡顶 / 凹凸, pose toggle)
+    props.ui_adv_tab = "SCENE"
     props.clay_ground = "CUSTOM"
     for preset in ("CREST", "TWIST", "TWIST_MIRROR", "BUMPY", "CLIMB", "DESCENT", "SIDE"):
         bpy.ops.wondful.terrain_preset(preset=preset)
@@ -406,6 +416,17 @@ def main():
                 problems.append(f"running {stage}: 取消 should replace the build button")
             if stage == SP.ANALYZE and "约 3–5 分钟" not in text:
                 problems.append("running ANALYZE: typical-time hint missing")
+            # 1.2.3: the running stage + bar stay visible in ⑤ whatever 高级 tab is open (or 高级 closed)
+            for tab in ADV_TABS + ("CLOSED",):
+                props.ui_show_advanced = tab != "CLOSED"
+                if tab != "CLOSED":
+                    props.ui_adv_tab = tab
+                tlog = "\n".join(draw(f"sb_running_{stage.lower()}_tab_{tab.lower()}"))
+                if f"场景粗模 · {SP.label(stage)} · 已用 1:42" not in tlog or "progress" not in tlog \
+                        or "op wondful.cancel_task" not in tlog:
+                    problems.append(f"running {stage}: ⑤ progress missing with tab {tab}")
+            props.ui_show_advanced = True
+            props.ui_adv_tab = "SCENE"
     props.ui_show_scene_blockout = False
     log = draw("scene_blockout_running_closed")
     if "分析参考图" not in "\n".join(log) and "已用" not in "\n".join(log):
@@ -422,7 +443,7 @@ def main():
     props.sb_failed_stage = SP.CORRECT
     props.last_sb_note = SP.failure_note(SP.CORRECT, 260, "网络超时")
     log = draw("scene_blockout_failed_stage")
-    if "ERROR 校正分析  ·  失败" not in "\n".join(log):
+    if "ERROR 校正分析 · 失败" not in "\n".join(log):
         problems.append("failed stage row missing")
     props.sb_failed_stage = ""
     props.status = "IDLE"
@@ -436,6 +457,7 @@ def main():
 
     # 4b. 1.2.3 多角度场景一致: closed, open without master, with master + selected cameras, after a run
     props.ui_show_multiview = True
+    props.ui_adv_tab = "MULTIVIEW"
     draw("multiview_empty")
     cam_data = bpy.data.cameras.new("mv_cam")
     master = bpy.data.objects.new("MV主视角", cam_data)
@@ -451,7 +473,7 @@ def main():
     log = draw("multiview_ready")          # empty list: falls back to the selected camera
     text = "\n".join(log)
     if "列表为空：用视图里选中的相机（1 个）" not in text or "渲染 1 个相机" not in text \
-            or "＋ 添加相机槽" not in text or "＋ 从当前视图新建相机" not in text:
+            or "添加相机槽" not in text or "从当前视图新建相机" not in text or "＋" in text:
         problems.append("multiview empty list: fallback hint / add buttons / count missing")
     # 3 slots: other, a second camera, the master (skipped)
     second = bpy.data.objects.new("MV侧面", cam_data.copy())
@@ -526,14 +548,38 @@ def main():
     draw("multiview_block_name_empty")
     props.ui_show_multiview = False
 
+    # 4c. 1.2.3: a 多角度 run reports in ⑤ (phase + bar, not the four 生成 stages) on every tab
+    props.status = "RENDERING"
+    props.task_phase = "多角度场景一致：MV其他（1/2）"
+    props.progress = 0.4
+    for tab in ADV_TABS:
+        props.ui_adv_tab = tab
+        text = "\n".join(draw("mv_running_tab_" + tab.lower()))
+        if "多角度场景一致：MV其他（1/2）" not in text or "progress" not in text or "读产品图" in text \
+                or "op wondful.cancel_task" not in text:
+            problems.append(f"multiview running: ⑤ progress wrong with tab {tab}")
+    props.status = "IDLE"
+    props.task_phase = ""
+    props.progress = 0.0
+
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"
     props.last_error = "测试错误：网络超时，请稍后重试。" * 3
+    for tab in ADV_TABS:
+        props.ui_adv_tab = tab
+        draw("error_tab_" + tab.lower())
     draw("error")
     props.analysis_provider = "ANTIGRAVITY"
     props.status = "AUTHENTICATING"
     props.auth_stage = "WAITING_CODE"
     draw("antigravity_auth")
+    for tab in ADV_TABS:
+        props.ui_adv_tab = tab
+        draw("antigravity_auth_tab_" + tab.lower())
+    props.status = "IDLE"
+    for tab in ADV_TABS:
+        props.ui_adv_tab = tab
+        draw("antigravity_tab_" + tab.lower())
 
     bpy.ops.preferences.addon_disable(module="wondful_ai_renderer")
     print("PROBLEMS", len(problems))

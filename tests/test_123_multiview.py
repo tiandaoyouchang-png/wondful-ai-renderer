@@ -302,7 +302,7 @@ class CameraList(unittest.TestCase):
         self.assertIn("picked = mv_pick(context, props, master)", body)
         self.assertIn("MV.order_views(", body)                          # nearest-to-master order kept
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        for text in ("＋ 添加相机槽", "＋ 从当前视图新建相机", 'f"相机 {n}"', 'text="启用"', 'f"渲染 {len(others)} 个相机"'):
+        for text in ("添加相机槽", "从当前视图新建相机", 'f"相机 {n}"', 'text="启用"', 'f"渲染 {len(others)} 个相机"'):
             self.assertIn(text, ui)
 
 

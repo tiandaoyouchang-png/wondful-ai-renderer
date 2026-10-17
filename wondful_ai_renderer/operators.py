@@ -4026,7 +4026,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
-            self.report({"ERROR"}, "多角度场景一致需要 Codex 图像编辑直连（高级 › AI 与模型）。")
+            self.report({"ERROR"}, "多角度场景一致需要 Codex 图像编辑直连（高级 › 模型）。")
             return {"CANCELLED"}
         master = getattr(props, "mv_master_camera", None)
         if master is None or master.type != "CAMERA" or master.name not in scene.objects:

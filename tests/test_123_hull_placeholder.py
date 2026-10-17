@@ -128,7 +128,7 @@ class LabelTests(unittest.TestCase):
     def test_ui_wiring(self):
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
         self.assertIn("MS.block_ref_label(obj.name, n, MS.is_scene_blockout_block(obj))", ui)
-        self.assertIn("选中一个占位立方体，新体块会放到它的位置并按它大小缩放", ui)
+        self.assertIn("选中占位立方体：新体块放到它的位置并按它缩放", ui)
         hull = (PKG / "massing_hull.py").read_text(encoding="utf-8")
         self.assertIn("已放到占位体", hull)
         self.assertIn("ph.hide_render = True", hull)

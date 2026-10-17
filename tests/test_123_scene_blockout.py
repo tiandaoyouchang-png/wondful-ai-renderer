@@ -271,11 +271,12 @@ class WiringTests(unittest.TestCase):
         main = ui.split("class WONDFUL_PT_main")[1]
         self.assertNotIn("scene_blockout", main)             # main panel unchanged
         self.assertIn('"wondful.scene_blockout_build", text="从参考图生成场景粗模"', ui)
-        for label in ("同时设置相机", "自动校正一轮", "参考图只用于分析，不发给生图模型"):
+        for label in ("同时设置相机", "自动校正一轮"):
             self.assertIn(label, ui)
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         self.assertIn("sb_set_camera: BoolProperty(name=\"同时设置相机\", default=True", props)
         self.assertIn("sb_correct: BoolProperty(name=\"自动校正一轮\", default=False", props)
+        self.assertIn("这张图只用于分析，不会发给生图模型", props)   # 1.2.3: the hint moved into the tooltip
 
     def test_operator_never_sends_reference_to_image_model(self):
         ops = (PKG / "operators.py").read_text(encoding="utf-8")

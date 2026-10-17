@@ -299,7 +299,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn('"完整（含干净背景）"', props)
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
         adv = ui.index('"ui_show_advanced", "高级"')
-        self.assertGreater(ui.index('"layered_output", text="分层输出"'), adv)
+        self.assertGreater(ui.index('_section(adv, "分层输出", "RENDERLAYERS", props, "layered_output")'), adv)
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
         self.assertIn('product_mask_path = (self._layers or {}).get("mask", "")', ops)
         self.assertIn("mask_path=product_mask_path", ops)

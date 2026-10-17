@@ -861,7 +861,7 @@ class WONDFUL_AISettings(PropertyGroup):
     hull_front_path: StringProperty(name="正视图", description="建筑正立面（白底或透明底）", subtype="FILE_PATH", default="")
     hull_side_path: StringProperty(name="侧视图", description="建筑侧立面（白底或透明底）", subtype="FILE_PATH", default="")
     hull_top_path: StringProperty(name="俯视图", description="从正上方看的平面轮廓（可选，白底或透明底）", subtype="FILE_PATH", default="")
-    hull_sheet_path: StringProperty(name="三视图拼图", description="正视 / 侧视 / 俯视排在一张图里", subtype="FILE_PATH", default="")
+    hull_sheet_path: StringProperty(name="三视图拼图", description="正视 / 侧视 / 俯视排在一张图里；三个视图之间要留白，拆不开时请改用分开的图", subtype="FILE_PATH", default="")
     hull_side_front: EnumProperty(
         name="侧视图正面朝向",
         items=[("LEFT", "正面朝左", "侧视图里建筑正立面在左边"),
@@ -927,6 +927,22 @@ class WONDFUL_AISettings(PropertyGroup):
     ui_show_person_refs: BoolProperty(name="人物参考图", default=False)
     ui_show_style_refs: BoolProperty(name="环境／风格参考图", default=True)
     ui_show_advanced: BoolProperty(name="高级设置", default=False)
+    # 1.2.3 UI tidy: 高级 shows one group at a time; level-3 tools that had no disclosure yet
+    ui_adv_tab: EnumProperty(
+        name="高级分组",
+        description="高级设置分组，一次只显示一组；正在运行的任务进度始终显示在 ⑤",
+        items=[
+            ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
+            ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
+            ("PRODUCT", "产品", "轮廓验收、细节回贴与产品外观锁定"),
+            ("SCENE", "场景", "地面 / 地形、环境体块、场景粗模、环境分析与人物参考"),
+            ("MULTIVIEW", "多角度", "多角度场景一致"),
+            ("DIAG", "诊断", "上次渲染、产品还原度、诊断信息与偏好设置"),
+        ],
+        default="MODEL",
+    )
+    ui_show_terrain: BoolProperty(name="自定义地形", default=True)
+    ui_show_block_refs: BoolProperty(name="建筑参考", default=True)
     ui_show_prompt: BoolProperty(name="提示词", default=False)
     alignment_score: FloatProperty(name="构图对齐分数", default=-1.0, min=-1.0, max=100.0)
     alignment_message: StringProperty(name="构图对齐说明", default="")

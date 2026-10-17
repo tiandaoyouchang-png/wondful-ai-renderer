@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textwrap import wrap
 import unicodedata
 
 import bpy
@@ -371,29 +370,172 @@ def _draw_progress_bar(layout, props, text):
         bar.prop(props, "progress", text=text, slider=True)
 
 
+# ---------------------------------------------------------------------------
+# 1.2.3 UI tidy: one text / header style for the whole panel
+#   level 0  step card ①–⑤            box · number (✓ when done) · title · right-hand tools
+#   level 1  高级                      box · disclosure · PREFERENCES · tab row (one group at a time)
+#   level 2  section inside a tab      box · icon + title, or switch (checkbox) + icon + title
+#   level 3  tool inside a section     nested box · disclosure · icon + title
+#   hints    ≤ 1 INFO line per section (long explanations live in the tooltips)
+#   notes    ✓ CHECKMARK done · ERROR failed · INFO advice · TIME running; wrapped by display cells
+# ---------------------------------------------------------------------------
+
+SEP = " · "
+ADV_TABS = ("MODEL", "OUTPUT", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
+NOTE_ICONS = {"ok": "CHECKMARK", "fail": "ERROR", "info": "INFO", "run": "TIME", "plain": "NONE"}
+_BREAK_AFTER = set(" ，。；：、）」》)/·→=")
+_NO_LINE_START = set("，。；：、）」》)·")
+
+
+def _cells(char):
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+
+def _width(text):
+    return sum(_cells(c) for c in text or "")
+
+
+def _wrap(text, cells):
+    """Wrap by display cells (CJK = 2). Breaks after CJK characters, spaces and punctuation, so Latin
+    words, paths and numbers are never cut in the middle; closing punctuation never starts a line."""
+    cells = max(8, int(cells))
+    out = []
+    for para in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line, brk = "", 0
+        for ch in para:
+            if line and _width(line) + _cells(ch) > cells and ch not in _NO_LINE_START and ch != " ":
+                cut = brk if 0 < brk < len(line) else len(line)
+                out.append(line[:cut].rstrip())
+                line = line[cut:].lstrip()
+                brk = 0
+                for i, c in enumerate(line):
+                    if c in _BREAK_AFTER or _cells(c) == 2:
+                        brk = i + 1
+            if not line and ch == " ":
+                continue
+            line += ch
+            if ch in _BREAK_AFTER or _cells(ch) == 2:
+                brk = len(line)
+        out.append(line)
+    if len(out) > 1 and _width(out[-1]) < cells // 4:
+        # avoid a one-word last line: re-wrap the whole text into balanced lines
+        total = _width(text)
+        balanced = _wrap(text, -(-total // len(out)) + 4) if -(-total // len(out)) + 4 < cells else out
+        if len(balanced) == len(out):
+            return balanced
+    return out or [""]
+
+
+def _cols(context, depth=2):
+    """Display cells that fit one label at this nesting depth (box padding + icon taken off)."""
+    region = getattr(context, "region", None)
+    width = float(getattr(region, "width", 0) or 330)
+    ui_scale = float(getattr(getattr(getattr(context, "preferences", None), "system", None), "ui_scale", 1.0) or 1.0)
+    usable = width / max(0.5, ui_scale) - 16.0 - 10.0 * depth - 20.0
+    return max(14, int(usable / 5.6))      # one cell ≈ half an 11 px CJK glyph
+
+
+def _lines(layout, text, icon, cells, max_lines=3):
+    """Draw ``text`` wrapped to ``cells``; the icon only on the first line, the rest aligned under it."""
+    lines = _wrap(text, cells)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and _width(last) + 2 > cells:
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "…"
+    col = layout.column(align=True)
+    for index, line in enumerate(lines):
+        col.label(text=line, icon=icon if index == 0 else ("NONE" if icon == "NONE" else "BLANK1"))
+    return col
+
+
+def _note(layout, text, cells, state="ok", max_lines=3):
+    """A status note: ✓ done · ERROR failed · INFO advice · TIME running · plain."""
+    if text:
+        _lines(layout, text, NOTE_ICONS.get(state, "INFO"), cells, max_lines)
+
+
+def _hint(layout, text, cells, max_lines=2):
+    """The one short explanation a section may carry (INFO)."""
+    if text:
+        _lines(layout, text, "INFO", cells, max_lines)
+
+
+def _state(note, fail=("失败",), info=()):
+    """ok / fail / info for a result note, by the words the pipeline writes into it."""
+    note = note or ""
+    if any(word in note for word in fail):
+        return "fail"
+    if any(word in note for word in info):
+        return "info"
+    return "ok"
+
+
+def _section(layout, title, icon, props=None, toggle=None, *, enabled=True):
+    """Level 2: a section inside an 高级 tab. Returns (box, header_row, on)."""
+    box = layout.box()
+    head = box.row(align=True)
+    if toggle:
+        switch = head.row(align=True)
+        switch.enabled = bool(enabled)
+        switch.prop(props, toggle, text=title, icon=icon)
+        return box, head, bool(getattr(props, toggle, False))
+    head.label(text=title, icon=icon)
+    return box, head, True
+
+
+def _subsection(layout, props, attr, title, icon):
+    """Level 3: a tool inside a section (nested box with a disclosure). Returns (box, opened)."""
+    box = layout.box()
+    return box, _disclosure(box.row(align=True), props, attr, title, icon=icon)
+
+
+def _draw_task_progress(layout, props, cells):
+    """⑤ while a task started from 高级 runs (多角度 / 场景粗模): what it does now + a bar, on every tab."""
+    pct = max(0, min(100, int(round(float(props.progress) * 100))))
+    phase = getattr(props, "task_phase", "") or ""
+    if props.status == "BLOCKOUT":
+        from . import sb_progress as SP
+        stage = getattr(props, "sb_stage", "") or SP.READ
+        text = ("正在取消，等待当前请求结束…" if "取消" in phase
+                else "场景粗模" + SEP + SP.status_text(stage, getattr(props, "sb_elapsed", 0)))
+        bar_text = f"{SP.label(stage)}{SEP}{pct}%"
+    else:
+        text = phase or "后台任务进行中"
+        bar_text = f"估算 {pct}%"
+    _note(layout, text, cells, "run", 2)
+    bar = layout.column()
+    bar.scale_y = 1.4
+    _draw_progress_bar(bar, props, bar_text)
+
+
+# ---------------------------------------------------------------------------
+# 高级 › 产品
+# ---------------------------------------------------------------------------
+
 def _draw_iou_gate(adv, context, props, busy):
-    """高级 › 轮廓验收 (1.2.3): fixed-coordinate IoU ≥ 0.95, bounded regeneration (≤ 3)."""
-    box = adv.box()
-    row = box.row(align=True)
-    row.enabled = not busy
-    row.prop(props, "iou_gate", text="轮廓验收 · 不过线自动重生成", icon="CHECKMARK")
-    if getattr(props, "iou_gate", True):
+    """高级 › 产品 › 轮廓验收 (1.2.3): fixed-coordinate IoU ≥ 0.95, bounded regeneration (≤ 3)."""
+    box, _head, on = _section(adv, "轮廓验收", "MOD_MASK", props, "iou_gate", enabled=not busy)
+    cells = _cols(context, 2)
+    if on:
         row = box.row(align=True)
         row.enabled = not busy
-        row.prop(props, "iou_gate_max", text="最多生成（次）")
-        box.label(text="IoU ≥ 0.95，固定坐标；通过即停，每次都从原始白模重画", icon="INFO")
+        row.prop(props, "iou_gate_max", text="最多生成次数")
+        _hint(box, "IoU ≥ 0.95，固定坐标；不过线自动重新生成", cells)
     note = getattr(props, "last_iou_note", "")
     if note:
-        icon = "CHECKMARK" if "通过（" in note and "未通过" not in note else "ERROR"
-        for index, line in enumerate(wrap(note, width=44)[:3]):
-            box.label(text=line, icon=icon if index == 0 else "BLANK1")
+        ok = "通过（" in note and "未通过" not in note
+        _note(box, note, cells, "ok" if ok else ("info" if "待复核" in note else "fail"))
 
 
 def _draw_detail_paste(adv, context, props, busy):
-    """高级 › 细节回贴 (1.2.0): toggle, strength, 「标为原样保留」 on selected parts."""
-    box = adv.box()
-    box.prop(props, "detail_paste", text="细节回贴", icon="BRUSH_DATA")
-    if getattr(props, "detail_paste", True):
+    """高级 › 产品 › 细节回贴 (1.2.0): toggle, strength, 按材质校色, 「标为原样保留」 on selected parts."""
+    box, _head, on = _section(adv, "细节回贴", "BRUSH_DATA", props, "detail_paste")
+    cells = _cols(context, 2)
+    if on:
         row = box.row(align=True)
         row.enabled = not busy
         row.prop(props, "detail_paste_strength", text="细节强度", slider=True)
@@ -402,20 +544,21 @@ def _draw_detail_paste(adv, context, props, busy):
         row.prop(props, "detail_colour_fix", text="按材质校色")
         if getattr(props, "detail_colour_fix", True):
             row.prop(props, "detail_colour_strength", text="强度", slider=True)
-        box.label(text="光照随 AI，文字 / Logo / 纹理用 Blender 的；原图存为 _raw", icon="INFO")
+        _hint(box, "光照随 AI；文字 / Logo / 纹理随 Blender", cells)
         coll = getattr(props, "product_collection", None)
         if coll is None:
-            box.label(text="需要先在 ② 选择产品集合", icon="ERROR")
+            _hint(box, "需要先在 ② 选择产品集合", cells)
         else:
             try:
                 from .viewport_capture import keep_exact_slots
                 slots = keep_exact_slots(coll)
                 objs = {o for (o, _i) in slots}
                 auto = {o for (o, _i), k in slots.items() if k == "auto"} - {o for (o, _i), k in slots.items() if k == "explicit"}
-                text = f"原样保留：{len(objs)} 个部件" + (f"（自动识别 {len(auto)}）" if auto else "") if objs else "原样保留：无（可选中车牌 / 标识后标记）"
+                text = (f"原样保留：{len(objs)} 个部件" + (f"（自动识别 {len(auto)}）" if auto else "")) if objs \
+                    else "原样保留：无 · 可选中车牌 / 标识后标记"
             except Exception:
                 text = "原样保留：—"
-            box.label(text=text, icon="LOCKED")
+            _lines(box, text, "LOCKED", cells, 2)
         try:
             from .operators import keep_exact_state
             selected, marked = keep_exact_state(context, props)
@@ -429,18 +572,77 @@ def _draw_detail_paste(adv, context, props, busy):
     note = getattr(props, "last_detail_note", "")
     if note:
         main, _sep, warn = note.partition(" · 注意：")
-        box.label(text=_short(main, 44), icon="ERROR" if ("失败" in main or "跳过" in main) else "CHECKMARK")
+        _note(box, main, cells, _state(main, info=("跳过",)), 2)
         if warn:  # 1.2.2: a plate / logo that reads mirrored in the model itself
-            for index, line in enumerate(wrap(warn, width=42)[:4]):
-                box.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
+            _note(box, "注意：" + warn, cells, "info", 4)
+
+
+def _draw_appearance_lock(adv, context, props, busy, has_product):
+    """高级 › 产品 › 产品外观锁定 (filled automatically from the product reference)."""
+    box, _head, _on = _section(adv, "产品外观锁定", "MATERIAL")
+    cells = _cols(context, 2)
+    box.prop(props, "color_source", text="配色来源")
+    box.prop(props, "product_look_prompt", text="产品外观")
+    box.prop(props, "identity_details", text="保留细节")
+    fill = box.row(align=True)
+    fill.enabled = has_product and not busy
+    fill.operator("wondful.autofill_product_look", text="按产品参考重新填写", icon="EYEDROPPER")
+    if getattr(props, "product_autofill_message", ""):
+        _note(box, props.product_autofill_message, cells, "ok", 2)
+    else:
+        _hint(box, "留空即可，生成时按产品参考自动填写", cells)
+
+
+# ---------------------------------------------------------------------------
+# 高级 › 场景
+# ---------------------------------------------------------------------------
+
+def _draw_ground(adv, context, props, prefs, is_antigravity):
+    """高级 › 场景 › 地面 (was hidden inside 「AI 与模型」): same conditions as before, only moved."""
+    box, _head, _on = _section(adv, "地面", "MESH_PLANE")
+    cells = _cols(context, 2)
+    used = (not is_antigravity) and getattr(prefs, "codex_direct_edit", True) and getattr(prefs, "codex_direct_simple", True)
+    if not used:
+        _hint(box, "只在 模型 › 图像编辑直连 + 简洁输入 时使用", cells)
+        return
+    ground = box.row(align=True)
+    ground.prop(props, "clay_ground", expand=True)
+    if getattr(props, "clay_ground", "AUTO") == "CREST":
+        ground.prop(props, "clay_crest_angle", text="下坡 °")
+    elif getattr(props, "clay_ground", "AUTO") == "CUSTOM":
+        _draw_terrain(box, props)
+
+
+def _draw_terrain(layout, props):
+    """1.1.0 自定义地形: presets + four product-relative corners + 坡顶 / 凹凸 + pose toggle."""
+    box, opened = _subsection(layout, props, "ui_show_terrain", "自定义地形", "MOD_DISPLACE")
+    if not opened:
+        return
+    for keys in (("CREST", "坡顶"), ("TWIST", "对角扭曲"), ("TWIST_MIRROR", "镜像扭曲"), ("BUMPY", "颠簸路面")), \
+            (("CLIMB", "爬坡"), ("DESCENT", "下坡"), ("SIDE", "侧坡")):
+        presets = box.row(align=True)
+        for key, label in keys:
+            presets.operator("wondful.terrain_preset", text=label).preset = key
+    col = box.column(align=True)
+    col.label(text="四角坡度 (°)：正 = 抬高 · 负 = 降低", icon="INFO")
+    for pair in (("fl", "fr"), ("bl", "br")):
+        row = col.row(align=True)
+        for key in pair:
+            row.prop(props, f"clay_terrain_{key}")
+    box.prop(props, "clay_terrain_crest", text="坡顶", slider=True)
+    box.prop(props, "clay_terrain_bump", text="凹凸", slider=True)
+    box.prop(props, "clay_terrain_follow", text="姿态跟随地形")
+    axis = box.row(align=True)
+    axis.label(text="产品正面")
+    axis.prop(props, "clay_terrain_front_axis", text="")
 
 
 def _draw_massing(adv, context, props, busy):
-    """高级 › 环境体块 (1.2.0): context-block collection, per-block 建筑参考, blocks from three views."""
-    box = adv.box()
-    box.prop(props, "massing_enabled", text="环境体块", icon="MESH_CUBE")
-    if not getattr(props, "massing_enabled", True):
+    """高级 › 场景 › 环境体块 (1.2.0): collection, per-block 建筑参考, blocks from three views, 场景粗模."""
+    box, _head, on = _section(adv, "环境体块", "MESH_CUBE", props, "massing_enabled")
+    if not on:
         return
+    cells = _cols(context, 2)
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "massing_collection", text="集合")
@@ -454,32 +656,113 @@ def _draw_massing(adv, context, props, busy):
         coll, blocks = None, []
     if coll is not None:
         how = "已选择" if getattr(props, "massing_collection", None) else "自动识别"
-        box.label(text=f"{how}：{coll.name} · {len(blocks)} 个体块", icon="CHECKMARK")
-        box.label(text="白模里显示为灰蓝色，AI 画成真实建筑；产品保持锁定", icon="INFO")
+        _note(box, f"{how}：{coll.name}{SEP}{len(blocks)} 个体块", cells, "ok", 2)
+        _hint(box, "白模里显示为灰蓝色，AI 画成真实建筑", cells)
     elif getattr(props, "massing_collection", None) is not None:
-        box.label(text="该集合与产品集合重叠，已忽略", icon="ERROR")
+        _note(box, "该集合与产品集合重叠，已忽略", cells, "info")
     else:
-        box.label(text="未找到：集合名含 环境 / 体块 / Context / Massing 即自动识别", icon="INFO")
+        _hint(box, "未找到 · 集合名含「环境」「体块」即自动识别", cells)
     if getattr(props, "last_massing_note", ""):
-        box.label(text=props.last_massing_note[:60], icon="BLANK1")
+        _note(box, props.last_massing_note, cells, "plain", 2)
     if coll is not None:
         _draw_block_refs(box, context, props, busy, blocks)
     _draw_massing_hull(box, props, busy)
     _draw_scene_blockout(box, props, busy)
 
 
+def _draw_block_refs(box, context, props, busy, blocks):
+    """建筑参考: the active block's 1–3 reference images, then every block with its ref count."""
+    from . import massing as MS
+    refs_box, opened = _subsection(box, props, "ui_show_block_refs", "建筑参考", "IMAGE_REFERENCE")
+    if not opened:
+        return
+    cells = _cols(context, 3)
+    active = getattr(context, "active_object", None)
+    root = MS.block_root(active, blocks)
+    col = refs_box.column()
+    col.enabled = not busy
+    if root is None:
+        _hint(col, "选中一个体块，添加 1–3 张建筑照片 / 效果图 / 草图", cells)
+    else:
+        refs = MS.get_refs(root)
+        _lines(col, f"当前体块：{root.name}{SEP}{len(refs)}/{MS.MAX_BLOCK_REFS} 张", "OBJECT_DATA", cells, 2)
+        for index, path in enumerate(refs):
+            line = col.row(align=True)
+            missing = not Path(bpy.path.abspath(path)).is_file()
+            line.label(text=_short(Path(path).name, 36), icon="ERROR" if missing else "FILE_IMAGE")
+            op = line.operator("wondful.block_ref_clear", text="", icon="X")
+            op.index = index
+        actions = col.row(align=True)
+        add = actions.row(align=True)
+        add.enabled = len(refs) < MS.MAX_BLOCK_REFS
+        add.operator("wondful.block_ref_add", text="添加参考图", icon="ADD")
+        clear = actions.row(align=True)
+        clear.enabled = bool(refs)
+        clear.operator("wondful.block_ref_clear", text="清空", icon="TRASH").index = -1
+    if blocks:
+        lst = refs_box.column(align=True)
+        for obj in blocks[:8]:
+            n = len(MS.get_refs(obj))
+            text = MS.block_ref_label(obj.name, n, MS.is_scene_blockout_block(obj))
+            op = lst.operator("wondful.block_select", text=text,
+                              icon="IMAGE_REFERENCE" if n else "MESH_CUBE", emboss=(obj == root))
+            op.name = obj.name
+        if len(blocks) > 8:
+            lst.label(text=f"另有 {len(blocks) - 8} 个体块…", icon="BLANK1")
+    _note(refs_box, f"每次生图最多带 {MS.MAX_BUILDING_IMAGES} 张，画面里大的体块优先", cells, "plain", 2)
+
+
+def _draw_massing_hull(box, props, busy):
+    """从三视图生成建筑体块: visual hull of a building into the massing collection."""
+    sub, opened = _subsection(box, props, "ui_show_massing_hull", "从三视图生成建筑体块", "HOME")
+    if not opened:
+        return
+    cells = _cols(bpy.context, 3)
+    col = sub.column()
+    col.enabled = not busy
+    col.row(align=True).prop(props, "hull_input", expand=True)
+    if getattr(props, "hull_input", "SEPARATE") == "SHEET":
+        col.prop(props, "hull_sheet_path", text="拼图")
+    else:
+        col.prop(props, "hull_front_path", text="正视")
+        col.prop(props, "hull_side_path", text="侧视")
+        col.prop(props, "hull_top_path", text="俯视")
+    col.prop(props, "hull_side_front", text="侧视朝向")
+    col.prop(props, "hull_top_front", text="俯视朝向")
+    col.row(align=True).prop(props, "hull_size_mode", expand=True)
+    if getattr(props, "hull_size_mode", "AUTO") == "MANUAL":
+        dims = col.row(align=True)
+        dims.prop(props, "hull_width", text="宽")
+        dims.prop(props, "hull_length", text="长")
+        dims.prop(props, "hull_height", text="高")
+    else:
+        known = col.row(align=True)
+        known.prop(props, "hull_known_axis", text="")
+        known.prop(props, "hull_known_value", text="")
+    col.prop(props, "hull_resolution", text="精度")
+    _hint(col, "选中占位立方体：新体块放到它的位置并按它缩放", cells)
+    build = col.row(align=True)
+    build.scale_y = 1.2
+    build.operator("wondful.massing_hull_build", text="从三视图生成建筑体块", icon="MOD_BUILD")
+    note = getattr(props, "last_hull_note", "")
+    if note:
+        _note(col, note, cells, _state(note), 5 if "失败" in note else 3)
+
+
 def _draw_scene_blockout(box, props, busy):
     """1.2.3 从参考图生成场景粗模: one environment photo → a whole blockout (Wondful 场景粗模)."""
-    sub = box.box()
-    if not _disclosure(sub.row(align=True), props, "ui_show_scene_blockout", "从参考图生成场景粗模", icon="WORLD"):
-        if props.status == "BLOCKOUT":
-            from . import sb_progress as SP
-            sub.label(text=SP.status_text(getattr(props, "sb_stage", "") or SP.READ, getattr(props, "sb_elapsed", 0)),
-                      icon="TIME")
+    from . import sb_progress as SP
+    sub, opened = _subsection(box, props, "ui_show_scene_blockout", "从参考图生成场景粗模", "WORLD")
+    cells = _cols(bpy.context, 3)
+    running = props.status == "BLOCKOUT"
+    if not opened:
+        if running:
+            _note(sub, SP.status_text(getattr(props, "sb_stage", "") or SP.READ, getattr(props, "sb_elapsed", 0)),
+                  cells, "run", 1)
         return
     col = sub.column()
     col.enabled = not busy
-    col.label(text="一张环境照片 → 地形 / 道路 / 建筑 / 树 / 远山体块", icon="INFO")
+    _hint(col, "一张环境照片 → 地形 / 道路 / 建筑 / 树 / 远山", cells)
     col.prop(props, "sb_image_path", text="参考图")
     custom = (getattr(props, "sb_image_path", "") or "").strip()
     first = ""
@@ -491,14 +774,13 @@ def _draw_scene_blockout(box, props, busy):
     except Exception:
         first = ""
     if not custom:
-        col.label(text=f"留空：用 ③ 第一张「{first[:28]}」" if first else "留空：用 ③ 第一张环境参考图（现在还没有）",
-                  icon="BLANK1" if first else "ERROR")
+        if first:
+            _note(col, f"留空 = 用 ③ 第一张「{_short(first, 24)}」", cells, "plain", 2)
+        else:
+            _note(col, "留空 = 用 ③ 第一张环境参考图（现在还没有）", cells, "info", 2)
     row = col.row(align=True)
     row.prop(props, "sb_set_camera", text="同时设置相机")
     row.prop(props, "sb_correct", text="自动校正一轮")
-    col.label(text="参考图只用于分析，不发给生图模型；产品位置不变", icon="BLANK1")
-    from . import sb_progress as SP
-    running = props.status == "BLOCKOUT"
     failed = (getattr(props, "sb_failed_stage", "") or "") if not running else ""
     if running or failed:
         _draw_sb_progress(sub, props, running, failed, SP)
@@ -514,11 +796,9 @@ def _draw_scene_blockout(box, props, busy):
     build.operator("wondful.scene_blockout_build", text="从参考图生成场景粗模", icon="MOD_BUILD")
     note = getattr(props, "last_sb_note", "")
     if note:
-        bad = "失败" in note or "请先" in note or "不存在" in note or "需要" in note or "取消" in note
-        for index, line in enumerate(wrap(note, width=44)[:4]):
-            col.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+        _note(col, note, cells, _state(note, fail=("失败", "不存在"), info=("请先", "需要", "取消")), 4)
     else:
-        col.label(text="约 3–5 分钟；重新生成会替换上一次的场景粗模", icon="BLANK1")
+        _note(col, "约 3–5 分钟；重新生成会替换上一次的场景粗模", cells, "plain", 2)
 
 
 def _draw_sb_progress(layout, props, running, failed, SP):
@@ -531,7 +811,7 @@ def _draw_sb_progress(layout, props, running, failed, SP):
     for name, icon, active in SP.row_icons(ids, stage, failed):
         cell = stages.row(align=True)
         cell.active = active
-        suffix = "  ·  进行中" if (running and icon == "PLAY") else ("  ·  失败" if icon == "ERROR" else "")
+        suffix = SEP + "进行中" if (running and icon == "PLAY") else (SEP + "失败" if icon == "ERROR" else "")
         cell.label(text=name + suffix, icon=icon)
     if not running:
         return
@@ -542,18 +822,50 @@ def _draw_sb_progress(layout, props, running, failed, SP):
         layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
     tip = SP.hint(stage)
     if tip:
-        layout.label(text=tip, icon="INFO")
+        _hint(layout, tip, _cols(bpy.context, 3))
     bar = layout.column()
     bar.scale_y = 1.2
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
-    _draw_progress_bar(bar, props, f"{SP.label(stage)} · {pct}%")
+    _draw_progress_bar(bar, props, f"{SP.label(stage)}{SEP}{pct}%")
 
+
+def _draw_style_summary(adv, context, props):
+    """高级 › 场景 › 环境分析 (editable; used the next time the prompt is written)."""
+    box, _head, _on = _section(adv, "环境分析", "LIGHT_SUN")
+    box.prop(props, "style_summary_cache", text="")
+    _hint(box, "可直接修改，下次写提示词时使用", _cols(context, 2))
+
+
+def _draw_person_refs(adv, context, props, busy):
+    """高级 › 场景 › 人物参考: same cards and tools as ③; Jev sorts all references by content."""
+    box, head, _on = _section(adv, "人物参考", "ARMATURE_DATA")
+    cells = _cols(context, 2)
+    images = props.person_images
+    tools = head.row(align=True)
+    tools.alignment = "RIGHT"
+    _reference_header_tools(tools, images, "PERSON")
+    if not images:
+        _draw_reference_empty(box, "PERSON", ("可选 · 第一张作为主参考，最多 8 张",))
+    else:
+        for index, item in enumerate(images):
+            _draw_secondary_reference(box, context, item, index, "PERSON",
+                                      caption=f"人物 {index + 1}" + ("（主参考）" if index == 0 else ""),
+                                      caption_icon="IMAGE_DATA", placeholder="参考什么", movable=True)
+    total = len(props.product_images) + len(props.person_images) + len(props.style_images)
+    if total > 0 and not busy:
+        box.operator("wondful.auto_classify_references", text="按内容整理参考图（Jev）", icon="SORTALPHA")
+    if getattr(props, "jev_status_message", ""):
+        _note(box, props.jev_status_message, cells, "info", 2)
+
+
+# ---------------------------------------------------------------------------
+# 高级 › 多角度
+# ---------------------------------------------------------------------------
 
 def _draw_multiview(adv, context, props, busy):
-    """高级 › 多角度场景一致 (1.2.3): master camera + its accepted image, render the other selected cameras."""
-    box = adv.box()
-    if not _disclosure(box.row(align=True), props, "ui_show_multiview", "多角度场景一致", icon="OUTLINER_OB_CAMERA"):
-        return
+    """高级 › 多角度 › 多角度场景一致 (1.2.3): master camera + its accepted image, render the other cameras."""
+    box, _head, _on = _section(adv, "多角度场景一致", "OUTLINER_OB_CAMERA")
+    cells = _cols(context, 2)
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "mv_master_camera", text="主视角")
@@ -562,8 +874,6 @@ def _draw_multiview(adv, context, props, busy):
     row.enabled = not busy
     row.prop(props, "mv_master_image", text="主视角图")
     master = getattr(props, "mv_master_camera", None)
-    if master is None:
-        box.label(text="先用 ⑤ 渲染一个满意的相机，再点「设为主视角」", icon="INFO")
     try:
         from .operators import mv_pick
         picked = mv_pick(context, props, master)
@@ -577,20 +887,22 @@ def _draw_multiview(adv, context, props, busy):
     row.enabled = not busy
     row.prop(props, "mv_widen", text="加宽体块")
     row.prop(props, "mv_env_check", text="环境一致性检查")
-    box.label(text="离主视角最近的先渲染；每个相机 1 次生图，产品超标最多重试 1 次", icon="INFO")
+    if master is None:
+        _hint(box, "先用 ⑤ 渲染满意的一张，再点「设为主视角」", cells)
+    else:
+        _hint(box, "每个相机 1 次生图；产品超标最多重试 1 次", cells)
     act = box.row(align=True)
+    act.scale_y = 1.2
     act.enabled = bool(master is not None and others) and not busy
-    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机",
-                 icon="RENDER_STILL")
+    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机", icon="RENDER_STILL")
     note = getattr(props, "last_mv_note", "")
     if note:
-        bad = ("失败" in note) or ("未完成" in note) or ("超标" in note) or ("注意" in note)
-        for index, line in enumerate(wrap(note, width=44)[:5]):
-            box.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+        _note(box, note, cells, _state(note, fail=("失败", "未完成"), info=("超标", "注意", "生成中")), 5)
 
 
 def _draw_mv_cameras(box, context, props, busy, picked):
     """「相机 1/2/3…」 rows (camera picker + 启用 + ✕), 添加相机槽 / 从当前视图新建相机; no rows = selected cameras."""
+    cells = _cols(context, 2)
     cams = box.column(align=True)
     cams.enabled = not busy
     slots = list(getattr(props, "mv_cameras", []) or [])
@@ -610,14 +922,14 @@ def _draw_mv_cameras(box, context, props, busy, picked):
         if n in why:
             cams.label(text=f"相机 {n}：{why[n]}", icon="ERROR" if n in picked.get("missing", []) else "INFO")
     add = cams.row(align=True)
-    add.operator("wondful.mv_camera_add", text="＋ 添加相机槽", icon="ADD")
-    add.operator("wondful.mv_camera_from_view", text="＋ 从当前视图新建相机", icon="VIEW_CAMERA")
+    add.operator("wondful.mv_camera_add", text="添加相机槽", icon="ADD")
+    add.operator("wondful.mv_camera_from_view", text="从当前视图新建相机", icon="VIEW_CAMERA")
     count = len(picked.get("cameras", []))
     if picked.get("source") == "selected":
-        box.label(text=f"列表为空：用视图里选中的相机（{count} 个）" + ("，或添加相机槽" if not count else ""),
-                  icon="CHECKMARK" if count else "INFO")
+        _note(box, f"列表为空：用视图里选中的相机（{count} 个）" + ("，或添加相机槽" if not count else ""),
+              cells, "ok" if count else "info", 2)
     elif not count:
-        box.label(text="在「相机 N」里选相机并勾选启用", icon="INFO")
+        _hint(box, "在「相机 N」里选相机并勾选启用", cells)
 
 
 def _draw_mv_block_name(box, context, props, busy):
@@ -643,117 +955,9 @@ def _draw_mv_block_name(box, context, props, busy):
         except Exception:
             hint, src = "", ""
         if hint and src != "custom":
-            box.label(text=f"自动：{hint}"[:48], icon="BLANK1")
+            _note(box, f"自动：{hint}", _cols(context, 2), "plain", 1)
         elif not hint:
-            box.label(text="留空：生图时按尺寸和位置自动命名", icon="BLANK1")
-
-
-def _draw_block_refs(box, context, props, busy, blocks):
-    """建筑参考: the active block's 1–3 reference images, then every block with its ref count."""
-    from . import massing as MS
-    refs_box = box.box()
-    refs_box.label(text="建筑参考（真实建筑照片 / 效果图 / 概念草图）", icon="IMAGE_REFERENCE")
-    active = getattr(context, "active_object", None)
-    root = MS.block_root(active, blocks)
-    col = refs_box.column()
-    col.enabled = not busy
-    if root is None:
-        col.label(text="选中一个体块后可添加 1–3 张参考图", icon="INFO")
-    else:
-        refs = MS.get_refs(root)
-        col.label(text=f"当前体块：{root.name} · {len(refs)}/{MS.MAX_BLOCK_REFS} 张", icon="OBJECT_DATA")
-        for index, path in enumerate(refs):
-            line = col.row(align=True)
-            missing = not Path(bpy.path.abspath(path)).is_file()
-            line.label(text=Path(path).name[:40], icon="ERROR" if missing else "FILE_IMAGE")
-            op = line.operator("wondful.block_ref_clear", text="", icon="X")
-            op.index = index
-        actions = col.row(align=True)
-        add = actions.row(align=True)
-        add.enabled = len(refs) < MS.MAX_BLOCK_REFS
-        add.operator("wondful.block_ref_add", text="添加参考图", icon="ADD")
-        clear = actions.row(align=True)
-        clear.enabled = bool(refs)
-        clear.operator("wondful.block_ref_clear", text="清空", icon="TRASH").index = -1
-    if blocks:
-        lst = refs_box.column(align=True)
-        for obj in blocks[:8]:
-            n = len(MS.get_refs(obj))
-            text = MS.block_ref_label(obj.name, n, MS.is_scene_blockout_block(obj))
-            op = lst.operator("wondful.block_select", text=text,
-                              icon="IMAGE_REFERENCE" if n else "MESH_CUBE", emboss=(obj == root))
-            op.name = obj.name
-        if len(blocks) > 8:
-            lst.label(text=f"… 另有 {len(blocks) - 8} 个体块", icon="BLANK1")
-    refs_box.label(text=f"每次生图最多带 {MS.MAX_BUILDING_IMAGES} 张，画面里大的体块优先", icon="BLANK1")
-
-
-def _draw_massing_hull(box, props, busy):
-    """从三视图生成建筑体块: visual hull of a building into the massing collection."""
-    sub = box.box()
-    if not _disclosure(sub.row(align=True), props, "ui_show_massing_hull", "从三视图生成建筑体块", icon="HOME"):
-        return
-    col = sub.column()
-    col.enabled = not busy
-    col.label(text="建筑立面 / 侧面 / 平面轮廓 → 灰蓝体块，三视图自动作为它的参考", icon="INFO")
-    col.row(align=True).prop(props, "hull_input", expand=True)
-    if getattr(props, "hull_input", "SEPARATE") == "SHEET":
-        col.prop(props, "hull_sheet_path", text="拼图")
-        col.label(text="三个视图之间要留白；拆不开时请改用分开的图", icon="BLANK1")
-    else:
-        col.prop(props, "hull_front_path", text="正视")
-        col.prop(props, "hull_side_path", text="侧视")
-        col.prop(props, "hull_top_path", text="俯视")
-        col.label(text="白底或透明底 JPG / PNG；俯视图可不填", icon="BLANK1")
-    row = col.row(align=True)
-    row.label(text="侧视")
-    row.prop(props, "hull_side_front", text="")
-    row.label(text="俯视")
-    row.prop(props, "hull_top_front", text="")
-    col.row(align=True).prop(props, "hull_size_mode", expand=True)
-    if getattr(props, "hull_size_mode", "AUTO") == "MANUAL":
-        dims = col.row(align=True)
-        dims.prop(props, "hull_width", text="宽")
-        dims.prop(props, "hull_length", text="长")
-        dims.prop(props, "hull_height", text="高")
-    else:
-        known = col.row(align=True)
-        known.prop(props, "hull_known_axis", text="")
-        known.prop(props, "hull_known_value", text="")
-    col.prop(props, "hull_resolution", text="精度")
-    build = col.row(align=True)
-    build.scale_y = 1.2
-    build.operator("wondful.massing_hull_build", text="从三视图生成建筑体块", icon="MOD_BUILD")
-    col.label(text="选中一个占位立方体，新体块会放到它的位置并按它大小缩放", icon="INFO")
-    note = getattr(props, "last_hull_note", "")
-    if note:
-        for index, line in enumerate(wrap(note, width=44)[:7 if "失败" in note else 3]):
-            col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
-    else:
-        col.label(text="没选占位体时放在 3D 游标处、落在地面上，正立面朝 -Y", icon="BLANK1")
-
-
-def _draw_terrain(layout, props):
-    """1.1.0 自定义地形: presets + four product-relative corners + 坡顶 / 凹凸 + pose toggle."""
-    box = layout.box()
-    box.label(text="自定义地形（相对产品自身的前后左右）", icon="MOD_DISPLACE")
-    for keys in (("CREST", "坡顶"), ("TWIST", "对角扭曲"), ("TWIST_MIRROR", "镜像扭曲"), ("BUMPY", "颠簸路面")), \
-            (("CLIMB", "爬坡"), ("DESCENT", "下坡"), ("SIDE", "侧坡")):
-        presets = box.row(align=True)
-        for key, label in keys:
-            presets.operator("wondful.terrain_preset", text=label).preset = key
-    col = box.column(align=True)
-    col.label(text="四角地面坡度（°）：正 = 该角抬高，负 = 降低")
-    for pair in (("fl", "fr"), ("bl", "br")):
-        row = col.row(align=True)
-        for key in pair:
-            row.prop(props, f"clay_terrain_{key}")
-    box.prop(props, "clay_terrain_crest", text="坡顶", slider=True)
-    box.prop(props, "clay_terrain_bump", text="凹凸", slider=True)
-    box.prop(props, "clay_terrain_follow", text="姿态跟随地形")
-    axis = box.row(align=True)
-    axis.label(text="产品正面")
-    axis.prop(props, "clay_terrain_front_axis", text="")
+            _note(box, "留空：生图时按尺寸和位置自动命名", _cols(context, 2), "plain", 1)
 
 
 class WONDFUL_PT_main(Panel):
@@ -764,12 +968,13 @@ class WONDFUL_PT_main(Panel):
     bl_category = "Wondful AI"
 
     def draw(self, context):
-        """3.2.0: five step cards (连接 / 产品三视图（可选） / 环境参考图 / 提示词 / 生成); the rest in 高级."""
+        """3.2.0: five step cards (连接 / 产品三视图（可选） / 环境参考图 / 提示词 / 生成); the rest in 高级 (tabs, 1.2.3)."""
         from .operators import generate_needs_polish
         layout = self.layout
         props = context.scene.wondful_ai
         prefs = _prefs(context)
         busy = props.status in BUSY_STATUSES
+        cells = _cols(context, 1)
 
         active_is_antigravity = props.analysis_provider == "ANTIGRAVITY"
         state = props.antigravity_account_state if active_is_antigravity else props.codex_account_state
@@ -814,18 +1019,17 @@ class WONDFUL_PT_main(Panel):
             if active_is_antigravity:
                 connect.operator("wondful.antigravity_terminal", text="Google 登录", icon="USER")
                 connect.operator("wondful.antigravity_login", text="验证登录", icon="CHECKMARK")
-                step1.label(text="终端和浏览器里登录完，回来点验证登录。", icon="INFO")
+                _hint(step1, _t("在终端和浏览器里登录后，回来点「验证登录」"), cells)
             else:
                 connect.operator("wondful.codex_login", text="使用 ChatGPT 登录", icon="USER")
             if state == "NOT_INSTALLED":
-                step1.label(text="已装 Codex 仍找不到？在高级 › 插件偏好设置里填路径。", icon="INFO")
+                _hint(step1, _t("已装 Codex 仍找不到？在 高级 › 诊断 › 偏好设置 里填路径"), cells)
             elif account_message:
-                step1.label(text=_short(account_message, 60), icon="BLANK1")
+                _note(step1, account_message, cells, "plain", 2)
         if props.status == "AUTHENTICATING":
             auth = step1.box()
             if active_is_antigravity:
-                for line in wrap(props.auth_detail or "正在连接 AGY", width=38):
-                    auth.label(text=line)
+                _lines(auth, props.auth_detail or _t("正在连接 AGY"), "TIME", _cols(context, 2), 4)
                 if props.auth_has_url:
                     auth.operator("wondful.antigravity_auth_browser", text="打开本次登录页", icon="URL")
                 if props.auth_stage == "WAITING_CODE":
@@ -853,7 +1057,7 @@ class WONDFUL_PT_main(Panel):
                                             placeholder="造型重点（可选）", movable=False)
                 else:
                     extra = step2.row(align=True)
-                    extra.label(text=f"未使用 · {_short(item.image.name if item.image else '无效图片', 16)}", icon="ERROR")
+                    extra.label(text=f"未使用{SEP}{_short(item.image.name if item.image else '无效图片', 16)}", icon="INFO")
                     remove = extra.operator("wondful.clear_reference", text="", icon="X")
                     remove.ref_kind, remove.item_index = "PRODUCT", index
         if not props.product_collection:
@@ -861,7 +1065,7 @@ class WONDFUL_PT_main(Panel):
         target = step2.row(align=True)
         target.prop(props, "product_collection", text="", icon="OUTLINER_COLLECTION")
         if not camera:
-            step2.label(text="场景里还没有活动相机", icon="ERROR")
+            _hint(step2, "场景里还没有活动相机", cells)
 
         # ---- ③ 环境参考图 -------------------------------------------------------
         step3, tools = _step_card(layout, 3, "环境参考图", done=has_style, ready=connected and product_done)
@@ -909,9 +1113,9 @@ class WONDFUL_PT_main(Panel):
             prompt_box.prop(props, "prompt_expanded", text="收起" if props.prompt_expanded else "展开全文", emboss=False)
             _draw_prompt_editor(prompt_box, props, columns)
             if props.prompt_notice:
-                prompt_box.label(text=props.prompt_notice[:100], icon="INFO")
+                _note(prompt_box, props.prompt_notice, cells, "info", 2)
             if getattr(props, "prompt_removed_notice", ""):
-                prompt_box.label(text=props.prompt_removed_notice[:100], icon="TRASH")
+                _lines(prompt_box, props.prompt_removed_notice, "TRASH", cells, 2)
             polish = prompt_box.row(align=True)
             polish.enabled = bool(not busy and connected)
             polish.operator("wondful.polish_prompt", text="只重写提示词", icon="TEXT")
@@ -923,7 +1127,11 @@ class WONDFUL_PT_main(Panel):
             _fit(tools, 3)
             tools.label(text="分两步")
         generating = props.status in {"POLISHING", "RENDERING"}
-        if generating:
+        # 1.2.3: tasks started from 高级 (多角度 renders, 场景粗模) report here too, whatever tab is open
+        side_task = props.status == "BLOCKOUT" or (generating and (props.task_phase or "").startswith("多角度"))
+        if side_task:
+            _draw_task_progress(step5, props, cells)
+        elif generating:
             current = _stage_index(props)
             stages = step5.column(align=True)
             stages.scale_y = 0.8
@@ -931,10 +1139,10 @@ class WONDFUL_PT_main(Panel):
                 icon = "CHECKMARK" if index < current else ("PLAY" if index == current else "RADIOBUT_OFF")
                 cell = stages.row(align=True)
                 cell.active = index <= current
-                cell.label(text=name + ("  ·  进行中" if index == current else ""), icon=icon)
+                cell.label(text=name + (SEP + "进行中" if index == current else ""), icon=icon)
             pct = max(0, min(100, int(round(float(props.progress) * 100))))
             phase = getattr(props, "task_phase", "") or GENERATE_STAGES[max(0, current)]
-            step5.label(text=phase, icon="TIME")
+            _note(step5, phase, cells, "run", 2)
             bar = step5.column()
             bar.scale_y = 1.4
             _draw_progress_bar(bar, props, f"估算 {pct}%")
@@ -950,14 +1158,14 @@ class WONDFUL_PT_main(Panel):
             count_row.prop(props, "render_count", expand=True)
             cap = provider_variant_cap("antigravity" if active_is_antigravity else "codex")
             if int(props.render_count) > cap:
-                step5.label(text=f"Antigravity 每次最多 {cap} 张，将生成 {cap} 张", icon="INFO")
+                _hint(step5, f"Antigravity 每次最多 {cap} 张，将生成 {cap} 张", cells)
             go = step5.row(align=True)
             go.scale_y = 2.0
             go.enabled = can_generate
             go.operator("wondful.generate", text=go_text, icon="RENDER_STILL")
         if busy:
-            if props.status not in {"POLISHING", "RENDERING"}:
-                step5.label(text=_short(getattr(props, "task_phase", "") or "后台任务进行中", 40), icon="TIME")
+            if props.status not in {"POLISHING", "RENDERING"} and not side_task:
+                _note(step5, getattr(props, "task_phase", "") or "后台任务进行中", cells, "run", 2)
             cancel_row = step5.row(align=True)
             cancel_row.scale_y = 1.2
             cancel_row.operator("wondful.cancel_task", text="取消", icon="CANCEL")
@@ -968,20 +1176,18 @@ class WONDFUL_PT_main(Panel):
                 "先在 ② 选择产品集合" if not structure_ready else
                 "ImageGen 已在偏好设置里关闭" if not imagegen_enabled else "")
             if next_step:
-                step5.label(text=next_step, icon="INFO")
+                _hint(step5, next_step, cells)
         if getattr(props, "model_notice", ""):
-            for index, line in enumerate(wrap(props.model_notice, width=42)[:3]):
-                step5.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
+            _note(step5, props.model_notice, cells, "info", 3)
         if props.status == "ERROR" and props.last_error:
             err = step5.box()
-            lines = wrap(props.last_error, width=42)[:6]
-            for index, line in enumerate(lines):
-                err.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
+            _note(err, props.last_error, _cols(context, 2), "fail", 6)
             err.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
 
         # ---- 结果（属于 ⑤）------------------------------------------------------
         provider_variant_count = render_variant_count("antigravity" if active_is_antigravity else "codex", props)
         if props.result_image:
+            rcells = _cols(context, 2)
             result = step5.box()
             title = result.row(align=True)
             title.label(text="结果", icon="IMAGE_DATA")
@@ -990,191 +1196,170 @@ class WONDFUL_PT_main(Panel):
                 score = title.row(align=True)
                 score.alignment = "RIGHT"
                 _fit(score, 3.6)
-                score.label(text=f"对齐 {props.alignment_score:.0f}", icon="CHECKMARK" if ok else "ERROR")
+                score.label(text=f"对齐 {props.alignment_score:.0f}", icon="CHECKMARK" if ok else "INFO")
             _draw_thumbnail(result, props.result_image, _thumb_scale(context, 1.0, hi=18.0))
             exported_count = max(0, int(getattr(props, "variant_count", 0)))
             if props.status == "RENDERING" and props.last_export_path:
-                result.label(text=f"已完成 {exported_count}/{provider_variant_count} 张，继续生成中", icon="TIME")
+                _note(result, f"已完成 {exported_count}/{provider_variant_count} 张，继续生成中", rcells, "run", 1)
             elif exported_count > 1:
-                result.label(text=f"共 {exported_count} 张，预览为最佳一张", icon="INFO")
+                _note(result, f"共 {exported_count} 张，预览为最佳一张", rcells, "plain", 1)
             engine_note = getattr(props, "last_engine_note", "")
             if engine_note:
-                fell_back = "改用" in engine_note
-                for index, line in enumerate(wrap(engine_note, width=42)[:2]):
-                    result.label(text=line, icon=("ERROR" if fell_back else "CHECKMARK") if index == 0 else "BLANK1")
+                _note(result, engine_note, rcells, "info" if "改用" in engine_note else "ok", 2)
             layers_note = getattr(props, "last_layers_note", "")
             if layers_note:
-                result.label(text=_short(layers_note, 42), icon="ERROR" if "失败" in layers_note else "RENDERLAYERS")
+                _note(result, layers_note, rcells, _state(layers_note), 2)
             detail_note = getattr(props, "last_detail_note", "")
             if "镜像" in detail_note:
-                result.label(text="车牌 / 标识在模型里是镜像的，见 高级 › 细节回贴", icon="ERROR")
+                _note(result, "车牌 / 标识在模型里是镜像的，见 高级 › 产品 › 细节回贴", rcells, "info", 2)
             if detail_note and ("完成" in detail_note or "失败" in detail_note or "跳过" in detail_note):
-                result.label(text=_short(detail_note, 42),
-                             icon="ERROR" if ("失败" in detail_note or "跳过" in detail_note) else "BRUSH_DATA")
+                _note(result, detail_note.partition(" · 注意：")[0], rcells, _state(detail_note, info=("跳过",)), 2)
             again = result.row(align=True)
             again.scale_y = 1.4
             again.enabled = not busy
             again.operator("wondful.ai_render", text="再来一张", icon="FILE_REFRESH")
             actions = result.row(align=True)
             actions.scale_y = 1.2
-            actions.operator("wondful.open_compare_workspace", text="对比", icon="ARROW_LEFTRIGHT")
+            actions.operator("wondful.open_compare_workspace", text="对比原图", icon="ARROW_LEFTRIGHT")
             actions.operator("wondful.open_output_directory", text="打开文件夹", icon="FILE_FOLDER")
 
         # ---- 高级 ---------------------------------------------------------------
+        # 1.2.3: one group at a time (模型 · 输出 · 产品 · 场景 · 多角度 · 诊断); running progress stays in ⑤.
         layout.separator()
         advanced = layout.box()
         if not _disclosure(advanced.row(align=True), props, "ui_show_advanced", "高级", icon="PREFERENCES"):
             return
+        tabs = advanced.row(align=True)
+        tabs.scale_y = 1.2
+        tabs.prop(props, "ui_adv_tab", expand=True)
         adv = advanced.column()
+        tab = getattr(props, "ui_adv_tab", "MODEL")
+        acells = _cols(context, 2)
 
-        ai = adv.box()
-        ai.label(text="AI 与模型", icon="TOOL_SETTINGS")
-        prov = ai.row(align=True)
-        prov.enabled = not busy
-        prov.prop(props, "analysis_provider", expand=True)
-        model_provider = "antigravity" if active_is_antigravity else "codex"
-        model_field = model_provider + "_model"
-        models = getattr(props, model_provider + "_models")
-        model_row = ai.row(align=True)
-        model_row.enabled = not busy
-        if models:
-            try:
-                model_row.prop_search(prefs, model_field, props, model_provider + "_models", text="推理模型", results_are_suggestions=True)
-            except TypeError:
-                model_row.prop_search(prefs, model_field, props, model_provider + "_models", text="推理模型")
-        else:
-            model_row.prop(prefs, model_field, text="推理模型")
-        model_row.operator("wondful.refresh_models", text="", icon="FILE_REFRESH")
-        model_row.operator("wondful.model_default", text="默认")
-        msg = getattr(props, model_provider + "_models_message")
-        if msg:
-            ai.label(text=msg[:90])
-        if active_is_antigravity:
-            ai.label(text="生图：AGY generate_image（由 CLI 管理）")
-        else:
-            ai.prop(prefs, "codex_direct_edit", text="图像编辑直连：在白模画布上直接编辑（推荐）")
-            if getattr(prefs, "codex_direct_edit", True):
-                ai.prop(prefs, "codex_direct_simple", text="简洁输入：只发带地面灯光的白模底图（推荐）")
-                if getattr(prefs, "codex_direct_simple", True):
-                    ground = ai.row(align=True)
-                    ground.prop(props, "clay_ground", expand=True)
-                    if getattr(props, "clay_ground", "AUTO") == "CREST":
-                        ground.prop(props, "clay_crest_angle", text="下坡°")
-                    elif getattr(props, "clay_ground", "AUTO") == "CUSTOM":
-                        _draw_terrain(ai, props)
-            ai.label(text=("生图：Codex 图像编辑（直连，失败自动改用 CLI）" if getattr(prefs, "codex_direct_edit", True)
-                           else "生图：Codex ImageGen（由 CLI 管理）"))
-        acct = ai.row(align=True)
-        acct.operator(refresh_op, text="检测登录", icon="FILE_REFRESH")
-        if connected and not active_is_antigravity:
-            acct.operator("wondful.codex_logout", text="退出登录", icon="X")
-        if active_is_antigravity:
-            acct.operator("wondful.antigravity_terminal", text="Google 登录", icon="CONSOLE")
-        if cli_version:
-            ai.label(text=cli_version[:90])
-        if connected and account_message:
-            ai.label(text=account_message[:90])
-
-        flow = adv.box()
-        flow.label(text="流程", icon="SETTINGS")
-        flow.prop(props, "two_step", text="分两步：先写提示词，确认后再渲染")
-        mode_row = flow.row(align=True)
-        mode_row.label(text="模式")
-        mode_row.prop(props, "render_mode", expand=True)
-        out_row = flow.row(align=True)
-        out_row.prop(props, "output_directory", text="输出")
-        out_row.operator("wondful.choose_output_directory", text="", icon="FILEBROWSER")
-        if not (props.output_directory or "").strip():
-            flow.label(text="留空：保存过的工程输出到 .blend 旁边的 Wondful_Renders", icon="INFO")
-        if camera:
-            flow.label(text=f"相机：{camera.name} · {camera_w} × {camera_h}", icon="CAMERA_DATA")
-        if not prefs.structure_guides_enabled:
-            flow.label(text="结构控制图已在偏好设置中关闭", icon="ERROR")
-
-        layers = adv.box()
-        layers.prop(props, "layered_output", text="分层输出", icon="RENDERLAYERS")
-        if getattr(props, "layered_output", False):
-            mode_row = layers.row(align=True)
-            mode_row.enabled = not busy
-            mode_row.prop(props, "layered_mode", expand=True)
-            if getattr(props, "layered_mode", "SHADOW") == "FULL":
-                layers.label(text="额外调用一次图像编辑生成干净背景，每张约多 30–50 秒", icon="TIME")
+        if tab == "MODEL":
+            ai, _head, _on = _section(adv, "AI 服务", "TOOL_SETTINGS")
+            prov = ai.row(align=True)
+            prov.enabled = not busy
+            prov.prop(props, "analysis_provider", expand=True)
+            model_provider = "antigravity" if active_is_antigravity else "codex"
+            model_field = model_provider + "_model"
+            models = getattr(props, model_provider + "_models")
+            model_row = ai.row(align=True)
+            model_row.enabled = not busy
+            if models:
+                try:
+                    model_row.prop_search(prefs, model_field, props, model_provider + "_models", text="推理模型", results_are_suggestions=True)
+                except TypeError:
+                    model_row.prop_search(prefs, model_field, props, model_provider + "_models", text="推理模型")
             else:
-                layers.label(text="不额外调用模型：主体抠图 + 估算投影，几秒完成", icon="INFO")
-            layers.label(text="存到结果图旁：主体 / 投影 / 背景 PNG + PSD", icon="FILE_IMAGE")
-            if not getattr(props, "product_collection", None):
-                layers.label(text="需要先在 ② 选择产品集合", icon="ERROR")
-        if getattr(props, "last_layers_note", ""):
-            for index, line in enumerate(wrap(props.last_layers_note, width=44)[:2]):
-                layers.label(text=line, icon="CHECKMARK" if index == 0 and "失败" not in props.last_layers_note
-                             else ("ERROR" if index == 0 else "BLANK1"))
-
-        _draw_iou_gate(adv, context, props, busy)
-
-        _draw_detail_paste(adv, context, props, busy)
-
-        _draw_massing(adv, context, props, busy)
-
-        _draw_multiview(adv, context, props, busy)
-
-        lock_box = adv.box()
-        if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):
-            lock_box.prop(props, "color_source", text="配色来源")
-            lock_box.prop(props, "product_look_prompt", text="产品外观")
-            lock_box.prop(props, "identity_details", text="保留细节")
-            fill = lock_box.row(align=True)
-            fill.enabled = has_product and not busy
-            fill.operator("wondful.autofill_product_look", text="重新根据参考填写", icon="EYEDROPPER")
-            if getattr(props, "product_autofill_message", ""):
-                lock_box.label(text=props.product_autofill_message, icon="CHECKMARK")
+                model_row.prop(prefs, model_field, text="推理模型")
+            model_row.operator("wondful.refresh_models", text="", icon="FILE_REFRESH")
+            model_row.operator("wondful.model_default", text="恢复默认")
+            msg = getattr(props, model_provider + "_models_message")
+            if msg:
+                _note(ai, msg, acells, "plain", 2)
+            if active_is_antigravity:
+                ai.label(text="生图：AGY generate_image（由 CLI 管理）", icon="RENDER_STILL")
             else:
-                lock_box.label(text="留空即可，生成时会根据产品参考自动填写。", icon="INFO")
-        if getattr(props, "style_summary_cache", "") and has_style:
-            summary_box = adv.box()
-            if _disclosure(summary_box.row(align=True), props, "ui_show_style_summary", "环境分析（可编辑）", icon="LIGHT_SUN"):
-                summary_box.prop(props, "style_summary_cache", text="")
+                ai.prop(prefs, "codex_direct_edit", text="图像编辑直连（推荐）")
+                if getattr(prefs, "codex_direct_edit", True):
+                    simple = ai.row(align=True)
+                    simple.separator(factor=2.0)
+                    simple.prop(prefs, "codex_direct_simple", text="简洁输入（推荐）")
+                ai.label(text=("生图：Codex 图像编辑 · 失败自动改用 CLI" if getattr(prefs, "codex_direct_edit", True)
+                               else "生图：Codex ImageGen（由 CLI 管理）"), icon="RENDER_STILL")
+                if getattr(prefs, "codex_direct_edit", True) and getattr(prefs, "codex_direct_simple", True):
+                    _hint(ai, "地面 / 地形在 场景 › 地面", acells)
+            acct, _head, _on = _section(adv, "账户", "USER")
+            row = acct.row(align=True)
+            row.operator(refresh_op, text="检测登录", icon="FILE_REFRESH")
+            if connected and not active_is_antigravity:
+                row.operator("wondful.codex_logout", text="退出登录", icon="X")
+            if active_is_antigravity:
+                row.operator("wondful.antigravity_terminal", text="Google 登录", icon="USER")
+            if cli_version:
+                _note(acct, cli_version, acells, "plain", 2)
+            if connected and account_message:
+                _note(acct, account_message, acells, "plain", 2)
 
-        more_refs = adv.box()
-        _draw_reference_group(more_refs, props, "人物参考", "person_images", "person_image_index", "PERSON", "ui_show_person_refs")
-        total = len(props.product_images) + len(props.person_images) + len(props.style_images)
-        if total > 0 and not busy:
-            more_refs.operator("wondful.auto_classify_references", text="Jev 语义整理参考图", icon="LIGHT")
-        if getattr(props, "jev_status_message", ""):
-            more_refs.label(text=props.jev_status_message[:100], icon="INFO")
+        elif tab == "OUTPUT":
+            flow, _head, _on = _section(adv, "流程", "SEQUENCE")
+            flow.prop(props, "two_step", text="分两步：先写提示词，确认后再渲染")
+            mode_row = flow.row(align=True)
+            mode_row.label(text="模式")
+            mode_row.prop(props, "render_mode", expand=True)
+            out_row = flow.row(align=True)
+            out_row.prop(props, "output_directory", text="输出目录")
+            out_row.operator("wondful.choose_output_directory", text="", icon="FILEBROWSER")
+            if not (props.output_directory or "").strip():
+                _hint(flow, "留空：存到 .blend 旁的 Wondful_Renders", acells)
+            if camera:
+                flow.label(text=f"相机：{camera.name}{SEP}{camera_w} × {camera_h}", icon="CAMERA_DATA")
+            if not prefs.structure_guides_enabled:
+                _note(flow, "结构控制图已在偏好设置中关闭", acells, "info")
 
-        if props.result_image:
-            info = adv.box()
-            info.label(text="上次渲染", icon="INFO")
-            info.template_ID_preview(props, "result_image", rows=4, cols=7)
-            if props.last_export_path:
-                info.label(text=f"输出：{props.last_export_path[:100]}")
-            if props.alignment_attempts:
-                info.label(text=f"尝试 {props.alignment_attempts} 次 · Session {props.last_session_id}")
-            if props.last_canvas_warning:
-                for line in wrap(props.last_canvas_warning, width=44)[:3]:
-                    info.label(text=line)
-            iou_note = getattr(props, "last_iou_note", "")
-            if iou_note:
-                info.label(text="轮廓验收（固定坐标）", icon="CHECKMARK" if "未通过" not in iou_note and "待复核" not in iou_note else "ERROR")
-                for line in wrap(iou_note, width=44)[:3]:
-                    info.label(text=line, icon="BLANK1")
-            score_note = getattr(props, "last_score_note", "")
-            if score_note:
-                info.label(text="产品还原度（按输出像素）", icon="CHECKMARK")
-                for line in wrap(score_note, width=44)[:3]:
-                    info.label(text=line, icon="BLANK1")
-            if props.last_structure_note:
-                info.label(text=props.last_structure_note[:100])
-            if getattr(props, "last_engine_note", ""):
-                info.label(text=props.last_engine_note[:100])
-            if props.last_total_seconds > 0:
-                info.label(text=f"总用时 {props.last_total_seconds:.0f}s · 生图 {props.last_generation_seconds:.0f}s · 验收 {props.last_audit_seconds:.0f}s")
-            if getattr(props, "active_conversation_id", ""):
-                info.operator("wondful.copy_conversation_id", text="复制远程会话恢复命令", icon="COPYDOWN")
+            layers, _head, on = _section(adv, "分层输出", "RENDERLAYERS", props, "layered_output")
+            if on:
+                mode_row = layers.row(align=True)
+                mode_row.enabled = not busy
+                mode_row.prop(props, "layered_mode", expand=True)
+                full = getattr(props, "layered_mode", "SHADOW") == "FULL"
+                _hint(layers, ("每张约多 30–50 秒" if full else "几秒完成") + SEP + "存到结果图旁（PNG + PSD）", acells)
+                if not getattr(props, "product_collection", None):
+                    _hint(layers, "需要先在 ② 选择产品集合", acells)
+            if getattr(props, "last_layers_note", ""):
+                _note(layers, props.last_layers_note, acells, _state(props.last_layers_note), 2)
 
-        tools = adv.row(align=True)
-        tools.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
-        tools.operator("preferences.addon_show", text="插件偏好设置").module = __package__
+        elif tab == "PRODUCT":
+            _draw_iou_gate(adv, context, props, busy)
+            _draw_detail_paste(adv, context, props, busy)
+            _draw_appearance_lock(adv, context, props, busy, has_product)
+
+        elif tab == "SCENE":
+            _draw_ground(adv, context, props, prefs, active_is_antigravity)
+            _draw_massing(adv, context, props, busy)
+            if getattr(props, "style_summary_cache", "") and has_style:
+                _draw_style_summary(adv, context, props)
+            _draw_person_refs(adv, context, props, busy)
+
+        elif tab == "MULTIVIEW":
+            _draw_multiview(adv, context, props, busy)
+
+        else:  # DIAG
+            info, _head, _on = _section(adv, "上次渲染", "RENDER_RESULT")
+            if not props.result_image:
+                _hint(info, "还没有渲染结果", acells)
+            else:
+                info.template_ID_preview(props, "result_image", rows=4, cols=7)
+                if props.last_export_path:
+                    _note(info, f"输出：{props.last_export_path}", acells, "plain", 2)
+                if props.alignment_attempts:
+                    session = f"{SEP}会话 {props.last_session_id}" if props.last_session_id else ""
+                    _note(info, f"尝试 {props.alignment_attempts} 次{session}", acells, "plain", 1)
+                if props.last_canvas_warning:
+                    _note(info, props.last_canvas_warning, acells, "info", 3)
+                iou_note = getattr(props, "last_iou_note", "")
+                if iou_note:
+                    ok = "未通过" not in iou_note and "待复核" not in iou_note
+                    _note(info, iou_note if iou_note.startswith("轮廓") else "轮廓验收：" + iou_note, acells,
+                          "ok" if ok else ("info" if "待复核" in iou_note else "fail"), 3)
+                score_note = getattr(props, "last_score_note", "")
+                if score_note:
+                    _note(info, "产品还原度：" + score_note, acells, "ok", 3)
+                if props.last_structure_note:
+                    _note(info, props.last_structure_note, acells, "plain", 2)
+                if getattr(props, "last_engine_note", ""):
+                    _note(info, props.last_engine_note, acells, "plain", 2)
+                if props.last_total_seconds > 0:
+                    _note(info, f"总用时 {props.last_total_seconds:.0f} 秒{SEP}生图 {props.last_generation_seconds:.0f} 秒"
+                                f"{SEP}验收 {props.last_audit_seconds:.0f} 秒", acells, "plain", 2)
+                if getattr(props, "active_conversation_id", ""):
+                    info.operator("wondful.copy_conversation_id", text="复制远程会话恢复命令", icon="COPYDOWN")
+
+            box, _head, _on = _section(adv, "工具", "CONSOLE")
+            tools = box.row(align=True)
+            tools.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
+            tools.operator("preferences.addon_show", text="打开偏好设置", icon="PREFERENCES").module = __package__
 
 
 def _supports_placeholder():
