@@ -183,10 +183,55 @@ def silhouette_score(fit: dict, long_edge: int) -> float | None:
     return _clip(100.0 - SIL_K * float(ch) * 1000.0 / max(long_edge, 1))
 
 
+FAKE_DENSITY = 1.5          # AI-only strong-edge px per √(part px) on a flat part → named 可疑线条
+FAKE_STRONG = 0.45          # Sobel strength of a "strong" edge (≈ a 0.11 luminance step)
+FAKE_FAR_PX = 4             # … an AI edge this far from every Blender structure / detail edge is AI-only
+FLAT_FEATURE = 0.004        # a part with fewer feature-line pixels than this share is "flat"
+
+
+def _feature_edge_px(mag_ai, F, sel):
+    """1.2.3 细节边缘 vs the geometry feature lines: mean distance (px, capped) from each Blender
+    structure line pixel of the part to the nearest AI edge (structure the AI lost or moved)."""
+    ys, xs = np.nonzero(sel)
+    if len(xs) < 40:
+        return None
+    h, w = sel.shape
+    y0, y1 = max(0, ys.min() - EDGE_CAP), min(h, ys.max() + EDGE_CAP + 1)
+    x0, x1 = max(0, xs.min() - EDGE_CAP), min(w, xs.max() + EDGE_CAP + 1)
+    sc = sel[y0:y1, x0:x1]
+    f = F[y0:y1, x0:x1] & sc
+    if f.sum() < 15:
+        return None
+    ea = _edges(mag_ai[y0:y1, x0:x1], sc)
+    return float(truncated_distance(ea, EDGE_CAP)[f].mean())
+
+
+def _fake_line_density(mag_ai, F, mag_bl, sel):
+    """AI-only line amount of one part: strong AI edge pixels farther than ``FAKE_FAR_PX`` from
+    every Blender structure line and detail-pass edge, per √(part area) — about the share of a
+    line crossing the whole part times its width. Flagged by name, never suppressed."""
+    ys, xs = np.nonzero(sel)
+    if len(xs) < 200:
+        return None
+    h, w = sel.shape
+    y0, y1 = max(0, ys.min() - 8), min(h, ys.max() + 9)
+    x0, x1 = max(0, xs.min() - 8), min(w, xs.max() + 9)
+    sc = erode(sel[y0:y1, x0:x1], 2)
+    if sc.sum() < 100:
+        return None
+    strong = (mag_ai[y0:y1, x0:x1] > FAKE_STRONG) & sc
+    ref = F[y0:y1, x0:x1] | (mag_bl[y0:y1, x0:x1] > FAKE_STRONG * 0.5)
+    far = truncated_distance(ref, FAKE_FAR_PX + 1) > FAKE_FAR_PX
+    return float((strong & far).sum()) / float(np.sqrt(sc.sum()))
+
+
 def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray, matid=None,
-          placement_of=None) -> dict:
+          placement_of=None, features=None) -> dict:
     """All arrays on the same H×W canvas. ``ai_rgb``/``detail_rgba`` float 0..1, ``product_mask``
-    float 0..1, ``matid`` optional (labels, materials) from ``detail_paste.load_matid``."""
+    float 0..1, ``matid`` optional (labels, materials) from ``detail_paste.load_matid``.
+    ``features`` (1.2.3): Blender feature lines (bool, ``feature_lines.load``) — when given, 细节边缘
+    is measured against them (independent of the pasted detail pass); the detail-pass reading is
+    kept as ``edge_px_detail`` (diagnostic)."""
     from .detail_paste import verify_alignment, warp_image
     from . import material_color as MC
     h, w = product_mask.shape
@@ -228,6 +273,8 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
         M = warp_image(product_mask, (sx, sy), dx, dy, centre)
         if labels is not None:
             labels = MC.warp_labels(labels, (sx, sy), dx, dy, centre)
+        if features is not None:
+            features = warp_image(features.astype(np.float32), (sx, sy), dx, dy, centre) > 0.35
     else:
         M = product_mask
     inner = erode((M > 0.5) & (Da > 0.5), max(2, int(round(L / 400))))
@@ -261,7 +308,22 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
                     rec["detail"] = round(_clip(100.0 * (v - DETAIL_LO) / (DETAIL_HI - DETAIL_LO)), 1)
                 px_off = _part_edge_px(mag_ai, mag_bl, inner & (labels == idx))
                 if px_off is not None:
-                    rec["edge_px"] = round(px_off, 2)
+                    rec["edge_px_detail"] = round(px_off, 2)
+                    if features is None:
+                        rec["edge_px"] = rec["edge_px_detail"]
+            if features is not None and kind not in SKIP_KINDS:
+                part_sel = inner & (labels == idx)
+                fo = _feature_edge_px(mag_ai, features, part_sel)
+                if fo is not None:
+                    rec["edge_px"] = round(fo, 2)
+                    rec["feature_px"] = int((features & part_sel).sum())
+                flat = float((features & part_sel).sum()) < FLAT_FEATURE * max(int(part_sel.sum()), 1)
+                if flat and kind in {"reflective", "default", "matte"}:
+                    fd = _fake_line_density(mag_ai, features, mag_bl, part_sel)
+                    if fd is not None:
+                        rec["ai_only_lines"] = round(fd, 4)
+                        if fd > FAKE_DENSITY:
+                            rec["fake_lines"] = True
             parts.append(rec)
     scored = [p for p in parts if "detail" in p]
     if scored:
@@ -299,14 +361,30 @@ def score(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
     out["shift_px"] = round(float(np.hypot(fit.get("dx", 0.0), fit.get("dy", 0.0))), 1)
     out["scale_pct"] = round((float(fit.get("scale", 1.0)) - 1.0) * 100.0, 1)
     out["outline_px"] = None if fit.get("chamfer_after") is None else round(float(fit["chamfer_after"]), 2)
-    timed = [p for p in parts if p.get("edge_px") is not None]
+    out["edge_ref"] = "geometry" if features is not None else "detail"
+    timed = [p for p in parts if p.get("edge_px_detail") is not None]
     if timed:
         wsum = sum(p["px"] * p["edge"] for p in timed)
-        out["edge_px"] = round(sum(p["edge_px"] * p["px"] * p["edge"] for p in timed) / max(wsum, 1e-9), 2)
+        out["edge_px_detail"] = round(sum(p["edge_px_detail"] * p["px"] * p["edge"] for p in timed) / max(wsum, 1e-9), 2)
     else:
-        out["edge_px"] = _part_edge_px(mag_ai, mag_bl, inner)
-        if out["edge_px"] is not None:
-            out["edge_px"] = round(out["edge_px"], 2)
+        v = _part_edge_px(mag_ai, mag_bl, inner)
+        out["edge_px_detail"] = None if v is None else round(v, 2)
+    if features is not None:
+        fp = [p for p in parts if p.get("edge_px") is not None and p.get("feature_px")]
+        if fp:
+            n = sum(p["feature_px"] for p in fp)
+            out["edge_px"] = round(sum(p["edge_px"] * p["feature_px"] for p in fp) / max(n, 1), 2)
+        else:
+            v = _feature_edge_px(mag_ai, features, inner)
+            out["edge_px"] = None if v is None else round(v, 2)
+        if labels is None and features is not None:
+            fd = _fake_line_density(mag_ai, features, mag_bl, inner)
+            if fd is not None and fd > FAKE_DENSITY:
+                parts.append({"name": "产品", "kind": "default", "px": int(inner.sum()), "fake_lines": True,
+                              "ai_only_lines": round(fd, 4)})
+    else:
+        out["edge_px"] = out["edge_px_detail"]
+    out["fake_lines"] = [p["name"] for p in parts if p.get("fake_lines")]
     des = [(p["dE"], p["px"]) for p in parts if p.get("dE") is not None]
     out["colour_dE"] = round(sum(d * n for d, n in des) / sum(n for _d, n in des), 1) if des else None
     out["size"] = [int(w), int(h)]
@@ -322,7 +400,7 @@ WEAK_EDGE_PX = 4.0         # a part whose edges sit more than 4 px off is named
 WEAK_DE = 25.0             # ... or whose colour is off by more than ΔE 25
 
 
-def weakest_parts(report: dict, n: int = 2) -> list:
+def weakest_parts(report: dict, n: int = 3) -> list:
     """The n worst parts past the pixel / ΔE limits, as 'tyre_3 4.1px' / 'wood ΔE 28'."""
     rows = []
     for p in report.get("parts") or []:
@@ -332,10 +410,13 @@ def weakest_parts(report: dict, n: int = 2) -> list:
         d = p.get("dE")
         if d is not None and d > WEAK_DE:
             rows.append((d / WEAK_DE, f"{p['name']} ΔE {d:.0f}"))
+        if p.get("fake_lines"):
+            # 1.2.3: AI-only lines on a flat part (fake seams): named only, never auto-suppressed
+            rows.append((1.0 + float(p.get("ai_only_lines") or 0), f"{p['name']} 可疑线条"))
     return [name for _v, name in sorted(rows, reverse=True)[:n]]
 
 
-def score_file(image_path, detail_path, mask_path, matid_path="", placement_of=None) -> dict:
+def score_file(image_path, detail_path, mask_path, matid_path="", placement_of=None, geometry_path="") -> dict:
     """File-level entry (passes are resampled to the image). Never raises: errors land in 'error'."""
     t0 = time.time()
     try:
@@ -357,7 +438,11 @@ def score_file(image_path, detail_path, mask_path, matid_path="", placement_of=N
         D = load(detail_path)
         M = load(mask_path)[..., 3]
         matid = load_matid(matid_path, w, h) if matid_path and Path(matid_path).is_file() else None
-        rep = score(I, D, M, matid, placement_of=placement_of)
+        features = None
+        if geometry_path and Path(geometry_path).is_file():
+            from .feature_lines import load as load_features
+            features = load_features(geometry_path, w, h)
+        rep = score(I, D, M, matid, placement_of=placement_of, features=features)
     except Exception as exc:
         rep = {"error": str(exc)[:200]}
     rep["seconds"] = round(time.time() - t0, 2)

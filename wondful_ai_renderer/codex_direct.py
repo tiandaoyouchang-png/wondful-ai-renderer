@@ -25,6 +25,7 @@ import threading
 import time
 import uuid
 import zlib
+from http import client as http_client
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -39,7 +40,7 @@ IMAGE_MODEL = "gpt-image-2"
 ORIGINATOR = "codex_cli_rs"
 MAX_EDIT_IMAGES = 5
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
-ADDON_UA = "wondful-ai-renderer/1.2.2"
+ADDON_UA = "wondful-ai-renderer/1.2.3"
 BASE_URL_ENV = "WONDFUL_CODEX_IMAGE_BASE_URL"
 REFRESH_URL_ENV = "WONDFUL_CODEX_REFRESH_URL"
 
@@ -78,12 +79,99 @@ ROLE_PRIORITY = {"camera": 0, "product": 1, "environment": 2, "appearance": 2, "
 class DirectEditError(RuntimeError):
     """Direct edit failed; ``fatal`` = do not retry direct for the rest of this render."""
 
-    def __init__(self, message, *, kind="error", status=0, fatal=False, detail=""):
+    def __init__(self, message, *, kind="error", status=0, fatal=False, detail="", retry_after=0.0):
         super().__init__(message)
         self.detail = detail
         self.kind = kind
         self.status = int(status or 0)
         self.fatal = bool(fatal)
+        self.retry_after = float(retry_after or 0.0)
+
+
+class DirectEditStop(RuntimeError):
+    """1.2.3: quota exhausted / login rejected / rate limit that outlasted the bounded wait.
+
+    Raised by :func:`generate_with_fallback` instead of falling back to ``codex exec``: the
+    agent runs on the same ChatGPT account, so it would hit the same wall (and burn time or
+    quota). The render stops at once with ``str(exc)`` as the panel message."""
+
+    def __init__(self, message, *, kind="quota", status=0):
+        super().__init__(message)
+        self.kind = kind
+        self.status = int(status or 0)
+
+
+# ---- 1.2.3: one error classifier for HTTP bodies and in-stream failure events
+# ``auth_local`` = this add-on cannot read the login (no auth.json, API-key or keychain login):
+# the codex exec agent may still have a working login, so that one still falls back.
+# Markers are matched on the lower-cased error code + type + message (+ body text).
+QUOTA_MARKERS = ("usage_limit_reached", "usage_limit", "insufficient_quota", "quota_exceeded", "out of credits",
+                 "usage_not_included", "hit your usage limit", "credit balance", "billing_hard_limit")
+RATE_MARKERS = ("rate_limit", "rate limit", "too many requests", "slow down", "requests per min")
+AUTH_MARKERS = ("invalid_api_key", "unauthorized", "token_expired", "invalid_token", "authentication token",
+                "could not parse your authentication", "please try signing in", "not logged in",
+                "account_deactivated", "token_invalidated", "refresh_token_reused")
+STOP_KINDS = ("auth", "quota", "rate_limit_long")
+RATE_WAIT_CAP = 45.0      # s: longest single wait for a short rate limit
+RATE_WAITS_MAX = 2        # bounded: at most two waits per image, then stop
+RATE_LONG_S = 120.0       # a rate limit that asks for longer than this is treated as a stop
+QUOTA_TEXT = "Codex 生图额度已用完"
+AUTH_TEXT = "Codex 登录无效"
+
+
+def _retry_seconds(text, headers=None) -> float:
+    """Seconds the server asks us to wait (Retry-After header, resets_in_seconds, 'try again in 11.05s')."""
+    for key in ("Retry-After", "retry-after"):
+        value = (headers or {}).get(key) if headers else None
+        if value:
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+    low = (text or "").lower()
+    m = re.search(r"resets?_in_seconds\"?\s*[:=]\s*(\d+(?:\.\d+)?)", low)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"try again in\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds|m|min|minutes)?", low)
+    if m:
+        v = float(m.group(1))
+        unit = m.group(2) or "s"
+        return v / 1000.0 if unit == "ms" else (v * 60.0 if unit.startswith("m") and unit != "ms" else v)
+    return 0.0
+
+
+def classify_failure(status=0, text="", headers=None):
+    """(kind, fatal, retry_after) for any failure, HTTP (``status`` > 0) or in-stream (``status`` 0).
+
+    kinds: auth · quota · rate_limit (short, wait and retry) · rate_limit_long · request (400) ·
+    endpoint (404) · server (5xx / in-stream server_error) · error."""
+    low = (text or "").lower()
+    wait = _retry_seconds(text, headers)
+    if any(m in low for m in QUOTA_MARKERS):
+        return "quota", True, wait
+    if status in (401, 403) or any(m in low for m in AUTH_MARKERS):
+        return "auth", status != 401, wait     # 401 gets one token refresh first
+    if status == 429 or any(m in low for m in RATE_MARKERS):
+        if wait > RATE_LONG_S:
+            return "rate_limit_long", True, wait
+        return "rate_limit", False, wait
+    if status == 404:
+        return "endpoint", True, 0.0
+    if 400 <= status < 500:
+        return "request", False, 0.0
+    if status >= 500:
+        return "server", False, 0.0
+    return "server" if status == 0 else "error", False, 0.0
+
+
+def stop_message(kind, raw="") -> str:
+    """Clear panel message for a stop (no codex exec fallback)."""
+    raw = (raw or "").strip()
+    if kind == "quota":
+        return QUOTA_TEXT + "：本次已停止，没有改用代理生成。请等额度恢复后再生成（ChatGPT 设置 › 用量可查看）。"
+    if kind == "auth":
+        return AUTH_TEXT + "：本次已停止。请在终端运行 codex login 重新登录后再生成。" + (f"（{raw[:80]}）" if raw else "")
+    return "Codex 请求过于频繁且限流时间较长：本次已停止，没有改用代理生成，请稍后再试。" + (f"（{raw[:80]}）" if raw else "")
 
 
 # --------------------------------------------------------------------------- auth
@@ -144,12 +232,12 @@ def load_auth(path: Path) -> dict:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise DirectEditError("未找到 Codex 登录文件 auth.json", kind="auth", fatal=True) from exc
+        raise DirectEditError("未找到 Codex 登录文件 auth.json", kind="auth_local", fatal=True) from exc
     except (OSError, ValueError) as exc:
-        raise DirectEditError("Codex 登录文件 auth.json 无法读取", kind="auth", fatal=True) from exc
+        raise DirectEditError("Codex 登录文件 auth.json 无法读取", kind="auth_local", fatal=True) from exc
     if not isinstance(data, dict) or not isinstance(data.get("tokens"), dict):
         raise DirectEditError("auth.json 里没有 ChatGPT 登录令牌（可能是 API Key 登录或系统钥匙串存储）",
-                              kind="auth", fatal=True)
+                              kind="auth_local", fatal=True)
     return data
 
 
@@ -184,7 +272,7 @@ def refresh_auth(auth: dict, path: Path, timeout: float = 30) -> dict:
     with _REFRESH_LOCK:
         current = load_auth(path)
         if account_id(current) and account_id(auth) and account_id(current) != account_id(auth):
-            raise DirectEditError("Codex 账号在生成期间发生变化", kind="auth", fatal=True)
+            raise DirectEditError("Codex 账号在生成期间发生变化", kind="auth_local", fatal=True)
         if current.get("tokens") != auth.get("tokens") and access_token(current) and not token_expiring(access_token(current)):
             return current
         tokens = dict(current.get("tokens") or {})
@@ -214,7 +302,7 @@ def refresh_auth(auth: dict, path: Path, timeout: float = 30) -> dict:
         updated["tokens"] = tokens
         updated["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
         if load_auth(path) != current:
-            raise DirectEditError("auth.json 在刷新期间被 Codex 修改，放弃写回", kind="auth", fatal=True)
+            raise DirectEditError("auth.json 在刷新期间被 Codex 修改，放弃写回", kind="auth_local", fatal=True)
         tmp = Path(str(path) + f".wondful-{os.getpid()}.tmp")
         tmp.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
         try:
@@ -234,9 +322,9 @@ def auth_headers(auth: dict, client_version: str = "") -> dict:
     token = access_token(auth)
     acct = account_id(auth)
     if not token:
-        raise DirectEditError("auth.json 里没有 access_token，请重新登录 Codex", kind="auth", fatal=True)
+        raise DirectEditError("auth.json 里没有 access_token，请重新登录 Codex", kind="auth_local", fatal=True)
     if not acct:
-        raise DirectEditError("auth.json 里没有 ChatGPT 账号 ID，请重新登录 Codex", kind="auth", fatal=True)
+        raise DirectEditError("auth.json 里没有 ChatGPT 账号 ID，请重新登录 Codex", kind="auth_local", fatal=True)
     version = _client_version(client_version)
     ua_version = version or "0"
     headers = {
@@ -701,9 +789,31 @@ def parse_sse_events(text_iter):
         yield "\n".join(data_lines)
 
 
-def extract_image(events):
-    """Return (b64, item, response_id) from Responses stream events."""
+def _stream_error(err, etype, prefix):
+    """In-stream failure event -> DirectEditError, classified exactly like an HTTP body."""
+    err = err if isinstance(err, dict) else {}
+    code = str(err.get("code") or err.get("type") or err.get("reason") or etype)
+    message = str(err.get("message") or "")[:300]
+    kind, fatal, wait = classify_failure(0, " ".join([code, str(err.get("type") or ""), message,
+                                                       json.dumps(err, ensure_ascii=False)[:600]]))
+    return DirectEditError(f"{prefix}：{code} {message}".strip(), kind=kind, fatal=fatal, retry_after=wait,
+                           detail=message)
+
+
+IMAGE_META_KEYS = ("action", "background", "output_format", "quality", "size", "status")
+
+
+def extract_image(events, meta=None):
+    """Return (b64, item, response_id) from Responses stream events.
+
+    1.2.3: ``meta`` (a dict) receives what the backend *reports*: the image tool it actually ran
+    (``response.created`` echoes ``tools`` — the ChatGPT backend substitutes its own model, e.g.
+    ``gpt-image-2-codex``, whatever we ask for) and the image item's real quality / size / action.
+    A stream that ends with neither an image nor ``response.completed`` is a cut stream."""
     last_status, response_id = "", ""
+    completed = False
+    seen_any = False
+    meta = meta if isinstance(meta, dict) else {}
     for data in events:
         if not data or data == "[DONE]":
             continue
@@ -714,13 +824,21 @@ def extract_image(events):
         if not isinstance(event, dict):
             continue
         etype = str(event.get("type", ""))
+        seen_any = True
         if etype in {"response.failed", "response.incomplete", "error"}:
             resp = event.get("response") if isinstance(event.get("response"), dict) else {}
             err = resp.get("error") or event.get("error") or resp.get("incomplete_details") or event
-            code = str((err or {}).get("code") or (err or {}).get("type") or (err or {}).get("reason") or etype)
-            message = str((err or {}).get("message") or "")[:300]
-            kind = "quota" if ("usage_limit" in code or "quota" in code or "rate_limit" in code) else "server"
-            raise DirectEditError(f"图像编辑失败：{code} {message}".strip(), kind=kind)
+            raise _stream_error(err, etype, "图像编辑失败")
+        if etype in {"response.created", "response.in_progress", "response.completed"}:
+            resp = event.get("response") if isinstance(event.get("response"), dict) else {}
+            if resp.get("model"):
+                meta["responses_model"] = str(resp["model"])
+            for tool in resp.get("tools") or []:
+                if isinstance(tool, dict) and tool.get("type") == "image_generation":
+                    meta["image_model"] = str(tool.get("model") or "")
+                    meta["tool_quality"] = str(tool.get("quality") or "")
+                    meta["tool_size"] = str(tool.get("size") or "")
+            completed = completed or etype == "response.completed"
         items = []
         if isinstance(event.get("item"), dict):
             items.append(event["item"])
@@ -733,11 +851,16 @@ def extract_image(events):
             if item.get("type") != "image_generation_call":
                 continue
             last_status = str(item.get("status") or last_status)
+            for key in IMAGE_META_KEYS:
+                if item.get(key):
+                    meta["item_" + key] = str(item[key])
             result = item.get("result")
             if isinstance(result, str) and result and last_status in {"completed", ""}:
                 return result, item, response_id
             if isinstance(result, str) and result:
                 return result, item, response_id
+    if seen_any and not completed:
+        raise DirectEditError("图像结果传输中断（流在完成前被切断）", kind="stream_cut")
     raise DirectEditError("响应里没有图像结果" + (f"（最后状态 {last_status}）" if last_status else ""), kind="parse")
 
 
@@ -756,8 +879,8 @@ def extract_text(events):
         etype = str(event.get("type", ""))
         if etype in {"response.failed", "response.incomplete", "error"}:
             resp = event.get("response") if isinstance(event.get("response"), dict) else {}
-            err = resp.get("error") or event.get("error") or event
-            raise DirectEditError(f"环境描述失败：{str((err or {}).get('message') or etype)[:200]}", kind="server")
+            err = resp.get("error") or event.get("error") or resp.get("incomplete_details") or event
+            raise _stream_error(err, etype, "环境描述失败")
         if etype == "response.output_text.delta":
             deltas.append(str(event.get("delta") or ""))
         elif etype == "response.output_text.done" and event.get("text"):
@@ -791,7 +914,7 @@ def _line_iter(resp, cancel_check):
         yield pending.decode("utf-8", errors="replace")
 
 
-def post_responses(url, headers, payload, *, timeout, cancel_check=None, want="image"):
+def post_responses(url, headers, payload, *, timeout, cancel_check=None, want="image", meta=None):
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     holder = {}
@@ -811,40 +934,39 @@ def post_responses(url, headers, payload, *, timeout, cancel_check=None, want="i
     try:
         with urlrequest.urlopen(req, timeout=timeout) as resp:
             holder["resp"] = resp
+            holder["streaming"] = True
             events = parse_sse_events(_line_iter(resp, cancel_check))
-            return extract_text(events) if want == "text" else extract_image(events)
+            return extract_text(events) if want == "text" else extract_image(events, meta)
     except urlerror.HTTPError as exc:
         try:
             text = exc.read().decode("utf-8", errors="replace")
         except Exception:
             text = ""
-        raise _http_error(exc.code, text) from exc
+        raise _http_error(exc.code, text, dict(getattr(exc, "headers", None) or {})) from exc
     except DirectEditError:
         raise
-    except (urlerror.URLError, OSError, ValueError) as exc:
+    except (urlerror.URLError, OSError, ValueError, http_client.HTTPException) as exc:
         if cancel_check and cancel_check():
             raise DirectEditError("任务已取消", kind="cancelled", fatal=True) from exc
         reason = getattr(exc, "reason", exc)
+        if holder.get("streaming"):   # the connection dropped after the 200: a cut stream, retried once
+            raise DirectEditError(f"图像结果传输中断：{type(exc).__name__} {str(reason)[:100]}",
+                                  kind="stream_cut") from exc
         raise DirectEditError(f"网络请求失败：{type(exc).__name__} {str(reason)[:120]}", kind="network") from exc
     finally:
         stop.set()
 
 
-def _http_error(status, text):
+def _http_error(status, text, headers=None):
+    """HTTP failure -> DirectEditError via :func:`classify_failure` (same rules as in-stream errors)."""
     from .cli_transport import safe_diagnostic
     snippet = safe_diagnostic(text or "")[:300]
-    lower = (text or "").lower()
-    if status in (401, 403):
-        return DirectEditError(f"HTTP {status}：登录无效或无权限", kind="auth", status=status, fatal=status == 403)
-    if status == 404:
-        return DirectEditError("HTTP 404：接口不存在或已变更", kind="endpoint", status=404, fatal=True, detail=snippet)
-    if status == 429:
-        quota = "usage_limit" in lower or "insufficient_quota" in lower or "out of credits" in lower
-        return DirectEditError(f"HTTP 429：{'额度已用完' if quota else '请求过于频繁'}", kind="quota" if quota else "rate_limit",
-                               status=429, fatal=quota)
-    if 400 <= status < 500:
-        return DirectEditError(f"HTTP {status}：请求被拒绝", kind="request", status=status, detail=snippet)
-    return DirectEditError(f"HTTP {status}：服务器错误", kind="server", status=status)
+    kind, fatal, wait = classify_failure(status, text or "", headers)
+    label = {"auth": "登录无效或无权限", "quota": "额度已用完", "rate_limit": "请求过于频繁",
+             "rate_limit_long": "请求过于频繁（限流时间较长）", "endpoint": "接口不存在或已变更",
+             "request": "请求被拒绝", "server": "服务器错误"}.get(kind, "请求失败")
+    return DirectEditError(f"HTTP {status}：{label}", kind=kind, status=status, fatal=fatal,
+                           detail=snippet, retry_after=wait)
 
 
 # --------------------------------------------------------------------------- environment description
@@ -977,7 +1099,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         raise DirectEditError("编辑底图不存在", kind="input")
     auth_path = find_auth_file()
     if auth_path is None:
-        raise DirectEditError("未找到 Codex 登录文件（~/.codex/auth.json 或 CODEX_HOME）", kind="auth", fatal=True)
+        raise DirectEditError("未找到 Codex 登录文件（~/.codex/auth.json 或 CODEX_HOME）", kind="auth_local", fatal=True)
     auth = load_auth(auth_path)
     if token_expiring(access_token(auth)):
         auth = refresh_auth(auth, auth_path)
@@ -1019,7 +1141,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                                                   cache_dir=str(log_root), cancel_check=cancel_check,
                                                   vehicle=bool(vehicle))
         except DirectEditError as exc:
-            if exc.kind == "cancelled":
+            if exc.kind == "cancelled" or exc.kind in STOP_KINDS:
                 raise
             env_note = "环境描述失败：" + str(exc)[:160]
     if exact_prompt:
@@ -1043,9 +1165,11 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     variants.append(dict(compat=True, model=model_used))
     refreshed = False
     rate_waits = 0
+    cut_retries = 0
     result = None
     last_exc = None
     index = 0
+    meta = {}
     try:
         while index < len(variants):
             opts = variants[index]
@@ -1057,9 +1181,11 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
             log["headers"] = redact_headers(headers)
             t0 = time.time()
             try:
-                result = post_responses(url, headers, payload, timeout=timeout, cancel_check=cancel_check)
+                meta = {}
+                result = post_responses(url, headers, payload, timeout=timeout, cancel_check=cancel_check, meta=meta)
                 log["attempts"].append({"ok": True, "compat": opts["compat"], "model": opts["model"],
                                         "seconds": round(time.time() - t0, 1)})
+                log["reported"] = dict(meta)
                 break
             except DirectEditError as exc:
                 last_exc = exc
@@ -1073,9 +1199,17 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                     refreshed = True
                     auth = refresh_auth(auth, auth_path)
                     continue
-                if exc.kind == "rate_limit" and rate_waits < 2:
-                    rate_waits += 1
-                    time.sleep(min(30.0, 4.0 * rate_waits))
+                if exc.kind == "rate_limit":
+                    if rate_waits < RATE_WAITS_MAX:
+                        rate_waits += 1
+                        wait = min(RATE_WAIT_CAP, exc.retry_after or 4.0 * rate_waits)
+                        log["attempts"][-1]["waited"] = round(wait, 1)
+                        _sleep_cancellable(wait, cancel_check)
+                        continue
+                    exc.kind, exc.fatal = "rate_limit_long", True   # bounded: stop, do not fall back
+                    raise
+                if exc.kind == "stream_cut" and cut_retries < 1:
+                    cut_retries += 1     # one retry of the same request for a dropped stream
                     continue
                 if exc.kind == "request" and index + 1 < len(variants):
                     index += 1  # 400: try a leaner, more compatible payload
@@ -1116,11 +1250,24 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         "size_requested": size,
         "size_returned": list(image_dimensions(target) or []),
         "model": log["attempts"][-1]["model"] if log["attempts"] else model_used,
+        # 1.2.3: what the backend says it actually ran (it ignores our image model / quality)
+        "image_model": meta.get("image_model", ""),
+        "image_quality": meta.get("item_quality", ""),
+        "image_size_reported": meta.get("item_size", ""),
+        "image_action": meta.get("item_action", ""),
         "compat_payload": bool(log["attempts"] and log["attempts"][-1].get("compat")),
         "response_id": response_id,
         "revised_prompt": str(item.get("revised_prompt") or "")[:500],
         "seconds": round(time.time() - started, 1),
     }
+
+
+def _sleep_cancellable(seconds, cancel_check=None):
+    end = time.time() + max(0.0, float(seconds))
+    while time.time() < end:
+        if cancel_check and cancel_check():
+            raise DirectEditError("任务已取消", kind="cancelled", fatal=True)
+        time.sleep(min(0.25, max(0.0, end - time.time())))
 
 
 def _building_text(refs, vehicle=False) -> str:
@@ -1173,6 +1320,9 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
     use_simple = simple_brief is not None and not repair and simple_base and Path(simple_base).is_file()
     if use_simple:
         edit_base = simple_base
+    if state.get("stopped"):
+        raise DirectEditStop(stop_message("rate" if state["stopped"] == "rate_limit_long" else state["stopped"]),
+                             kind=state["stopped"])
     if not state["disabled"]:
         prompt = kwargs.get("prompt", "")
         if bundle_note:
@@ -1197,6 +1347,21 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
         except DirectEditError as exc:
             if exc.kind == "cancelled":
                 raise RuntimeError("任务已取消") from exc
+            if exc.kind in STOP_KINDS:
+                # 1.2.3: quota / login / long rate limit stop the render; codex exec runs on the same
+                # account and would hit the same wall, so it is never tried for these.
+                state["errors"].append({"kind": exc.kind, "status": exc.status, "message": str(exc)[:300],
+                                        "detail": getattr(exc, "detail", "")[:300]})
+                state["stopped"] = exc.kind
+                state["disabled"] = state["last_reason"] = short_reason(exc)
+                msg = stop_message("rate" if exc.kind == "rate_limit_long" else exc.kind, getattr(exc, "detail", ""))
+                print(f"[Wondful] Codex 直连图像编辑停止（不改用代理）：{exc}")
+                if on_status:
+                    try:
+                        on_status(msg)
+                    except Exception:
+                        pass
+                raise DirectEditStop(msg, kind=exc.kind, status=exc.status) from exc
             reason = short_reason(exc)
             state["errors"].append({"kind": exc.kind, "status": exc.status, "message": str(exc)[:300],
                                     "detail": getattr(exc, "detail", "")[:300]})
@@ -1230,6 +1395,11 @@ def engine_note(state) -> str:
         return ""
     ok, fb = int(state.get("direct_ok", 0)), int(state.get("fallbacks", 0))
     reason = state.get("disabled") or state.get("last_reason") or ""
+    if state.get("stopped"):
+        kind = state["stopped"]
+        return {"quota": "已停止：Codex 生图额度已用完（未改用代理生成）",
+                "auth": "已停止：Codex 登录无效，请运行 codex login（未改用代理生成）"}.get(
+            kind, "已停止：Codex 限流时间较长（未改用代理生成）") + (f" · 已完成直连 {ok} 次" if ok else "")
     if ok and not fb:
         return "生图：Codex 图像编辑（直连）"
     if fb and not ok:

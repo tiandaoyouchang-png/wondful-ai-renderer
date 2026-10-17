@@ -747,6 +747,24 @@ class WONDFUL_AISettings(PropertyGroup):
         description="按材质校色的强度：0 = 颜色完全保留 AI 的，1 = 尽量贴近模型颜色（单次校正有上限，不会过艳）",
         default=0.7, min=0.0, max=1.0, subtype="FACTOR",
     )
+    # 1.2.3 轮廓验收: fixed-coordinate IoU (≥0.95) after each generation, bounded regeneration
+    iou_gate: BoolProperty(
+        name="轮廓验收",
+        description="每次生成后用 Blender 产品遮罩在固定坐标上验收轮廓（IoU ≥ 0.95，不平移不缩放）："
+                    "通过即停；不通过就从原始白模底图重新生成，最多 3 次；额度用完或登录失效立即停止。"
+                    "都没通过时保留全部候选，显示 IoU 最高的一张并标为「未通过」",
+        default=True,
+    )
+    iou_gate_max: IntProperty(
+        name="最多生成",
+        description="每张图最多生成几次（含第一次）来达到 IoU ≥ 0.95",
+        default=3, min=1, max=3,
+    )
+    last_iou_note: StringProperty(
+        name="轮廓验收",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     last_score_note: StringProperty(
         name="产品还原度",
         description="AI 原图对比 Blender 模型（按输出尺寸的像素）：偏移、缩放、轮廓误差、细节边缘误差、颜色 ΔE；括号里是细节回贴后的数值",

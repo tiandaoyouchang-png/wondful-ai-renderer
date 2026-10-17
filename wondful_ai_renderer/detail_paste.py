@@ -142,8 +142,10 @@ def merge_keep_masks(rgba: np.ndarray, product: np.ndarray, max_auto_frac: float
     """Part masks from the keep render: R = explicit keep-exact, G = automatic keep-exact,
     B = glass / transparent, black with alpha = matte / textile; A = coverage.
 
-    The automatic part is dropped when it covers more than ``max_auto_frac`` of the product
-    (e.g. a product that *is* a "plate"). Returns (keep, glass, matte, info)."""
+    1.2.3: the decision is made per automatic region (8-connected piece), not all-or-nothing:
+    a piece covering more than ``max_auto_frac`` of the product (a product that *is* a "plate",
+    a mis-named body panel) is dropped on its own, real small logos / plates next to it stay.
+    Returns (keep, glass, matte, info)."""
     scale = 255.0 if rgba.dtype == np.uint8 else 1.0
     a = rgba[..., 3].astype(np.float32) / scale
     rgb = rgba[..., :3].astype(np.float32) / scale
@@ -154,13 +156,30 @@ def merge_keep_masks(rgba: np.ndarray, product: np.ndarray, max_auto_frac: float
     prod_px = float((product > 0.5).sum())
     auto_px = float((auto > 0.5).sum())
     frac = auto_px / prod_px if prod_px > 0 else 0.0
-    use_auto = frac <= max_auto_frac
+    dropped_px, dropped_n, kept_n = 0, 0, 0
+    if auto_px:
+        from .layered_output import label_components
+        labels, areas = label_components(auto > 0.5)
+        drop = np.zeros(auto.shape, bool)
+        for lab, area in areas.items():
+            if prod_px > 0 and area > max_auto_frac * prod_px:
+                drop |= labels == lab
+                dropped_px += int(area)
+                dropped_n += 1
+            else:
+                kept_n += 1
+        if dropped_n:
+            # the soft rim of a dropped piece goes with it
+            from .layered_output import dilate as _dil
+            auto = np.where(_dil(drop, 2) & ~(labels > 0) | drop, 0.0, auto)
+    use_auto = kept_n > 0
     keep = np.maximum(explicit, auto) if use_auto else explicit
     if product.shape == keep.shape:
         keep = np.minimum(keep, np.clip(product, 0, 1))
     return keep.astype(np.float32), glass.astype(np.float32), matte.astype(np.float32), {
         "explicit_px": int((explicit > 0.5).sum()), "auto_px": int(auto_px), "glass_px": int((glass > 0.5).sum()),
-        "matte_px": int((matte > 0.5).sum()), "auto_frac": round(frac, 4), "auto_used": bool(use_auto)}
+        "matte_px": int((matte > 0.5).sum()), "auto_frac": round(frac, 4), "auto_used": bool(use_auto),
+        "auto_dropped_px": dropped_px, "auto_dropped_regions": dropped_n, "auto_kept_regions": kept_n}
 
 
 # --------------------------------------------------------------------------- geometry
@@ -548,9 +567,9 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
         if canvas_alpha is not None:
             k = k * (canvas_alpha > 0.5)
         k = k * (1.0 - occ)          # 1.2.2: a plate / scuff plate under mud stays muddy
-        stats = k_core if k_core.sum() >= 30 else (dilate(k_core, max(2, r)) & (fitted > 0.5))
-        matched = colour_match(D, I, stats)
-        out = out * (1 - k[..., None]) + matched * k[..., None]
+        # 1.2.3: keep-exact means exact — the Blender pixels go in unchanged (no colour_match:
+        # it turned a pure red logo grey-red under a warm scene cast); 按材质校色 protects them too.
+        out = out * (1 - k[..., None]) + D * k[..., None]
         keep_px = int((k > 0.5).sum())
     timings["keep"] = round(time.time() - t, 2)
     colour = {}

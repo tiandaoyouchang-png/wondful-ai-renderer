@@ -41,12 +41,12 @@ class CardUITests(unittest.TestCase):
 
     def test_version(self):
         init = (PKG / "__init__.py").read_text()
-        # Bumped with each release (1.2.2: 推理模型合并 + 自动生图链 + 张数).
-        self.assertIn('"version": (1, 2, 2)', init)
+        # Bumped with each release (1.2.3: 固定坐标 IoU 验收 + 有界重生成 + 额度/登录停止).
+        self.assertIn('"version": (1, 2, 3)', init)
         self.assertIn('bl_label = "Wondful AI 渲染器 · 1.2"', self.src)
         self.assertNotIn("3.2.2", self.src)
         cd = (PKG / "codex_direct.py").read_text()
-        self.assertIn('ADDON_UA = "wondful-ai-renderer/1.2.2"', cd)
+        self.assertIn('ADDON_UA = "wondful-ai-renderer/1.2.3"', cd)
 
 
 if __name__ == "__main__":

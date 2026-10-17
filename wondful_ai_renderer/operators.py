@@ -502,6 +502,18 @@ def _replace_product_reference(props, filepath):
     return item
 
 
+def _gate_summary(attempts, exhausted) -> dict:
+    """1.2.3: one variant's IoU acceptance: every try, the best (pass > review > fail, then IoU)."""
+    from .result_worker import gate_rank
+    tries = [a.get("iou_gate") for a in attempts if a.get("iou_gate")]
+    best = max(tries, key=gate_rank) if tries else None
+    passed = bool(best and best.get("passed"))
+    return {"tries": [{k: t.get(k) for k in ("iou", "iou_lo", "iou_hi", "verdict", "weak_frac", "out_of_band",
+                                             "candidate", "seconds", "error")} for t in tries],
+            "best": best, "passed": passed, "exhausted": bool(exhausted and not passed),
+            "candidates": [str(a.get("path")) for a in attempts]}
+
+
 _LAYER_SCENES = set()
 _LAYER_BATCH = []
 
@@ -2130,6 +2142,35 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             print(f"[Wondful] 识别分计算失败：{exc}")
             return None
 
+    def _export_gate(self, props, exported: Path, gate: dict, variant_index: int) -> Path:
+        """1.2.3: panel line + ``<name>_iou.json`` for the acceptance; a result whose every try
+        failed is renamed ``…_IoU未通过.png`` and the other candidates are kept next to it."""
+        from .result_worker import gate_note
+        try:
+            note = gate_note(gate)
+            count = int(getattr(self, "_variant_count", 1) or 1)
+            props.last_iou_note = (f"第 {variant_index} 张：" + note) if count > 1 else note
+            best = gate.get("best") or {}
+            failed = best.get("verdict") == "未通过" or (gate.get("exhausted") and not gate.get("passed")
+                                                       and best.get("verdict") != "待复核")
+            if failed:
+                target = exported.with_name(exported.stem + "_IoU未通过" + exported.suffix)
+                shutil.move(str(exported), str(target))
+                exported = target
+            if failed or (gate.get("exhausted") and not gate.get("passed")):
+                # nothing passed: every candidate is kept next to the shown (best-IoU) one
+                best_src = str(best.get("candidate") or "")
+                n = 1
+                for cand in gate.get("candidates") or []:
+                    if cand and Path(cand).is_file() and str(Path(cand)) != str(Path(best_src)):
+                        n += 1
+                        shutil.copy2(cand, exported.with_name(f"{exported.stem}_候选{n}{Path(cand).suffix or '.png'}"))
+            exported.with_name(exported.stem + "_iou.json").write_text(
+                json.dumps(gate, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        except Exception as exc:
+            print(f"[Wondful] 轮廓验收结果保存失败：{exc}")
+        return exported
+
     def _submit_layers(self, props, exported) -> None:
         """Queue the layer split of one exported image; failures only leave a panel note."""
         spec = getattr(self, "_layers", None)
@@ -2174,23 +2215,34 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 source = Path(str(variant.get("best_path", ""))).expanduser()
                 if not source.is_file():
                     raise FileNotFoundError(f"第 {variant_index} 张候选图不存在: {source}")
-                variant_final = self._session.directory / f"output_variant_{variant_index:02d}.png"
-                variant_final, _variant_postprocessed = enforce_aspect_ratio(
-                    str(source), str(variant_final), camera_w, camera_h
-                )
-                if image_dimensions(variant_final) != (camera_w, camera_h):
-                    raise RuntimeError(f"第 {variant_index} 张结果无法适配为 {camera_w}×{camera_h}。")
-                identity_meta = getattr(self, "_identity_meta", {}) or {}
-                if getattr(self, "_identity_hard_restore", False) and identity_meta.get("enabled"):
-                    from .identity_preserve import hard_restore_identity_pixels
-                    restored_path = self._session.directory / f"output_variant_{variant_index:02d}_identity_restored.png"
-                    variant_final = Path(hard_restore_identity_pixels(
-                        variant_final,
-                        getattr(self, "_identity_source_path", ""),
-                        identity_meta.get("path", ""),
-                        restored_path,
-                    ))
-                variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
+                processed = variant.get("processed") or None
+                if processed and Path(str(processed.get("final", ""))).is_file():
+                    # 1.2.3: canvas fit, 细节回贴 and 产品还原度 already ran on the worker thread
+                    variant_final = Path(processed["final"])
+                    variant_raw = Path(processed["raw"]) if processed.get("raw") else None
+                    if image_dimensions(variant_final) != (camera_w, camera_h):
+                        raise RuntimeError(f"第 {variant_index} 张结果无法适配为 {camera_w}×{camera_h}。")
+                    if getattr(self, "_detail", None):
+                        props.last_detail_note = processed.get("detail_note", "")
+                    props.last_score_note = processed.get("score_note", "")
+                else:
+                    variant_final = self._session.directory / f"output_variant_{variant_index:02d}.png"
+                    variant_final, _variant_postprocessed = enforce_aspect_ratio(
+                        str(source), str(variant_final), camera_w, camera_h
+                    )
+                    if image_dimensions(variant_final) != (camera_w, camera_h):
+                        raise RuntimeError(f"第 {variant_index} 张结果无法适配为 {camera_w}×{camera_h}。")
+                    identity_meta = getattr(self, "_identity_meta", {}) or {}
+                    if getattr(self, "_identity_hard_restore", False) and identity_meta.get("enabled"):
+                        from .identity_preserve import hard_restore_identity_pixels
+                        restored_path = self._session.directory / f"output_variant_{variant_index:02d}_identity_restored.png"
+                        variant_final = Path(hard_restore_identity_pixels(
+                            variant_final,
+                            getattr(self, "_identity_source_path", ""),
+                            identity_meta.get("path", ""),
+                            restored_path,
+                        ))
+                    variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
                 exported = export_result(
                     variant_final,
                     self._output_dir_at_start,
@@ -2198,6 +2250,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     self._camera_name_at_start,
                     self._session.session_id,
                 )
+                gate = variant.get("iou_gate")
+                if gate:
+                    exported = self._export_gate(props, Path(exported), gate, variant_index)
                 if variant_raw is not None:
                     try:
                         from .detail_paste import raw_path
@@ -2546,6 +2601,36 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 print(f"[Wondful] 分层输出：产品遮罩渲染失败：{exc}")
                 props.last_layers_note = f"分层输出失败：产品遮罩渲染失败（{exc}）"
                 self._layers = None
+        # 1.2.3 轮廓验收 + 有界重生成: fixed-coordinate IoU vs the Blender product mask after every
+        # generation; the first one that passes stops; at most 3 generations per image.
+        from . import result_worker
+        gate_mask = ""
+        props.last_iou_note = ""
+        if bool(getattr(props, "iou_gate", True)):
+            gate_max = max(1, min(result_worker.GATE_MAX, int(getattr(props, "iou_gate_max", 3) or 3)))
+            cand_mask = (self._detail or {}).get("mask", "") or (self._layers or {}).get("mask", "")
+            if cand_mask and Path(cand_mask).is_file():
+                gate_mask = cand_mask
+            elif getattr(props, "product_collection", None) is not None:
+                try:
+                    from .viewport_capture import render_product_mask
+                    from .massing import find_collection as _find_massing
+                    path = str(Path(self._session.viewport_reference).parent / "01_product_mask.png")
+                    if Path(path).is_file() or render_product_mask(
+                            context, path, getattr(props, "product_collection", None),
+                            massing=_find_massing(context.scene, props)):
+                        gate_mask = path
+                except Exception as exc:
+                    print(f"[Wondful] 轮廓验收：产品遮罩渲染失败：{exc}")
+            if not gate_mask:
+                props.last_iou_note = "轮廓验收需要先在 ② 选择产品集合，本次未验收、未自动重生成"
+        else:
+            gate_max = 1
+        self._gate_mask = gate_mask
+        # numpy result processing runs on the worker; the old main-thread path stays for the
+        # opt-in identity hard restore (it needs Blender's image loader)
+        worker_post = not (identity_hard_restore and identity_possible)
+        session_dir = str(self._session.directory)
         provider_cli_path = provider["cli_path"]
         provider_model = provider["model"]
         provider_id = provider["id"]
@@ -2553,6 +2638,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         render_timeout = int(provider["render_timeout"])
         audit_timeout = int(provider["audit_timeout"])
         planned_attempts = max(1, int(prefs.alignment_max_attempts if auto_alignment_retry else 1))
+        if gate_mask:
+            planned_attempts = gate_max     # regenerations are decided by the IoU gate only
         self._provider_id = provider_id
         self._provider_label = provider_label
         timing_suffix = "strict" if auto_alignment_retry else ("fast" if render_mode == "FAST" else "standard")
@@ -2720,10 +2807,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             timeout=render_timeout,
                         )
                     except Exception:
-                        # If a later strict repair is rate-limited, the previous
-                        # candidate for this variant is still a completed output.
+                        # If a later strict repair is rate-limited (or the quota ran out), the
+                        # previous candidate for this variant is still a completed output.
                         if variant_best_path is not None and variant_best_path.is_file():
-                            self._completed_variants.put({
+                            partial = {
                                 "variant": variant_index,
                                 "best_path": str(variant_best_path),
                                 "best_score": variant_best_score,
@@ -2731,7 +2818,17 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                 "best_canvas": variant_best_canvas,
                                 "attempts": list(variant_attempts),
                                 "partial": True,
-                            })
+                            }
+                            if gate_mask:
+                                partial["iou_gate"] = _gate_summary(variant_attempts, False)
+                            if worker_post:
+                                try:
+                                    partial["processed"] = result_worker.finish_variant(
+                                        str(variant_best_path), variant_index, self._detail, camera_w, camera_h,
+                                        session_dir)
+                                except Exception as exc:
+                                    print(f"[Wondful] 结果处理失败（改在主线程处理）：{exc}")
+                            self._completed_variants.put(partial)
                         raise
                     generation_seconds = time.time() - generation_started
                     total_generation_seconds += generation_seconds
@@ -2766,7 +2863,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         except Exception as exc:
                             audit_error = str(exc)
 
+                    gate_rep = None
+                    if gate_mask:
+                        self._phase = f"验收第 {variant_index}/{variant_count} 张轮廓 · 第 {attempt_index}/{planned_attempts} 次"
+                        gate_rep = result_worker.gate_score(
+                            str(candidate), gate_mask, camera_w, camera_h, session_dir,
+                            f"v{variant_index:02d}_a{attempt_index:02d}", cancel_check=is_cancellation_requested,
+                            detail_path=(self._detail or {}).get("detail", ""))
+                        print(f"[Wondful] 轮廓验收 v{variant_index} a{attempt_index}: IoU {gate_rep.get('iou')} "
+                              f"{gate_rep.get('verdict')}")
+
                     record = {
+                        "iou_gate": gate_rep,
                         "variant": variant_index,
                         "attempt": attempt_index,
                         "path": str(candidate),
@@ -2786,6 +2894,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     # A verified or aspect-fit-compatible canvas outranks an incompatible
                     # canvas even if remote audit failed.
                     rank = (bool(canvas["matches"] or canvas.get("fit_compatible")), score)
+                    if gate_mask:
+                        rank = (bool(canvas["matches"] or canvas.get("fit_compatible")),) + result_worker.gate_rank(gate_rep)
                     if variant_best_path is None or rank > variant_best_rank:
                         variant_best_path = candidate
                         variant_best_score = score
@@ -2793,6 +2903,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         variant_best_canvas = canvas
                         variant_best_rank = rank
 
+                    if gate_mask:
+                        if gate_rep is None or gate_rep.get("iou") is None:
+                            break       # cannot judge this file: never burn quota blindly
+                        if gate_rep.get("passed"):
+                            break       # the first generation that passes stops
+                        continue        # fresh regeneration from the original base, never a repair
                     if not auto_alignment_retry:
                         break
                     if score < 0:
@@ -2814,6 +2930,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     "best_canvas": variant_best_canvas,
                     "attempts": variant_attempts,
                 }
+                if gate_mask:
+                    variant["iou_gate"] = _gate_summary(variant_attempts, len(variant_attempts) >= planned_attempts)
+                if worker_post:
+                    self._phase = f"处理第 {variant_index}/{variant_count} 张（细节回贴 / 还原度）"
+                    try:
+                        variant["processed"] = result_worker.finish_variant(
+                            str(variant_best_path), variant_index, self._detail, camera_w, camera_h, session_dir,
+                            cancel_check=is_cancellation_requested)
+                    except result_worker.Cancelled:
+                        raise RuntimeError("任务已取消")
+                    except Exception as exc:
+                        print(f"[Wondful] 结果处理失败（改在主线程处理）：{exc}")
                 variants.append(variant)
                 self._completed_variants.put(variant)
                 if best_path is None or variant_best_rank > best_rank:
@@ -2892,6 +3020,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 elif isinstance(exc, CodexNotInstalledError):
                     props.codex_account_state = "NOT_INSTALLED"
                     props.codex_account_message = str(exc)
+                else:
+                    from .codex_direct import DirectEditStop
+                    if isinstance(exc, DirectEditStop) and exc.kind == "auth":
+                        # 1.2.3: the backend rejected the login (after one token refresh)
+                        props.codex_account_state = "LOGGED_OUT"
+                        props.codex_account_message = str(exc)
                 # Parameter/capacity/output failures do not establish an OAuth failure.
                 msg = safe_diagnostic(str(exc))
                 completed_count = len(getattr(self, "_exported_by_variant", {}))

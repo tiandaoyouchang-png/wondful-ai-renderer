@@ -223,18 +223,33 @@ def _expected(model, ai):
     return np.array([model[0], model[1] * s, model[2] * s])
 
 
+NEUTRAL_CHROMA = 6.0       # a model colour with less chroma than this is a neutral reference
+
+
 def estimate_cast(stats) -> dict:
-    """Scene colour cast: area-weighted median of (AI − expected model) over matte / ordinary
-    materials (reflective ones if there is nothing else). dL, da, db in Lab units."""
-    use = [r for r in stats if "ai" in r and r["kind"] in CAST_KINDS]
-    if not use:
-        use = [r for r in stats if "ai" in r and r["kind"] not in SKIP_KINDS]
-    if not use:
-        return {"dL": 0.0, "da": 0.0, "db": 0.0, "n": 0}
+    """Scene colour cast: area-weighted median of (AI − expected model).
+
+    1.2.3: a cast is only measurable against a reference. It is estimated from ≥ 2 ordinary /
+    matte materials, else from the product's neutral (grey / black / white) materials, else from
+    ≥ 2 reflective ones. A product with a single paint and no neutral part has no reference: the
+    cast is zero, so a wrong paint hue is corrected instead of being absorbed as "scene cast"
+    (GPT-6 review: green model painted red changed 0 px). ``ref`` says which rule applied."""
+    have = [r for r in stats if "ai" in r and r["kind"] not in SKIP_KINDS]
+    ordinary = [r for r in have if r["kind"] in CAST_KINDS]
+    neutral = [r for r in have if float(np.hypot(r["model"][1], r["model"][2])) < NEUTRAL_CHROMA]
+    reflective = [r for r in have if r["kind"] not in CAST_KINDS]
+    if len(ordinary) >= 2:
+        use, ref = ordinary, "materials"
+    elif neutral:
+        use, ref = neutral, "neutral"
+    elif len(reflective) >= 2:
+        use, ref = reflective, "reflective"
+    else:
+        return {"dL": 0.0, "da": 0.0, "db": 0.0, "n": 0, "ref": "none"}
     offs = [r["ai"] - _expected(r["model"], r["ai"]) for r in use]
     w = [r["px"] for r in use]
     return {"dL": _wmedian([o[0] for o in offs], w), "da": _wmedian([o[1] for o in offs], w),
-            "db": _wmedian([o[2] for o in offs], w), "n": len(use)}
+            "db": _wmedian([o[2] for o in offs], w), "n": len(use), "ref": ref}
 
 
 def relative_error(rec, cast) -> dict:

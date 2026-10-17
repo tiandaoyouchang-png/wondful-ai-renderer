@@ -371,6 +371,24 @@ def _draw_progress_bar(layout, props, text):
         bar.prop(props, "progress", text=text, slider=True)
 
 
+def _draw_iou_gate(adv, context, props, busy):
+    """高级 › 轮廓验收 (1.2.3): fixed-coordinate IoU ≥ 0.95, bounded regeneration (≤ 3)."""
+    box = adv.box()
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "iou_gate", text="轮廓验收 · 不过线自动重生成", icon="CHECKMARK")
+    if getattr(props, "iou_gate", True):
+        row = box.row(align=True)
+        row.enabled = not busy
+        row.prop(props, "iou_gate_max", text="最多生成（次）")
+        box.label(text="IoU ≥ 0.95，固定坐标；通过即停，每次都从原始白模重画", icon="INFO")
+    note = getattr(props, "last_iou_note", "")
+    if note:
+        icon = "CHECKMARK" if "通过（" in note and "未通过" not in note else "ERROR"
+        for index, line in enumerate(wrap(note, width=44)[:3]):
+            box.label(text=line, icon=icon if index == 0 else "BLANK1")
+
+
 def _draw_detail_paste(adv, context, props, busy):
     """高级 › 细节回贴 (1.2.0): toggle, strength, 「标为原样保留」 on selected parts."""
     box = adv.box()
@@ -908,6 +926,8 @@ class WONDFUL_PT_main(Panel):
                 layers.label(text=line, icon="CHECKMARK" if index == 0 and "失败" not in props.last_layers_note
                              else ("ERROR" if index == 0 else "BLANK1"))
 
+        _draw_iou_gate(adv, context, props, busy)
+
         _draw_detail_paste(adv, context, props, busy)
 
         _draw_massing(adv, context, props, busy)
@@ -948,6 +968,11 @@ class WONDFUL_PT_main(Panel):
             if props.last_canvas_warning:
                 for line in wrap(props.last_canvas_warning, width=44)[:3]:
                     info.label(text=line)
+            iou_note = getattr(props, "last_iou_note", "")
+            if iou_note:
+                info.label(text="轮廓验收（固定坐标）", icon="CHECKMARK" if "未通过" not in iou_note and "待复核" not in iou_note else "ERROR")
+                for line in wrap(iou_note, width=44)[:3]:
+                    info.label(text=line, icon="BLANK1")
             score_note = getattr(props, "last_score_note", "")
             if score_note:
                 info.label(text="产品还原度（按输出像素）", icon="CHECKMARK")

@@ -1208,6 +1208,15 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
                 info["matid_seconds"] = round(time.time() - t_id, 1)
             except Exception as exc:
                 print(f"[Wondful] 材质 ID 渲染失败（跳过按材质校色）：{exc}")
+        if os.environ.get("WONDFUL_GEOMETRY_PASS", "1") != "0":
+            try:
+                t_g = time.time()
+                from .feature_lines import geometry_path_for
+                geo_path = geometry_path_for(filepath)
+                info["geometry"] = _render_geometry(scene, product, geo_path, orig_mats, created, slot_undo)
+                info["geometry_seconds"] = round(time.time() - t_g, 1)
+            except Exception as exc:
+                print(f"[Wondful] 结构线（几何）通道渲染失败（细节分改用细节底图）：{exc}")
         return info
     finally:
         for undo in reversed(slot_undo):
@@ -1252,6 +1261,108 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
                 {"mat": bpy.data.materials, "world": bpy.data.worlds}[kind].remove(block)
             except Exception:
                 pass
+
+
+def _render_geometry(scene, product, geo_path, orig_mats, created, slot_undo) -> bool:
+    """1.2.3 结构线通道: every product slot -> one emission material whose colour is the
+    camera-space normal (x, y as 0.5 + 0.5·n) and the camera distance mapped onto the product's
+    depth range (blue). Cycles, 4 samples, 0.01 px filter (no anti-aliasing across creases),
+    transparent film, written with the Standard view transform (sidecar says so). The feature
+    lines are found from it in numpy (``feature_lines``); it is never pasted anywhere."""
+    import json
+    from mathutils import Vector
+    render = scene.render
+    cycles = getattr(scene, "cycles", None)
+    cam = scene.camera
+    if cam is None:
+        return False
+    cpos = cam.matrix_world.translation
+    dists = []
+    for obj in product:
+        if obj.type not in _GEOMETRY_TYPES or obj.hide_render:
+            continue
+        for corner in getattr(obj, "bound_box", []) or []:
+            dists.append((obj.matrix_world @ Vector(corner) - cpos).length)
+    if not dists:
+        return False
+    dmin, dmax = min(dists) * 0.98, max(dists) * 1.02
+    mat = bpy.data.materials.new("_wondful_geometry")
+    created.append(("mat", mat))
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for node in list(nt.nodes):
+        nt.nodes.remove(node)
+    geo = nt.nodes.new("ShaderNodeNewGeometry")
+    vt = nt.nodes.new("ShaderNodeVectorTransform")
+    vt.vector_type, vt.convert_from, vt.convert_to = "NORMAL", "WORLD", "CAMERA"
+    nt.links.new(geo.outputs["Normal"], vt.inputs["Vector"])
+    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+    nt.links.new(vt.outputs["Vector"], sep.inputs[0])
+    comb = nt.nodes.new("ShaderNodeCombineXYZ")
+    for axis in (0, 1):
+        ma = nt.nodes.new("ShaderNodeMath")
+        ma.operation = "MULTIPLY_ADD"
+        ma.inputs[1].default_value = 0.5
+        ma.inputs[2].default_value = 0.5
+        nt.links.new(sep.outputs[axis], ma.inputs[0])
+        nt.links.new(ma.outputs[0], comb.inputs[axis])
+    camd = nt.nodes.new("ShaderNodeCameraData")
+    mr = nt.nodes.new("ShaderNodeMapRange")
+    mr.inputs["From Min"].default_value = dmin
+    mr.inputs["From Max"].default_value = dmax
+    mr.inputs["To Min"].default_value = 0.0
+    mr.inputs["To Max"].default_value = 1.0
+    nt.links.new(camd.outputs["View Distance"], mr.inputs["Value"])
+    nt.links.new(mr.outputs["Result"], comb.inputs[2])
+    em = nt.nodes.new("ShaderNodeEmission")
+    em.inputs["Strength"].default_value = 1.0
+    nt.links.new(comb.outputs[0], em.inputs["Color"])
+    outn = nt.nodes.new("ShaderNodeOutputMaterial")
+    nt.links.new(em.outputs[0], outn.inputs["Surface"])
+    for obj in sorted(product, key=lambda o: o.name):
+        if obj.type not in _GEOMETRY_TYPES or obj.hide_render:
+            continue
+        mats = getattr(getattr(obj, "data", None), "materials", None)
+        if mats is None:
+            continue
+        if len(obj.material_slots) == 0:
+            mats.append(None)
+            slot_undo.append(lambda mats=mats: mats.clear() if len(mats) <= 1 else mats.pop())
+        for slot in list(obj.material_slots):
+            old_link, old_mat = slot.link, slot.material
+            if old_link != "OBJECT":
+                slot.link = "OBJECT"
+
+            def undo(slot=slot, link=old_link, mat=old_mat):
+                if slot.link != "OBJECT":
+                    slot.link = "OBJECT"
+                slot.material = mat
+                if link != "OBJECT":
+                    slot.link = link
+            slot_undo.append(undo)
+            slot.material = mat
+    render.engine = "CYCLES"
+    if cycles is not None:
+        cycles.samples = 4
+        cycles.use_denoising = False
+        cycles.max_bounces = 0
+        if hasattr(cycles, "filter_width"):
+            cycles.filter_width = 0.01
+    if hasattr(render, "dither_intensity"):
+        render.dither_intensity = 0.0
+    vs = scene.view_settings
+    srgb = True
+    try:
+        vs.view_transform = "Standard"
+    except Exception:
+        pass
+    render.filepath = geo_path
+    bpy.ops.render.render(write_still=True)
+    with open(geo_path + ".json", "w", encoding="utf-8") as fh:
+        json.dump({"srgb": srgb, "depth_range": [round(dmin, 4), round(dmax, 4)],
+                   "encoding": "rgb = 0.5+0.5*n_cam.x, 0.5+0.5*n_cam.y, view distance mapped to depth_range"},
+                  fh, ensure_ascii=False, indent=1)
+    return Path(geo_path).exists()
 
 
 def _render_matid(scene, product, matid_path, orig_mats, created, slot_undo) -> bool:

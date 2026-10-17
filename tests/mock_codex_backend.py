@@ -66,6 +66,28 @@ def edited_png(first_image_data_url, size):
         return solid_png(w, h)
 
 
+# 1.2.3: error bodies. http_401_real and the 400 shape were recorded from the real ChatGPT Codex
+# backend on 2026-10-17 (bad token / unknown parameter; no generation spent). The 429 and in-stream
+# failure bodies follow the shapes the open-source Codex CLI parses (usage_limit_reached with
+# resets_in_seconds; rate_limit_exceeded "Please try again in Ns"); ids/accounts sanitized.
+FIXTURES = {
+    "http_401_real": b'{"detail":"Could not parse your authentication token. Please try signing in again."}',
+    "http_400_real": b'{"detail":"Unsupported parameter: bogus_param_xyz"}',
+    "http_429_usage_limit": (b'{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached",'
+                             b'"plan_type":"plus","resets_in_seconds":7200}}'),
+    "http_429_rate": (b'{"error":{"type":"rate_limit_exceeded","code":"rate_limit_exceeded",'
+                      b'"message":"Rate limit reached for requests. Please try again in 1s."}}'),
+    "http_400_usage_not_included": (b'{"error":{"type":"usage_not_included","message":'
+                                    b'"Image generation is not included in your current plan usage."}}'),
+    "sse_failed_usage_limit": ('{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":'
+                               '{"code":"usage_limit_reached","message":"You\'ve hit your usage limit. Try again later."}}}'),
+    "sse_failed_rate_limit": ('{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":'
+                              '{"code":"rate_limit_exceeded","message":"Rate limit reached. Please try again in 0.3s."}}}'),
+    "sse_error_token_invalidated": ('{"type":"error","error":{"type":"invalid_request_error","code":"token_invalidated",'
+                                    '"message":"Your authentication token has been invalidated. Please try signing in again."}}'),
+}
+
+
 def _shorten(value):
     if isinstance(value, dict):
         return {k: _shorten(v) for k, v in value.items()}
@@ -105,6 +127,15 @@ def make_handler(state: State):
         def _send(self, code, body: bytes, ctype="application/json"):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_h(self, code, body: bytes, headers: dict, ctype="application/json"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            for k, v in headers.items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -153,7 +184,35 @@ def make_handler(state: State):
             if mode == "400_then_ok" and payload["tools"][0].get("model"):
                 return self._send(400, b'{"error":{"message":"Unknown parameter: tools[0].model"}}')
             if mode == "quota":
-                return self._send(429, b'{"error":{"type":"usage_limit_reached","message":"usage_limit_reached"}}')
+                return self._send(429, FIXTURES["http_429_usage_limit"])
+            # 1.2.3 error-classification fixtures (sanitized; see FIXTURES)
+            if mode == "401_always":
+                return self._send(401, FIXTURES["http_401_real"])
+            if mode == "rate_then_ok" and state.response_calls == 1:
+                return self._send_h(429, FIXTURES["http_429_rate"], {"Retry-After": "1"})
+            if mode == "rate_long":
+                return self._send_h(429, FIXTURES["http_429_rate"], {"Retry-After": "900"})
+            if mode == "400_quota_text":
+                return self._send(400, FIXTURES["http_400_usage_not_included"])
+            if mode in ("stream_quota", "stream_rate_then_ok", "stream_auth") and not (
+                    mode == "stream_rate_then_ok" and state.response_calls > 1):
+                key = {"stream_quota": "sse_failed_usage_limit", "stream_rate_then_ok": "sse_failed_rate_limit",
+                       "stream_auth": "sse_error_token_invalidated"}[mode]
+                events = [{"type": "response.created", "response": {"id": "resp_1"}}, json.loads(FIXTURES[key])]
+                stream = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+                return self._send(200, stream, "text/event-stream")
+            if mode in ("stream_cut_then_ok", "stream_cut_always") and not (
+                    mode == "stream_cut_then_ok" and state.response_calls > 1):
+                # headers + the first event, then the connection drops (no Content-Length, close)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                ev = {"type": "response.created", "response": {"id": "resp_cut"}}
+                self.wfile.write(f"event: response.created\ndata: {json.dumps(ev)}\n\n".encode())
+                self.wfile.flush()
+                self.close_connection = True
+                return
             content = payload["input"][0]["content"]
             first = next(c["image_url"] for c in content if c.get("type") == "input_image")
             png = edited_png(first, payload["tools"][0].get("size", "auto"))

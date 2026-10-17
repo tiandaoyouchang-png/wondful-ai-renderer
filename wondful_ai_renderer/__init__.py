@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Wondful AI 渲染器 1.2",
     "author": "Wondful AI",
-    "version": (1, 2, 2),
+    "version": (1, 2, 3),
     "blender": (4, 3, 0),
     "location": "3D Viewport > Sidebar > Wondful AI",
     "description": "Deterministic Geometry → Structure Packet → Generative Appearance；Camera Base + Mask/Depth/Normal/Silhouette/Part-ID + Jev Semantic Layer",

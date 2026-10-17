@@ -96,7 +96,7 @@ def codex_models(cli, *, cwd, timeout=30, process_factory=ManagedProcess):
         raise RuntimeError("读取 Codex 模型列表超时；请检查 CLI 状态后重试。")
 
     try:
-        request(1, "initialize", {"clientInfo": {"name": "wondful_renderer", "title": "Wondful AI Renderer", "version": "1.2.2"}})
+        request(1, "initialize", {"clientInfo": {"name": "wondful_renderer", "title": "Wondful AI Renderer", "version": "1.2.3"}})
         process.write_line(json.dumps({"method": "initialized"}))
         rows, cursor, seen = [], None, set()
         for request_id in range(2, 22):
