@@ -1001,13 +1001,44 @@ def _holdout_material(name):
     return mat
 
 
-def _isolate_product(scene, product, holdout, hidden, held, hide_lights=False):
+_RAY_FLAGS = ("visible_diffuse", "visible_glossy", "visible_transmission", "visible_volume_scatter", "visible_shadow")
+
+
+def _camera_only(obj, rays):
+    """多角度一致 fix: a holdout must still occlude the product for the camera but must not shade it.
+    Without this a closed room (walls + ceiling in 环境体块) blocks the even white world of the
+    detail pass and the product comes out black, which breaks 细节回贴, 按材质校色 and
+    产品还原度 (detail edge / colour ΔE measured against a black reference)."""
+    snap = {}
+    for flag in _RAY_FLAGS:
+        if hasattr(obj, flag):
+            try:
+                snap[flag] = bool(getattr(obj, flag))
+                setattr(obj, flag, False)
+            except Exception:
+                pass
+    if snap:
+        rays.append((obj, snap))
+
+
+def _restore_rays(rays):
+    for obj, snap in reversed(rays or ()):
+        for flag, val in snap.items():
+            try:
+                setattr(obj, flag, val)
+            except Exception:
+                pass
+
+
+def _isolate_product(scene, product, holdout, hidden, held, hide_lights=False, rays=None):
     hold = set(holdout)
     for obj in scene.objects:
         if obj in hold:
             if not getattr(obj, "is_holdout", True):
                 obj.is_holdout = True
                 held.append(obj)
+            if rays is not None:
+                _camera_only(obj, rays)
             continue
         if obj in product or obj.hide_render:
             continue
@@ -1088,7 +1119,7 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
     info = {"detail": False, "keep": False, "matid": False, "keep_slots": 0, "engine": ""}
     if not product:
         return info
-    hidden, held, created, slot_undo = [], [], [], []
+    hidden, held, created, slot_undo, rays = [], [], [], [], []
     holdout = [o for o in holdout or () if o not in product and not o.hide_render]
     view_layer = context.view_layer
     old = {"override": view_layer.material_override, "engine": render.engine,
@@ -1107,7 +1138,7 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
         for i, slot in enumerate(getattr(obj, "material_slots", []) or []):
             orig_mats[(obj, i)] = slot.material
     try:
-        _isolate_product(scene, product, holdout, hidden, held, hide_lights=True)
+        _isolate_product(scene, product, holdout, hidden, held, hide_lights=True, rays=rays)
         view_layer.material_override = None
         world = bpy.data.worlds.new("_wondful_detail_world")
         world.use_nodes = True
@@ -1224,6 +1255,7 @@ def _render_detail_now(context, filepath: str, collection, holdout=(), keep_path
                 undo()
             except Exception as exc:
                 print(f"[Wondful] 恢复材质槽失败：{exc}")
+        _restore_rays(rays)
         _unisolate(hidden, held)
         view_layer.material_override = old["override"]
         render.engine = old["engine"]
@@ -1481,7 +1513,8 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
 
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
-                     keep_path: str = "", matid_path: str = "") -> bool:
+                     keep_path: str = "", matid_path: str = "", geometry_prefix: str = "",
+                     geometry_size=None) -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -1662,6 +1695,15 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             pass
         _render_still(scene)
         ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
+        if ok and geometry_prefix:
+            # 1.2.3 多角度一致: world position + normal passes with the same floor / pose / blocks
+            try:
+                from .multiview import render_geometry_now
+                gw, gh = geometry_size or (width, height)
+                LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
+            except Exception as exc:
+                LAST_CLAY_INFO["geometry"] = False
+                print(f"[Wondful] 多角度一致：几何通道失败：{exc}")
         if ok and mask_path and collection is not None:
             # 1.2.0 分层输出: same camera, same temporary product pose as the clay base.
             try:

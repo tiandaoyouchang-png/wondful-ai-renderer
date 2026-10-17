@@ -794,6 +794,36 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.3 多角度一致 (高级): other cameras rendered consistent with one accepted master view
+    ui_show_multiview: BoolProperty(name="多角度一致", default=False)
+    mv_master_camera: PointerProperty(
+        name="主视角",
+        description="已经渲染满意的那个相机；其他选中的相机按它的画面保持环境、光照一致",
+        type=bpy.types.Object,
+        poll=lambda self, obj: getattr(obj, "type", "") == "CAMERA",
+    )
+    mv_master_image: StringProperty(
+        name="主视角图",
+        description="主视角已满意的渲染结果（PNG）；点「设为主视角」时自动填最近一次的结果",
+        subtype="FILE_PATH",
+        default="",
+    )
+    mv_widen: BoolProperty(
+        name="加宽体块",
+        description="临时补齐主视角以外的环境：室内补上看不到的墙，建筑场景在外圈补朴素的普通楼；渲染完自动删除",
+        default=True,
+    )
+    mv_env_check: BoolProperty(
+        name="环境一致性检查",
+        description="只看建筑 / 地面 / 室内墙地（不看天空）：与主视角色差超过 15 且两个视角共同可见超过一半时，重试 1 次。"
+                    "产品超标（细节边缘 > 6px、颜色 ΔE > 15、偏移 > 4px、缩放 > 1.5%）总是重试 1 次",
+        default=True,
+    )
+    last_mv_note: StringProperty(
+        name="多角度一致",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     # 1.2.0 环境体块 › 从三视图生成建筑体块 (visual hull of a building, into the massing collection)
     ui_show_massing_hull: BoolProperty(name="从三视图生成建筑体块", default=False)
     hull_input: EnumProperty(

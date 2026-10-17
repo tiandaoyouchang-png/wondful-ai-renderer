@@ -345,6 +345,27 @@ def main():
     props.last_hull_note = ""
     props.ui_show_massing_hull = False
 
+    # 4b. 1.2.3 多角度一致: closed, open without master, with master + selected cameras, after a run
+    props.ui_show_multiview = True
+    draw("multiview_empty")
+    cam_data = bpy.data.cameras.new("mv_cam")
+    master = bpy.data.objects.new("MV主视角", cam_data)
+    other = bpy.data.objects.new("MV其他", cam_data.copy())
+    for o in (master, other):
+        bpy.context.scene.collection.objects.link(o)
+    bpy.context.scene.camera = master
+    res = bpy.ops.wondful.mv_set_master()
+    if props.mv_master_camera != master:
+        problems.append(f"mv_set_master did not set the master: {res}")
+    for o in bpy.context.view_layer.objects:
+        o.select_set(o == other)
+    draw("multiview_ready")
+    props.last_mv_note = ("多角度一致：2/2 个相机完成 · 图像调用 3 次 · 重试：MV其他（细节边缘 7.1px） · "
+                          "注意：产品前方有遮挡物（MV其他 遮挡 38%），可移动相机")
+    draw("multiview_done")
+    props.last_mv_note = ""
+    props.ui_show_multiview = False
+
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"
     props.last_error = "测试错误：网络超时，请稍后重试。" * 3

@@ -467,6 +467,44 @@ def _draw_massing(adv, context, props, busy):
     _draw_massing_hull(box, props, busy)
 
 
+def _draw_multiview(adv, context, props, busy):
+    """高级 › 多角度一致 (1.2.3): master camera + its accepted image, render the other selected cameras."""
+    box = adv.box()
+    if not _disclosure(box.row(align=True), props, "ui_show_multiview", "多角度一致", icon="OUTLINER_OB_CAMERA"):
+        return
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "mv_master_camera", text="主视角")
+    row.operator("wondful.mv_set_master", text="设为主视角", icon="CAMERA_DATA")
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "mv_master_image", text="主视角图")
+    master = getattr(props, "mv_master_camera", None)
+    try:
+        others = [o for o in (getattr(context, "selected_objects", None) or [])
+                  if getattr(o, "type", "") == "CAMERA" and o != master]
+    except Exception:
+        others = []
+    if master is None:
+        box.label(text="先用 ⑤ 渲染一个满意的相机，再点「设为主视角」", icon="INFO")
+    box.label(text=f"选中的其他相机：{len(others)} 个" + ("（在视图里选中要渲染的相机）" if not others else ""),
+              icon="CHECKMARK" if others else "INFO")
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "mv_widen", text="加宽体块")
+    row.prop(props, "mv_env_check", text="环境一致性检查")
+    box.label(text="离主视角最近的先渲染；每个相机 1 次生图，产品超标最多重试 1 次", icon="INFO")
+    act = box.row(align=True)
+    act.enabled = bool(master is not None and others) and not busy
+    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机" if others else "渲染选中的相机",
+                 icon="RENDER_STILL")
+    note = getattr(props, "last_mv_note", "")
+    if note:
+        bad = ("失败" in note) or ("未完成" in note) or ("超标" in note) or ("注意" in note)
+        for index, line in enumerate(wrap(note, width=44)[:5]):
+            box.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+
+
 def _draw_block_refs(box, context, props, busy, blocks):
     """建筑参考: the active block's 1–3 reference images, then every block with its ref count."""
     from . import massing as MS
@@ -931,6 +969,8 @@ class WONDFUL_PT_main(Panel):
         _draw_detail_paste(adv, context, props, busy)
 
         _draw_massing(adv, context, props, busy)
+
+        _draw_multiview(adv, context, props, busy)
 
         lock_box = adv.box()
         if _disclosure(lock_box.row(align=True), props, "ui_show_appearance_lock", "产品外观锁定（自动填写）", icon="LOCKED"):

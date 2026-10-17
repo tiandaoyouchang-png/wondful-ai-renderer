@@ -3499,3 +3499,378 @@ class WONDFUL_OT_prompt_line_remove(Operator):
             props.prompt_line_index = max(0, min(idx, len(props.prompt_lines) - 1))
             _set_prompt_text(props, "\n".join(item.text.rstrip() for item in props.prompt_lines).strip())
         return {"FINISHED"}
+
+
+# --------------------------------------------------------------------------- 1.2.3 多角度一致
+
+def _mv_selected_cameras(context, master):
+    return [o for o in (getattr(context, "selected_objects", None) or [])
+            if getattr(o, "type", "") == "CAMERA" and o != master]
+
+
+class WONDFUL_OT_mv_set_master(Operator):
+    """多角度一致: the current scene camera becomes 主视角, its latest result the master image."""
+    bl_idname = "wondful.mv_set_master"
+    bl_label = "设为主视角"
+    bl_description = "把当前场景相机标为主视角，并用它最近一次的渲染结果作为主视角图（也可以在下面另选一张已满意的图）"
+
+    def execute(self, context):
+        props = context.scene.wondful_ai
+        cam = context.scene.camera
+        if cam is None or cam.type != "CAMERA":
+            self.report({"ERROR"}, "场景里没有活动相机。")
+            return {"CANCELLED"}
+        props.mv_master_camera = cam
+        last = (getattr(props, "last_export_path", "") or getattr(props, "last_result_path", "") or "").strip()
+        if last and Path(last).is_file():
+            props.mv_master_image = last
+            self.report({"INFO"}, f"主视角：{cam.name}（主视角图：{Path(last).name}）")
+        else:
+            self.report({"WARNING"}, f"主视角：{cam.name}；还没有它的渲染结果，请先渲染或在下面选择主视角图。")
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
+    """1.2.3 多角度一致: render the other selected cameras so they agree with the master view."""
+    bl_idname = "wondful.multiview_render"
+    bl_label = "多角度一致渲染"
+    bl_description = ("按主视角渲染选中的其他相机：离主视角最近的先渲染，已完成的视角投影到环境体块上作为底图，"
+                      "光照方向在世界里固定；每个相机 1 次生图，产品超标时最多重试 1 次")
+
+    def execute(self, context):
+        import numpy as np
+        from . import multiview as MV
+        from . import codex_direct as CD
+        from .viewport_capture import render_clay_base, LAST_CLAY_INFO, keep_exact_slots, keep_exact_texts
+        from .terrain import settings_from_props
+        from .massing import find_collection as _find_massing
+        from .png_io import read_png
+        from .layered_output import resize
+        scene = context.scene
+        props = scene.wondful_ai
+        prefs = _addon_prefs(context)
+        provider = _analysis_provider(props, prefs)
+        if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
+            self.report({"ERROR"}, "多角度一致需要 Codex 图像编辑直连（高级 › AI 与模型）。")
+            return {"CANCELLED"}
+        master = getattr(props, "mv_master_camera", None)
+        if master is None or master.type != "CAMERA" or master.name not in scene.objects:
+            self.report({"ERROR"}, "请先把已满意的相机设为主视角。")
+            return {"CANCELLED"}
+        master_img = bpy.path.abspath(getattr(props, "mv_master_image", "") or "")
+        if not master_img or not Path(master_img).is_file():
+            self.report({"ERROR"}, "主视角图不存在：请先渲染主视角，或选择一张已满意的主视角图。")
+            return {"CANCELLED"}
+        coll = getattr(props, "product_collection", None)
+        if coll is None:
+            self.report({"ERROR"}, "多角度一致需要先在 ② 选择产品集合。")
+            return {"CANCELLED"}
+        others = _mv_selected_cameras(context, master)
+        skipped = [o.name for o in others if getattr(o.data, "type", "PERSP") != "PERSP"]
+        others = [o for o in others if o.name not in skipped]
+        if not others:
+            self.report({"ERROR"}, "请在视图里选中要渲染的其他相机（主视角以外，透视相机）。")
+            return {"CANCELLED"}
+        configured = (props.output_directory or "").strip() or (prefs.output_directory or "").strip()
+        try:
+            out_dir = resolve_output_directory(context, configured)
+            preflight_output_directory(out_dir)
+        except Exception as exc:
+            self.report({"ERROR"}, f"输出目录不可用：{exc}")
+            return {"CANCELLED"}
+        W, H = camera_output_dimensions(context)
+        ww, wh = MV.work_size(W, H)
+        pool = out_dir / "多角度一致" / f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}"
+        pool.mkdir(parents=True, exist_ok=True)
+        massing_coll = _find_massing(scene, props)
+        made, wlog = [], {}
+        old_cam = scene.camera
+        views = {}
+        t_prep = time.time()
+        try:
+            if bool(getattr(props, "mv_widen", True)) and massing_coll is not None:
+                try:
+                    made, wlog = MV.widen_blockout(context, massing_coll, coll, master)
+                except Exception as exc:
+                    print(f"[Wondful] 多角度一致：加宽体块失败：{exc}")
+            for cam in [master] + others:
+                scene.camera = cam
+                context.view_layer.update()
+                pre = pool / MV.safe_name(cam.name)
+                files = {k: f"{pre}_{k}.png" for k in ("clay", "mask", "detail", "keep", "matid")}
+                ok = render_clay_base(context, files["clay"], coll, ground=getattr(props, "clay_ground", "AUTO"),
+                                      crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
+                                      terrain=settings_from_props(props), mask_path=files["mask"], massing=massing_coll,
+                                      detail_path=files["detail"], keep_path=files["keep"], matid_path=files["matid"],
+                                      geometry_prefix=str(pre), geometry_size=(ww, wh))
+                if not ok or not LAST_CLAY_INFO.get("geometry") or not Path(files["mask"]).is_file():
+                    raise RuntimeError(f"相机 {cam.name} 的白模 / 几何通道渲染失败")
+                m = read_png(files["mask"]).astype(np.float32)
+                m = (m[..., 3] if m.shape[-1] == 4 else m[..., 0]) / 255.0
+                np.save(f"{pre}_maskw.npy", np.clip(resize(m, ww, wh), 0, 1).astype(np.float32))
+                rec = MV.scene_camera_record(scene, cam)
+                blocked = hidden = 0.0
+                if cam != master:
+                    try:
+                        blocked, hidden = MV.obstacle(context, cam, coll)
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度一致：遮挡检查失败：{exc}")
+                views[cam.name] = {"name": cam.name, "cam": rec, "files": files, "prefix": str(pre),
+                                   "massing_text": str(LAST_CLAY_INFO.get("massing_text", "") or ""),
+                                   "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
+        except Exception as exc:
+            self.report({"ERROR"}, f"多角度一致准备失败：{exc}")
+            props.last_mv_note = f"多角度一致准备失败：{exc}"
+            return {"CANCELLED"}
+        finally:
+            scene.camera = old_cam
+            MV.remove_aux(made)
+            try:
+                context.view_layer.update()
+            except Exception:
+                pass
+        centre = None
+        b = MV.product_bounds(coll)
+        if b is not None:
+            centre = [(b[0].x + b[1].x) / 2, (b[0].y + b[1].y) / 2, (b[0].z + b[1].z) / 2]
+        order = MV.order_views(views[master.name]["cam"], [views[o.name]["cam"] for o in others], centre or [0, 0, 0])
+        from .product_kind import is_vehicle as _is_vehicle
+        try:
+            vehicle = bool(_is_vehicle(props))
+        except Exception:
+            vehicle = False
+        keep_text = ""
+        try:
+            slots, texts = keep_exact_slots(coll), keep_exact_texts(coll)
+            if slots or texts:
+                from .detail_paste import keep_prompt
+                keep_text = keep_prompt(vehicle, texts or ())
+        except Exception:
+            pass
+        env_refs = [str(Path(p).resolve()) for p in _reference_paths(props)["style"] if Path(p).is_file()]
+        manifest = [{"path": p, "members": [{"role": "environment"}]} for p in env_refs]
+        brief = (getattr(props, "scene_brief", "") or "").strip()
+        model = str(getattr(prefs, "codex_model", "") or "")
+        client_version = str(getattr(props, "codex_cli_version", "") or "")
+        size = CD.choose_edit_size(W, H, int(getattr(prefs, "long_edge", 2048) or 2048))
+        paste = bool(getattr(props, "detail_paste", True))
+        colour_fix = bool(getattr(props, "detail_colour_fix", True))
+        strength = float(getattr(props, "detail_paste_strength", 0.8))
+        colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
+        env_check = bool(getattr(props, "mv_env_check", True))
+        self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
+                    "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name}
+        self._phase = "多角度一致：准备完成"
+        self._estimated_total = 15.0 + 80.0 * len(others)
+        _status(props, "RENDERING")
+        props.progress = 0.05
+        props.last_mv_note = "多角度一致：生成中…"
+        master_name = master.name
+
+        def job():
+            import numpy as np
+            from .cli_transport import is_cancellation_requested as cancelled
+            from .png_io import write_png
+            from . import result_worker as RW
+            t0 = time.time()
+            mv = views[master_name]
+            master_png = pool / "master.png"
+            if not RW.fit_to_canvas(master_img, master_png, W, H):
+                raise RuntimeError("主视角图无法读取（请用 PNG）")
+            entry_m = {"name": master_name, "cam": mv["cam"], "pos": Path(mv["prefix"] + "_pos.npy").name,
+                       "nrm": Path(mv["prefix"] + "_nrm.npy").name, "mask": Path(mv["prefix"] + "_maskw.npy").name,
+                       "image": master_png.name, "master": True}
+            data = MV.read_pool(pool)
+            reused = [e for e in data.get("views", []) if not e.get("master") and e["name"] not in views
+                      and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()]
+            light, light_note = None, ""
+            lp = pool / MV.LIGHT_FILE
+            key = MV.file_md5(master_png)
+            try:
+                cached = json.loads(lp.read_text(encoding="utf-8")) if lp.is_file() else {}
+            except (OSError, ValueError):
+                cached = {}
+            if cached.get("key") == key and cached.get("light"):
+                light = cached["light"]
+            else:
+                self._phase = "多角度一致：读取主视角光照"
+                try:
+                    light = MV.world_light(MV.estimate_light(str(master_png), client_version=client_version, model=model,
+                                                             cancel_check=cancelled), mv["cam"])
+                    lp.write_text(json.dumps({"key": key, "light": light}, ensure_ascii=False, indent=1), encoding="utf-8")
+                except CD.DirectEditError as exc:
+                    if exc.kind == "cancelled" or exc.kind in CD.STOP_KINDS:
+                        raise
+                    light_note = f"光照估计失败（未锁定光照）：{str(exc)[:60]}"
+                except Exception as exc:
+                    light_note = f"光照估计失败（未锁定光照）：{str(exc)[:60]}"
+            master_view = MV.load_view(pool, entry_m)
+            sources = [master_view] + [MV.load_view(pool, e) for e in reused]
+            results = []
+            accepted = [entry_m] + reused
+            stop = None
+            for i, rec in enumerate(order, start=1):
+                v = views[rec["name"]]
+                res = {"name": rec["name"], "ok": False, "calls": 0, "obstacle": v["obstacle"], "hidden": v["hidden"]}
+                results.append(res)
+                if stop:
+                    res["error"] = stop
+                    continue
+                if cancelled():
+                    raise RuntimeError("任务已取消")
+                self._phase = f"多角度一致：{rec['name']}（{i}/{len(order)}）"
+                pre = v["prefix"]
+                vk = {"name": rec["name"], "cam": rec, "pos": np.load(pre + "_pos.npy"), "nrm": np.load(pre + "_nrm.npy"),
+                      "mask": np.load(pre + "_maskw.npy")}
+                clay_full = read_png(v["files"]["clay"]).astype(np.float32)[..., :3]
+                mfull = read_png(v["files"]["mask"]).astype(np.float32)
+                mfull = (mfull[..., 3] if mfull.shape[-1] == 4 else mfull[..., 0]) / 255.0
+                env, cover, _srcmap, st = MV.build_base(vk, sources, resize(clay_full, ww, wh))
+                base = pre + "_base.png"
+                write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
+                res["projection"] = st
+                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec), [s["name"] for s in sources])
+                Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
+                work = Path(pre + "_work")
+                work.mkdir(exist_ok=True)
+                spec = {"detail": v["files"]["detail"], "mask": v["files"]["mask"], "keep": v["files"]["keep"],
+                        "matid": v["files"]["matid"] if colour_fix else "", "strength": strength,
+                        "colour_strength": colour_strength, "work_dir": str(work), "mirrored": []}
+                matid = spec["matid"] if spec["matid"] and Path(spec["matid"]).is_file() else ""
+                tries = []
+                for n in range(1, MV.MAX_CALLS + 1):
+                    raw = pre + f"_try{n}_raw.png"
+                    try:
+                        r = CD.edit_image(prompt="", edit_base_path=base, reference_paths=env_refs, manifest=manifest,
+                                          output_path=raw, size=size, model=model, client_version=client_version,
+                                          log_dir=str(pool), tag=f"mv_{MV.safe_name(rec['name'])}_try{n}",
+                                          cancel_check=cancelled, simple_brief=brief, vehicle=vehicle,
+                                          massing_text=text, keep_text=keep_text)
+                    except CD.DirectEditError as exc:
+                        res["calls"] += 1
+                        if exc.kind == "cancelled":
+                            raise
+                        if exc.kind in CD.STOP_KINDS or exc.fatal:
+                            stop = CD.stop_message(exc.kind, str(exc))
+                        res["error"] = str(exc)[:160]
+                        break
+                    res["calls"] += 1
+                    canvas = pre + f"_try{n}.png"
+                    if not RW.fit_to_canvas(raw, canvas, W, H):
+                        res["error"] = "结果图无法读取"
+                        break
+                    rep, _note = RW.identity_scores(canvas, spec, matid)
+                    gate = {}
+                    try:      # fixed-coordinate silhouette (轮廓验收, ~1 s): did the product really move?
+                        gate = RW.gate_score(raw, v["files"]["mask"], W, H, str(work), f"try{n}", cancelled,
+                                             detail_path=v["files"]["detail"])
+                    except RW.Cancelled:
+                        raise
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度一致：轮廓验收失败：{exc}")
+                    img_w = resize(read_png(canvas).astype(np.float32)[..., :3], ww, wh)
+                    rp = MV.reproj_de(master_view, vk, img_w)
+                    t = {"file": canvas, "identity": {k: rep.get(k) for k in ("shift_px", "scale_pct", "outline_px", "edge_px",
+                                                                          "edge_px_detail", "colour_dE", "error")},
+                         "iou": gate.get("iou"), "iou_verdict": gate.get("verdict"),
+                         "reproj": rp, "product_violations": MV.product_violations(rep, gate.get("verdict")),
+                         "env_violations": MV.env_violations(rp, env_check), "seconds": r.get("seconds"),
+                         "image_model": r.get("image_model", "")}
+                    tries.append(t)
+                    if not t["product_violations"] and not t["env_violations"]:
+                        break
+                if not tries:
+                    continue
+                best = MV.choose(tries)
+                res.update({"tries": tries, "chosen": Path(best["file"]).name, "identity": best["identity"],
+                            "reproj": best["reproj"], "product_violations": best["product_violations"],
+                            "env_violations": best["env_violations"],
+                            "retry_reason": (tries[0]["product_violations"] + tries[0]["env_violations"]) if len(tries) > 1 else []})
+                final = best["file"]
+                if paste:
+                    out = RW.paste_and_score(best["file"], 1, spec, cancelled)
+                    final = out.get("final") or final
+                    res["detail_note"] = out.get("detail_note", "")
+                    res["score_note"] = out.get("score_note", "")
+                img_name = MV.safe_name(rec["name"]) + "_accepted.png"
+                shutil.copy2(final, pool / img_name)
+                res["final"] = str(pool / img_name)
+                res["raw"] = best["file"]
+                res["ok"] = True
+                entry = {"name": rec["name"], "cam": rec, "pos": Path(pre + "_pos.npy").name, "nrm": Path(pre + "_nrm.npy").name,
+                         "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False}
+                accepted.append(entry)
+                sources.append(MV.load_view(pool, entry))
+                MV.write_pool(pool, {"master": master_name, "views": accepted})
+                (pool / f"{MV.safe_name(rec['name'])}_meta.json").write_text(
+                    json.dumps(res, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            summary = {"results": results, "light": light, "light_note": light_note, "seconds": round(time.time() - t0, 1),
+                       "order": [r["name"] for r in order], "reused": [e["name"] for e in reused]}
+            (pool / "last_run.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+            return summary
+
+        if not self._start_thread(context, job):
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def _modal(self, context, event):
+        from . import multiview as MV
+        props = self._origin_scene.wondful_ai
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        if self._thread and self._thread.is_alive():
+            self._progress_update(props, 0.08, 0.95)
+            return {"RUNNING_MODAL"}
+        self._cleanup(context)
+        props.progress = 0.0
+        props.eta_seconds = 0
+        if self._error:
+            _status(props, "ERROR", f"多角度一致失败：{self._error[0]}")
+            props.last_mv_note = props.last_error
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        info = self._mv
+        summary = self._result or {}
+        exported = []
+        for r in summary.get("results", []):
+            if not r.get("ok"):
+                continue
+            try:
+                p = export_result(r["final"], info["out_dir"], info["scene"], r["name"], "多角度一致")
+                r["exported"] = str(p)
+                exported.append(str(p))
+                if r.get("raw"):
+                    from .detail_paste import raw_path
+                    shutil.copy2(r["raw"], raw_path(p))
+            except Exception as exc:
+                r["export_error"] = str(exc)
+        notes = [MV.summary_line(summary.get("results", []))]
+        warn = [f"{r['name']} 遮挡 {r['obstacle'] * 100:.0f}%" for r in summary.get("results", [])
+                if (r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25]
+        if warn:
+            notes.append("注意：产品前方有遮挡物（" + "、".join(warn) + "），可移动相机")
+        if info.get("skipped"):
+            notes.append("已跳过正交相机：" + "、".join(info["skipped"]))
+        if summary.get("light_note"):
+            notes.append(summary["light_note"])
+        failed = [f"{r['name']}：{r.get('error')}" for r in summary.get("results", []) if not r.get("ok") and r.get("error")]
+        if failed:
+            notes.append("未完成：" + "；".join(failed)[:160])
+        props.last_mv_note = " · ".join(n for n in notes if n)
+        if exported:
+            props.last_export_path = exported[-1]
+            props.last_result_path = exported[-1]
+            props.last_export_paths = json.dumps(exported, ensure_ascii=False)
+            try:
+                props.result_image = load_image(exported[-1], "Wondful_Result")
+            except Exception:
+                pass
+        try:
+            (Path(info["pool"]) / "last_run.json").write_text(
+                json.dumps(dict(summary, exported=exported, widen=info.get("widen"), prep_seconds=info.get("prep_seconds")),
+                           ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        except Exception:
+            pass
+        _status(props, "IDLE" if exported else "ERROR", "" if exported else props.last_mv_note)
+        self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note[:200])
+        return {"FINISHED"} if exported else {"CANCELLED"}
