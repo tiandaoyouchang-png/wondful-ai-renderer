@@ -684,16 +684,18 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     if (keep_text or "").strip():
         lines.append((keep_text or "").strip())
     massing_text = (massing_text or "").strip()
+    room = "室内物体" in massing_text  # 1.2.3: massing.INTERIOR_MARK — a room blockout, not buildings
+    block_noun = "各自名称对应的室内物体" if room else "建筑 / 结构"
     if massing_text:
         lines.append(massing_text)
     if building_text:
         lines.append(building_text)
     if vehicle:
-        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成建筑 / 结构，不删除）：" if massing_text
+        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
                      "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
     else:
-        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成建筑 / 结构，不删除）：" if massing_text
+        lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
                      "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
                      "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
@@ -711,10 +713,10 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         elif tag:
             lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
                          f"部件和 Logo 全部以{src}为准，不要照搬参考图里的任何物体。")
-        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + (("和灰蓝色体块对应的建筑 / 结构（有建筑参考图的体块按各自参考图，其余按描述来）" if building_text
-                                                          else "和灰蓝色体块对应的建筑 / 结构（它们的风格和材质也按描述来）")
+        lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + (("和灰蓝色体块对应的" + block_noun + "（有建筑参考图的体块按各自参考图，其余按描述来）" if building_text
+                                                          else "和灰蓝色体块对应的" + block_noun + "（它们的风格和材质也按描述来）")
                                                          if massing_text else "")
-                     + "，不额外添加" + ("其他" if massing_text else "") + "建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
+                     + "，不额外添加" + ("其他" if massing_text else "") + ("家具、" if room else "") + "建筑、遗迹、太阳、眩光、云层等描述没写的东西，"
                      "光线方向、太阳高度、色温和反差与描述一致，不要做得比描述更戏剧化。")
     if scene:
         lines.append("场景要求：" + scene + "。")

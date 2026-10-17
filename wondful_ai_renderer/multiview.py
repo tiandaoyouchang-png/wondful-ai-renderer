@@ -694,16 +694,11 @@ def obstacle(context, cam_obj, product_coll, nx=20, ny=12):
 
 
 def _block_words(obj) -> str:
-    from .massing import HINT_PROPS, hint_from_name
-    custom = ""
-    for key in HINT_PROPS:
-        try:
-            if key in obj.keys():
-                custom = str(obj[key])
-                break
-        except Exception:
-            pass
-    return (hint_from_name(obj.name, custom) + " " + obj.name).lower()
+    """Name words of one block for the interior / built-up checks (1.2.3: the same naming as the
+    prompt — hint, object / material name, analysis label — without the size guess)."""
+    from .massing import group_hint
+    hint, _src = group_hint([obj], shape=False)
+    return (hint + " " + obj.name).lower()
 
 
 def widen_blockout(context, massing_coll, product_coll, master_cam):

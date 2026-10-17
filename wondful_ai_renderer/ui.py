@@ -489,6 +489,7 @@ def _draw_multiview(adv, context, props, busy):
         box.label(text="先用 ⑤ 渲染一个满意的相机，再点「设为主视角」", icon="INFO")
     box.label(text=f"选中的其他相机：{len(others)} 个" + ("（在视图里选中要渲染的相机）" if not others else ""),
               icon="CHECKMARK" if others else "INFO")
+    _draw_mv_block_name(box, context, props, busy)
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "mv_widen", text="加宽体块")
@@ -503,6 +504,34 @@ def _draw_multiview(adv, context, props, busy):
         bad = ("失败" in note) or ("未完成" in note) or ("超标" in note) or ("注意" in note)
         for index, line in enumerate(wrap(note, width=44)[:5]):
             box.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
+
+
+def _draw_mv_block_name(box, context, props, busy):
+    """多角度一致 › the active block's name as the prompt uses it (editable; empty = automatic)."""
+    active = getattr(context, "active_object", None)
+    if active is None or getattr(active, "type", "") != "MESH" or not hasattr(active, "wondful_hint"):
+        return
+    try:
+        from . import massing as MS
+        coll = MS.find_collection(context.scene, props)
+        blocks = MS.massing_objects(coll, getattr(props, "product_collection", None)) if coll is not None else []
+        root = MS.block_root(active, blocks)
+    except Exception:
+        return
+    if root is None:
+        return
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(root, "wondful_hint", text="体块名称")
+    if not str(getattr(root, "wondful_hint", "") or "").strip() or root.get(MS.AUTO_HINT_FLAG):
+        try:
+            hint, src = MS.group_hint([root])
+        except Exception:
+            hint, src = "", ""
+        if hint and src != "custom":
+            box.label(text=f"自动：{hint}"[:48], icon="BLANK1")
+        elif not hint:
+            box.label(text="留空：生图时按尺寸和位置自动命名", icon="BLANK1")
 
 
 def _draw_block_refs(box, context, props, busy, blocks):

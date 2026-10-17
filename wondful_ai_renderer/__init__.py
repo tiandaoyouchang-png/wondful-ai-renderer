@@ -190,6 +190,15 @@ def _wondful_save_pre(_dummy):
     reset_prompt_editors(flush=True)
 
 
+def _block_hint_edited(obj, _context):
+    """多角度一致 › 体块名称 edited by the user: it now outranks the object name (no longer auto)."""
+    try:
+        if "wondful_hint_auto" in obj.keys():
+            del obj["wondful_hint_auto"]
+    except Exception:
+        pass
+
+
 def register():
     bpy.app.translations.register(__name__, TRANSLATIONS)
     for cls in CLASSES:
@@ -197,6 +206,10 @@ def register():
     bpy.types.WindowManager.wondful_auth_code = bpy.props.StringProperty(
         name="授权码", subtype="PASSWORD", default="", options={"SKIP_SAVE"})
     bpy.types.Scene.wondful_ai = bpy.props.PointerProperty(type=WONDFUL_AISettings)
+    # 1.2.3: a block's name for the prompt; shares storage with the ``obj["wondful_hint"]`` custom property
+    bpy.types.Object.wondful_hint = bpy.props.StringProperty(
+        name="体块名称", default="", maxlen=60, update=_block_hint_edited,
+        description="这个环境体块是什么（如 沙发、墙面、书架、高楼）；留空则按物体名、材质名或尺寸自动命名")
     try:
         if _wondful_load_post not in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.append(_wondful_load_post)
@@ -228,6 +241,8 @@ def unregister():
         pass
     if hasattr(bpy.types.Scene, "wondful_ai"):
         del bpy.types.Scene.wondful_ai
+    if hasattr(bpy.types.Object, "wondful_hint"):
+        del bpy.types.Object.wondful_hint
     for cls in reversed(CLASSES):
         try:
             bpy.utils.unregister_class(cls)

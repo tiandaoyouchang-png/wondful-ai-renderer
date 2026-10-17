@@ -364,6 +364,20 @@ def main():
                           "注意：产品前方有遮挡物（MV其他 遮挡 38%），可移动相机")
     draw("multiview_done")
     props.last_mv_note = ""
+    # 1.2.3 体块名称: the active block's name field (auto label from 环境体块, then edited by the user)
+    block = coll.objects[0]
+    bpy.context.view_layer.objects.active = block
+    if not block.get(MS.AUTO_HINT_FLAG) or block.wondful_hint != "建筑":
+        problems.append(f"hull block auto label missing: {dict(block.items()) if hasattr(block, 'items') else ''}")
+    draw("multiview_block_name")
+    block.wondful_hint = "红砖老厂房"
+    if MS.AUTO_HINT_FLAG in block.keys() or block.get("wondful_hint") != "红砖老厂房" \
+            or MS.group_hint([block]) != ("红砖老厂房", "custom"):
+        problems.append(f"block name edit did not become the user's hint: {MS.group_hint([block])}")
+    block.wondful_hint = ""
+    if MS.group_hint([block]) != ("建筑", "name"):
+        problems.append(f"empty block name did not fall back to the object name: {MS.group_hint([block])}")
+    draw("multiview_block_name_empty")
     props.ui_show_multiview = False
 
     # 5. error + antigravity provider + authenticating

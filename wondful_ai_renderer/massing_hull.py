@@ -125,6 +125,7 @@ def build_block(context, props):
     mesh.materials.append(block_material())
     obj = bpy.data.objects.new(OBJECT_NAME, mesh)
     obj[MS.HULL_TAG] = 1
+    MS.store_label(obj, "建筑")
     MS.set_refs(obj, paths)  # the three views become this block's 建筑参考
     cur = scene.cursor.location
     obj.location = (cur.x, cur.y, 0.0)
