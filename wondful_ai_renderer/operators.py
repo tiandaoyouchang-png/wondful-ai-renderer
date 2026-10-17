@@ -1125,7 +1125,9 @@ class WONDFUL_OT_massing_hull_build(Operator):
     bl_idname = "wondful.massing_hull_build"
     bl_label = "从三视图生成建筑体块"
     bl_description = ("从建筑的正视 / 侧视 / 俯视图轮廓雕出一个建筑体块，放进环境体块集合（没有时新建「环境体块」），"
-                      "放在 3D 游标处、落在地面上，正立面朝 -Y；三视图自动作为它的建筑参考。产品不受影响")
+                      "放在 3D 游标处、落在地面上，正立面朝 -Y；选中一个占位立方体时放到它的位置、跟随它的朝向，"
+                      "按比例模式下等比缩放到它的大小，并放进它所在的集合（占位体会隐藏）；选中已生成的体块则原地替换。"
+                      "三视图自动作为它的建筑参考。产品不受影响")
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):

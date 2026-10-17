@@ -10,6 +10,7 @@ need no ``bpy`` so they are unit-tested directly; Blender-only parts import ``bp
 from __future__ import annotations
 
 import json
+import math
 import re
 
 MASSING_HEX = "#9FB4C8"
@@ -22,6 +23,12 @@ MAX_BLOCK_REFS = 3        # per block
 MAX_BUILDING_IMAGES = 4   # per generation, on top of the clay canvas (image 1)
 DEFAULT_COLLECTION = "环境体块"
 HULL_TAG = "wondful_hull_block"
+# a block built outside the massing collection (at a placeholder in the user's own collection) still counts
+ENV_EXTRA_TAG = "wondful_env_extra"
+PLACEHOLDER_PROP = "wondful_placeholder"          # on the block: the hidden placeholder's name
+PLACEHOLDER_BOX_PROP = "wondful_placeholder_box"  # on the block: the placeholder box it was fitted to (JSON)
+PLACEHOLDER_FOR_PROP = "wondful_placeholder_for"  # on the placeholder: the block built in its place
+SB_GROUP_PROP = "wondful_sb_group"                # = scene_blockout.GROUP_PROP (kept bpy-free here)
 
 # English name words → Chinese hint (Chinese names are used as written)
 _EN_HINTS = {
@@ -671,13 +678,93 @@ def find_collection(scene, props=None):
     return in_scene.get(name) if name else None
 
 
+def is_scene_blockout_block(obj) -> bool:
+    """A block made by 「从参考图生成场景粗模」 (tagged per group by scene_blockout_build, or in its collection)."""
+    try:
+        if obj.get(SB_GROUP_PROP) or obj.get("wondful_sb_wrap"):
+            return True
+        return any(c.get("wondful_scene_blockout") for c in getattr(obj, "users_collection", ()) or ())
+    except Exception:
+        return False
+
+
+def block_ref_label(name, n_refs, from_scene_ref=False) -> str:
+    """建筑参考 list line: user refs win; a 场景粗模 block without its own refs came from the scene photo."""
+    if n_refs:
+        return f"{name} · {n_refs} 张参考"
+    return f"{name} · 来自场景参考图" if from_scene_ref else f"{name} · 无参考"
+
+
+def yaw_of(matrix) -> float:
+    """Z rotation (rad) of a 4x4 / 3x3 world matrix (rows), scale-independent; tilt is ignored."""
+    ax, ay = float(matrix[0][0]), float(matrix[1][0])
+    if math.hypot(ax, ay) > 1e-9:
+        return math.atan2(ay, ax)
+    return math.atan2(-float(matrix[0][1]), float(matrix[1][1]))   # X axis points straight up / down
+
+
+def placeholder_box(corners, yaw) -> dict:
+    """The placeholder's box in its own Z-rotated frame: centre (x, y), bottom z, dims (w along its X,
+    d along its Y, h), yaw.  ``corners`` = its 8 world-space bound-box corners."""
+    c, s = math.cos(-yaw), math.sin(-yaw)
+    loc = [(c * p[0] - s * p[1], s * p[0] + c * p[1], float(p[2])) for p in corners]
+    xs, ys, zs = [p[0] for p in loc], [p[1] for p in loc], [p[2] for p in loc]
+    mx, my = (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+    cw, sw = math.cos(yaw), math.sin(yaw)
+    return {"centre": [cw * mx - sw * my, sw * mx + cw * my], "bottom": min(zs),
+            "dims": [max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)], "yaw": yaw}
+
+
+def fit_to_placeholder(block_min, block_max, box, fit=True) -> dict:
+    """Transform for a block (local bound box ``block_min`` / ``block_max``, scale 1) standing in
+    ``box`` (``placeholder_box``): same yaw, bottom on the box bottom, centred in XY, and with
+    ``fit`` scaled uniformly (three-view proportions kept) to the largest size inside the box;
+    without ``fit`` (user-given 长宽高) scale 1, only position / rotation.  → location, yaw, scale, dims."""
+    bd = [max(float(block_max[i]) - float(block_min[i]), 1e-9) for i in range(3)]
+    s = 1.0
+    if fit:
+        pd = box["dims"]
+        s = min(pd[0] / bd[0], pd[1] / bd[1], pd[2] / bd[2])
+        if not (s > 1e-6):
+            raise ValueError("占位体太小或是扁平的，无法按它的大小缩放")
+    yaw = float(box["yaw"])
+    cx = (float(block_min[0]) + float(block_max[0])) / 2.0 * s
+    cy = (float(block_min[1]) + float(block_max[1])) / 2.0 * s
+    c, si = math.cos(yaw), math.sin(yaw)
+    loc = [box["centre"][0] - (c * cx - si * cy), box["centre"][1] - (si * cx + c * cy),
+           box["bottom"] - float(block_min[2]) * s]
+    return {"location": loc, "yaw": yaw, "scale": s, "dims": [d * s for d in bd], "fitted": bool(fit)}
+
+
+def _extra_objects(collection):
+    """Blocks tagged ENV_EXTRA_TAG in a scene that contains ``collection`` (Blender only)."""
+    try:
+        import bpy
+    except ImportError:
+        return []
+    try:
+        scenes = [sc for sc in bpy.data.scenes
+                  if sc.collection == collection or collection in sc.collection.children_recursive]
+        if not scenes:
+            return []
+        return [o for o in bpy.data.objects
+                if o.get(ENV_EXTRA_TAG) and any(sc in scenes for sc in o.users_scene)]
+    except Exception:
+        return []
+
+
 def massing_objects(collection, product_collection=None):
-    """Renderable geometry of the massing collection (product objects never included)."""
+    """Renderable geometry of the massing collection (product objects never included), plus blocks tagged
+    ``ENV_EXTRA_TAG`` (built at a placeholder in a collection outside it) in the same scene."""
     if collection is None:
         return []
     prod = set(product_collection.all_objects) if product_collection is not None else set()
     out = []
-    for o in collection.all_objects:
+    seen = set()
+    for o in list(collection.all_objects) + _extra_objects(collection):
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
         if o in prod or o.hide_render or o.name.startswith("_wondful_"):
             continue
         if getattr(getattr(o, "data", None), "materials", None) is None:

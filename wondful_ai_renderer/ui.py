@@ -604,7 +604,8 @@ def _draw_block_refs(box, context, props, busy, blocks):
         lst = refs_box.column(align=True)
         for obj in blocks[:8]:
             n = len(MS.get_refs(obj))
-            op = lst.operator("wondful.block_select", text=f"{obj.name} · {n} 张参考" if n else f"{obj.name} · 无参考",
+            text = MS.block_ref_label(obj.name, n, MS.is_scene_blockout_block(obj))
+            op = lst.operator("wondful.block_select", text=text,
                               icon="IMAGE_REFERENCE" if n else "MESH_CUBE", emboss=(obj == root))
             op.name = obj.name
         if len(blocks) > 8:
@@ -648,12 +649,13 @@ def _draw_massing_hull(box, props, busy):
     build = col.row(align=True)
     build.scale_y = 1.2
     build.operator("wondful.massing_hull_build", text="从三视图生成建筑体块", icon="MOD_BUILD")
+    col.label(text="选中一个占位立方体，新体块会放到它的位置并按它大小缩放", icon="INFO")
     note = getattr(props, "last_hull_note", "")
     if note:
         for index, line in enumerate(wrap(note, width=44)[:7 if "失败" in note else 3]):
             col.label(text=line, icon=("ERROR" if "失败" in note else "CHECKMARK") if index == 0 else "BLANK1")
     else:
-        col.label(text="放在 3D 游标处、落在地面上，正立面朝 -Y", icon="BLANK1")
+        col.label(text="没选占位体时放在 3D 游标处、落在地面上，正立面朝 -Y", icon="BLANK1")
 
 
 def _draw_terrain(layout, props):

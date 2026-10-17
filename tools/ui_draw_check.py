@@ -295,6 +295,9 @@ def main():
     product_before = props.product_collection
     scene.cursor.location = (6.0, 4.0, 3.0)
     props.hull_resolution = 64
+    for o in bpy.context.selected_objects:      # factory Cube is selected: it would act as a placeholder
+        o.select_set(False)
+    bpy.context.view_layer.objects.active = None
     res = bpy.ops.wondful.massing_hull_build()
     coll = bpy.data.collections.get("环境体块")
     obj = bpy.context.view_layer.objects.active
@@ -313,6 +316,8 @@ def main():
             problems.append("hull build changed the product collection")
         if MS.find_collection(scene, props) != coll:
             problems.append("new 环境体块 collection is not auto-detected as massing")
+        obj.select_set(False)                     # with the block selected it would be replaced in place
+        bpy.context.view_layer.objects.active = None
         bpy.ops.wondful.massing_hull_build()
         if len(coll.objects) != 2:
             problems.append("second hull build did not add a second block")
