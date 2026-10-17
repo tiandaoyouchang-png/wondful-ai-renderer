@@ -7,7 +7,7 @@ outer ground disc of the multi-view prototype (mv2_render.py prep), restructured
 - yaw: the user's scene camera direction when the camera is not set from the analysis, else the product's
   long axis along the analysed spot heading;
 - every block group is named in Chinese (``label_zh`` / type word) and carries the same auto label
-  (``massing.store_label``), so 多角度一致 and the normal prompt can name it;
+  (``massing.store_label``), so 多角度场景一致 and the normal prompt can name it;
 - no rendering, no file IO except the optional preview (``render_preview``) used by the fit score;
 - re-running replaces the collection; the user's own camera objects are never modified.
 """

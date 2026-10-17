@@ -1,4 +1,4 @@
-"""1.2.3 多角度一致 › 体块命名: every context block gets a meaningful name in the prompt.
+"""1.2.3 多角度场景一致 › 体块命名: every context block gets a meaningful name in the prompt.
 
 Sources, first match wins: the user's own hint › object name › material name › a creator's
 auto-stored label › analysis label / element type › category words › a size / height guess.

@@ -3755,7 +3755,7 @@ class WONDFUL_OT_prompt_line_remove(Operator):
         return {"FINISHED"}
 
 
-# --------------------------------------------------------------------------- 1.2.3 多角度一致
+# --------------------------------------------------------------------------- 1.2.3 多角度场景一致
 
 def _mv_selected_cameras(context, master):
     return [o for o in (getattr(context, "selected_objects", None) or [])
@@ -3763,7 +3763,7 @@ def _mv_selected_cameras(context, master):
 
 
 class WONDFUL_OT_mv_set_master(Operator):
-    """多角度一致: the current scene camera becomes 主视角, its latest result the master image."""
+    """多角度场景一致: the current scene camera becomes 主视角, its latest result the master image."""
     bl_idname = "wondful.mv_set_master"
     bl_label = "设为主视角"
     bl_description = "把当前场景相机标为主视角，并用它最近一次的渲染结果作为主视角图（也可以在下面另选一张已满意的图）"
@@ -3785,9 +3785,9 @@ class WONDFUL_OT_mv_set_master(Operator):
 
 
 class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
-    """1.2.3 多角度一致: render the other selected cameras so they agree with the master view."""
+    """1.2.3 多角度场景一致: render the other selected cameras so they agree with the master view."""
     bl_idname = "wondful.multiview_render"
-    bl_label = "多角度一致渲染"
+    bl_label = "多角度场景一致渲染"
     bl_description = ("按主视角渲染选中的其他相机：离主视角最近的先渲染，已完成的视角投影到环境体块上作为底图，"
                       "光照方向在世界里固定；每个相机 1 次生图，产品超标时最多重试 1 次")
 
@@ -3805,7 +3805,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
-            self.report({"ERROR"}, "多角度一致需要 Codex 图像编辑直连（高级 › AI 与模型）。")
+            self.report({"ERROR"}, "多角度场景一致需要 Codex 图像编辑直连（高级 › AI 与模型）。")
             return {"CANCELLED"}
         master = getattr(props, "mv_master_camera", None)
         if master is None or master.type != "CAMERA" or master.name not in scene.objects:
@@ -3817,7 +3817,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             return {"CANCELLED"}
         coll = getattr(props, "product_collection", None)
         if coll is None:
-            self.report({"ERROR"}, "多角度一致需要先在 ② 选择产品集合。")
+            self.report({"ERROR"}, "多角度场景一致需要先在 ② 选择产品集合。")
             return {"CANCELLED"}
         others = _mv_selected_cameras(context, master)
         skipped = [o.name for o in others if getattr(o.data, "type", "PERSP") != "PERSP"]
@@ -3834,7 +3834,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             return {"CANCELLED"}
         W, H = camera_output_dimensions(context)
         ww, wh = MV.work_size(W, H)
-        pool = out_dir / "多角度一致" / f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}"
+        pool = out_dir / "多角度场景一致" / f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}"
         pool.mkdir(parents=True, exist_ok=True)
         massing_coll = _find_massing(scene, props)
         made, wlog = [], {}
@@ -3846,7 +3846,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 try:
                     made, wlog = MV.widen_blockout(context, massing_coll, coll, master)
                 except Exception as exc:
-                    print(f"[Wondful] 多角度一致：加宽体块失败：{exc}")
+                    print(f"[Wondful] 多角度场景一致：加宽体块失败：{exc}")
             for cam in [master] + others:
                 scene.camera = cam
                 context.view_layer.update()
@@ -3868,13 +3868,13 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     try:
                         blocked, hidden = MV.obstacle(context, cam, coll)
                     except Exception as exc:
-                        print(f"[Wondful] 多角度一致：遮挡检查失败：{exc}")
+                        print(f"[Wondful] 多角度场景一致：遮挡检查失败：{exc}")
                 views[cam.name] = {"name": cam.name, "cam": rec, "files": files, "prefix": str(pre),
                                    "massing_text": str(LAST_CLAY_INFO.get("massing_text", "") or ""),
                                    "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
         except Exception as exc:
-            self.report({"ERROR"}, f"多角度一致准备失败：{exc}")
-            props.last_mv_note = f"多角度一致准备失败：{exc}"
+            self.report({"ERROR"}, f"多角度场景一致准备失败：{exc}")
+            props.last_mv_note = f"多角度场景一致准备失败：{exc}"
             return {"CANCELLED"}
         finally:
             scene.camera = old_cam
@@ -3914,11 +3914,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         env_check = bool(getattr(props, "mv_env_check", True))
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
                     "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name}
-        self._phase = "多角度一致：准备完成"
+        self._phase = "多角度场景一致：准备完成"
         self._estimated_total = 15.0 + 80.0 * len(others)
         _status(props, "RENDERING")
         props.progress = 0.05
-        props.last_mv_note = "多角度一致：生成中…"
+        props.last_mv_note = "多角度场景一致：生成中…"
         master_name = master.name
 
         def job():
@@ -3947,7 +3947,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             if cached.get("key") == key and cached.get("light"):
                 light = cached["light"]
             else:
-                self._phase = "多角度一致：读取主视角光照"
+                self._phase = "多角度场景一致：读取主视角光照"
                 try:
                     light = MV.world_light(MV.estimate_light(str(master_png), client_version=client_version, model=model,
                                                              cancel_check=cancelled), mv["cam"])
@@ -3972,7 +3972,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     continue
                 if cancelled():
                     raise RuntimeError("任务已取消")
-                self._phase = f"多角度一致：{rec['name']}（{i}/{len(order)}）"
+                self._phase = f"多角度场景一致：{rec['name']}（{i}/{len(order)}）"
                 pre = v["prefix"]
                 vk = {"name": rec["name"], "cam": rec, "pos": np.load(pre + "_pos.npy"), "nrm": np.load(pre + "_nrm.npy"),
                       "mask": np.load(pre + "_maskw.npy")}
@@ -4021,7 +4021,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     except RW.Cancelled:
                         raise
                     except Exception as exc:
-                        print(f"[Wondful] 多角度一致：轮廓验收失败：{exc}")
+                        print(f"[Wondful] 多角度场景一致：轮廓验收失败：{exc}")
                     img_w = resize(read_png(canvas).astype(np.float32)[..., :3], ww, wh)
                     rp = MV.reproj_de(master_view, vk, img_w)
                     t = {"file": canvas, "identity": {k: rep.get(k) for k in ("shift_px", "scale_pct", "outline_px", "edge_px",
@@ -4079,7 +4079,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         props.progress = 0.0
         props.eta_seconds = 0
         if self._error:
-            _status(props, "ERROR", f"多角度一致失败：{self._error[0]}")
+            _status(props, "ERROR", f"多角度场景一致失败：{self._error[0]}")
             props.last_mv_note = props.last_error
             self.report({"ERROR"}, props.last_error)
             return {"CANCELLED"}
@@ -4090,7 +4090,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             if not r.get("ok"):
                 continue
             try:
-                p = export_result(r["final"], info["out_dir"], info["scene"], r["name"], "多角度一致")
+                p = export_result(r["final"], info["out_dir"], info["scene"], r["name"], "多角度场景一致")
                 r["exported"] = str(p)
                 exported.append(str(p))
                 if r.get("raw"):

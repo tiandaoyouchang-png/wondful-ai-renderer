@@ -392,7 +392,7 @@ def main():
     props.ui_show_scene_blockout = False
     SBB.remove_existing()
 
-    # 4b. 1.2.3 多角度一致: closed, open without master, with master + selected cameras, after a run
+    # 4b. 1.2.3 多角度场景一致: closed, open without master, with master + selected cameras, after a run
     props.ui_show_multiview = True
     draw("multiview_empty")
     cam_data = bpy.data.cameras.new("mv_cam")
@@ -407,7 +407,7 @@ def main():
     for o in bpy.context.view_layer.objects:
         o.select_set(o == other)
     draw("multiview_ready")
-    props.last_mv_note = ("多角度一致：2/2 个相机完成 · 图像调用 3 次 · 重试：MV其他（细节边缘 7.1px） · "
+    props.last_mv_note = ("多角度场景一致：2/2 个相机完成 · 图像调用 3 次 · 重试：MV其他（细节边缘 7.1px） · "
                           "注意：产品前方有遮挡物（MV其他 遮挡 38%），可移动相机")
     draw("multiview_done")
     props.last_mv_note = ""

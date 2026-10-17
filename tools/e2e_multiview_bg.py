@@ -1,4 +1,4 @@
-"""Headless real run of 高级 › 多角度一致 (1.2.3): 1 master + N cameras through the operator.
+"""Headless real run of 高级 › 多角度场景一致 (1.2.3): 1 master + N cameras through the operator.
 
 Background Blender has no window, so the modal loop is driven by this script: the worker job
 runs synchronously and ``_modal(context, TIMER)`` is called until it finishes. Everything else

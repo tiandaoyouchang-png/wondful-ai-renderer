@@ -193,7 +193,7 @@ def _wondful_save_pre(_dummy):
 
 
 def _block_hint_edited(obj, _context):
-    """多角度一致 › 体块名称 edited by the user: it now outranks the object name (no longer auto)."""
+    """多角度场景一致 › 体块名称 edited by the user: it now outranks the object name (no longer auto)."""
     try:
         if "wondful_hint_auto" in obj.keys():
             del obj["wondful_hint_auto"]

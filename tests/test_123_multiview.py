@@ -1,4 +1,4 @@
-"""1.2.3 多角度一致: projection, retry policy, light sentence, ordering, wiring."""
+"""1.2.3 多角度场景一致: projection, retry policy, light sentence, ordering, wiring."""
 import math
 import sys
 import unittest

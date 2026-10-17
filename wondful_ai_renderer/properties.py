@@ -794,8 +794,8 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
-    # 1.2.3 多角度一致 (高级): other cameras rendered consistent with one accepted master view
-    ui_show_multiview: BoolProperty(name="多角度一致", default=False)
+    # 1.2.3 多角度场景一致 (高级): other cameras rendered consistent with one accepted master view
+    ui_show_multiview: BoolProperty(name="多角度场景一致", default=False)
     mv_master_camera: PointerProperty(
         name="主视角",
         description="已经渲染满意的那个相机；其他选中的相机按它的画面保持环境、光照一致",
@@ -820,7 +820,7 @@ class WONDFUL_AISettings(PropertyGroup):
         default=True,
     )
     last_mv_note: StringProperty(
-        name="多角度一致",
+        name="多角度场景一致",
         default="",
         options={"SKIP_SAVE"},
     )

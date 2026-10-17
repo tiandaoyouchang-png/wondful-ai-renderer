@@ -1007,7 +1007,7 @@ _RAY_FLAGS = ("visible_diffuse", "visible_glossy", "visible_transmission", "visi
 
 
 def _camera_only(obj, rays):
-    """多角度一致 fix: a holdout must still occlude the product for the camera but must not shade it.
+    """多角度场景一致 fix: a holdout must still occlude the product for the camera but must not shade it.
     Without this a closed room (walls + ceiling in 环境体块) blocks the even white world of the
     detail pass and the product comes out black, which breaks 细节回贴, 按材质校色 and
     产品还原度 (detail edge / colour ΔE measured against a black reference)."""
@@ -1701,14 +1701,14 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         _render_still(scene)
         ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
         if ok and geometry_prefix:
-            # 1.2.3 多角度一致: world position + normal passes with the same floor / pose / blocks
+            # 1.2.3 多角度场景一致: world position + normal passes with the same floor / pose / blocks
             try:
                 from .multiview import render_geometry_now
                 gw, gh = geometry_size or (width, height)
                 LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
             except Exception as exc:
                 LAST_CLAY_INFO["geometry"] = False
-                print(f"[Wondful] 多角度一致：几何通道失败：{exc}")
+                print(f"[Wondful] 多角度场景一致：几何通道失败：{exc}")
         if ok and mask_path and collection is not None:
             # 1.2.0 分层输出: same camera, same temporary product pose as the clay base.
             try:

@@ -38,7 +38,7 @@ _EN_HINTS = {
     "steps": "台阶", "tower": "高楼", "building": "建筑", "house": "房屋", "shop": "店铺", "bridge": "桥",
     "pillar": "柱子", "column": "柱子", "hedge": "绿篱", "planter": "花坛", "billboard": "广告牌",
     "canopy": "雨棚", "pavilion": "亭子", "kiosk": "售货亭", "metal": "金属", "neon": "霓虹招牌",
-    # 1.2.3 interior / street vocabulary (多角度一致 names every block)
+    # 1.2.3 interior / street vocabulary (多角度场景一致 names every block)
     "sofa": "沙发", "couch": "沙发", "armchair": "扶手椅", "chair": "椅子", "stool": "凳子", "bench": "长椅",
     "table": "桌子", "desk": "书桌", "cabinet": "柜子", "cupboard": "柜子", "wardrobe": "衣柜", "console": "矮柜",
     "sideboard": "餐边柜", "dresser": "斗柜", "drawer": "抽屉柜", "bookshelf": "书架", "bookcase": "书架",

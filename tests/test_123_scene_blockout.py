@@ -334,7 +334,7 @@ class BuilderBlenderTests(unittest.TestCase):
     def common(self, rep, outdoor=True):
         self.assertEqual(rep["collections_named"], 1)          # re-run replaced, not duplicated
         self.assertTrue(rep["rebuild_same_count"])
-        self.assertTrue(rep["parent_ok"])                       # inside 环境体块 → used by clay / 多角度一致
+        self.assertTrue(rep["parent_ok"])                       # inside 环境体块 → used by clay / 多角度场景一致
         self.assertTrue(rep["found_by_massing"])
         self.assertTrue(rep["all_labelled"])
         self.assertTrue(rep["text_block"])

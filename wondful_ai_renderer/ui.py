@@ -507,9 +507,9 @@ def _draw_scene_blockout(box, props, busy):
 
 
 def _draw_multiview(adv, context, props, busy):
-    """高级 › 多角度一致 (1.2.3): master camera + its accepted image, render the other selected cameras."""
+    """高级 › 多角度场景一致 (1.2.3): master camera + its accepted image, render the other selected cameras."""
     box = adv.box()
-    if not _disclosure(box.row(align=True), props, "ui_show_multiview", "多角度一致", icon="OUTLINER_OB_CAMERA"):
+    if not _disclosure(box.row(align=True), props, "ui_show_multiview", "多角度场景一致", icon="OUTLINER_OB_CAMERA"):
         return
     row = box.row(align=True)
     row.enabled = not busy
@@ -546,7 +546,7 @@ def _draw_multiview(adv, context, props, busy):
 
 
 def _draw_mv_block_name(box, context, props, busy):
-    """多角度一致 › the active block's name as the prompt uses it (editable; empty = automatic)."""
+    """多角度场景一致 › the active block's name as the prompt uses it (editable; empty = automatic)."""
     active = getattr(context, "active_object", None)
     if active is None or getattr(active, "type", "") != "MESH" or not hasattr(active, "wondful_hint"):
         return

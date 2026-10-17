@@ -1,4 +1,4 @@
-"""1.2.3 多角度一致 (高级): render more cameras of one scene so they agree with an accepted master view.
+"""1.2.3 多角度场景一致 (高级): render more cameras of one scene so they agree with an accepted master view.
 
 The user renders and accepts one camera (主视角) with the normal flow, then marks it. Every other
 selected camera is rendered nearest-angle first. Its edit canvas is the clay base with the
@@ -516,7 +516,7 @@ def summary_line(results) -> str:
     done = [r for r in results if r.get("ok")]
     calls = sum(int(r.get("calls") or 0) for r in results)
     retried = [r for r in results if (r.get("calls") or 0) > 1]
-    line = f"多角度一致：{len(done)}/{len(results)} 个相机完成 · 图像调用 {calls} 次"
+    line = f"多角度场景一致：{len(done)}/{len(results)} 个相机完成 · 图像调用 {calls} 次"
     if retried:
         line += " · 重试：" + "；".join(f"{r['name']}（{'、'.join(r.get('retry_reason') or [])}）" for r in retried)
     bad = [r["name"] for r in done if r.get("product_violations")]
@@ -588,7 +588,7 @@ def render_geometry_now(context, prefix, width, height) -> bool:
                 pass
             np.save(f"{prefix}_{kind}.npy", np.ascontiguousarray(a if kind == "pos" else a[..., :3]))
     except Exception as exc:
-        print(f"[Wondful] 多角度一致：位置 / 法线通道渲染失败：{exc}")
+        print(f"[Wondful] 多角度场景一致：位置 / 法线通道渲染失败：{exc}")
         ok = False
     finally:
         vl.material_override = snap["override"]
