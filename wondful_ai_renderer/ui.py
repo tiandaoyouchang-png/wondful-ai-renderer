@@ -210,7 +210,7 @@ def _draw_reference_group(layout, props, title, collection_attr, index_attr, kin
 
 STEP_NUMBERS = ("①", "②", "③", "④", "⑤")
 GENERATE_STAGES = ("读产品图", "分析环境", "写提示词", "渲染验收")
-BUSY_STATUSES = {"AUTHENTICATING", "CLASSIFYING", "POLISHING", "RENDERING", "REFRESHING_MODELS"}
+BUSY_STATUSES = {"AUTHENTICATING", "CLASSIFYING", "POLISHING", "RENDERING", "REFRESHING_MODELS", "BLOCKOUT"}
 
 
 def _step_card(layout, number, title, *, done, ready=True):
@@ -472,6 +472,10 @@ def _draw_scene_blockout(box, props, busy):
     """1.2.3 从参考图生成场景粗模: one environment photo → a whole blockout (Wondful 场景粗模)."""
     sub = box.box()
     if not _disclosure(sub.row(align=True), props, "ui_show_scene_blockout", "从参考图生成场景粗模", icon="WORLD"):
+        if props.status == "BLOCKOUT":
+            from . import sb_progress as SP
+            sub.label(text=SP.status_text(getattr(props, "sb_stage", "") or SP.READ, getattr(props, "sb_elapsed", 0)),
+                      icon="TIME")
         return
     col = sub.column()
     col.enabled = not busy
@@ -493,17 +497,56 @@ def _draw_scene_blockout(box, props, busy):
     row.prop(props, "sb_set_camera", text="同时设置相机")
     row.prop(props, "sb_correct", text="自动校正一轮")
     col.label(text="参考图只用于分析，不发给生图模型；产品位置不变", icon="BLANK1")
+    from . import sb_progress as SP
+    running = props.status == "BLOCKOUT"
+    failed = (getattr(props, "sb_failed_stage", "") or "") if not running else ""
+    if running or failed:
+        _draw_sb_progress(sub, props, running, failed, SP)
+    if running:
+        # the only live control while it runs: 取消 replaces the build button
+        cancel = sub.row(align=True)
+        cancel.scale_y = 1.2
+        cancel.operator("wondful.cancel_task", text="取消", icon="CANCEL")
+        return
     build = col.row(align=True)
     build.scale_y = 1.2
-    build.enabled = bool(custom or first)
+    build.enabled = bool(custom or first) and not busy
     build.operator("wondful.scene_blockout_build", text="从参考图生成场景粗模", icon="MOD_BUILD")
     note = getattr(props, "last_sb_note", "")
     if note:
-        bad = "失败" in note or "请先" in note or "不存在" in note or "需要" in note
+        bad = "失败" in note or "请先" in note or "不存在" in note or "需要" in note or "取消" in note
         for index, line in enumerate(wrap(note, width=44)[:4]):
             col.label(text=line, icon=("ERROR" if bad else "CHECKMARK") if index == 0 else "BLANK1")
     else:
-        col.label(text="约 3 分钟；重新生成会替换上一次的场景粗模", icon="BLANK1")
+        col.label(text="约 3–5 分钟；重新生成会替换上一次的场景粗模", icon="BLANK1")
+
+
+def _draw_sb_progress(layout, props, running, failed, SP):
+    """Stage list + 「分析参考图 · 已用 1:42」 + typical-time hint + bar (running), or the failed stage."""
+    ids = SP.decode(getattr(props, "sb_stage_ids", ""))
+    stage = getattr(props, "sb_stage", "") or SP.READ
+    elapsed = int(getattr(props, "sb_elapsed", 0) or 0)
+    stages = layout.column(align=True)
+    stages.scale_y = 0.8
+    for name, icon, active in SP.row_icons(ids, stage, failed):
+        cell = stages.row(align=True)
+        cell.active = active
+        suffix = "  ·  进行中" if (running and icon == "PLAY") else ("  ·  失败" if icon == "ERROR" else "")
+        cell.label(text=name + suffix, icon=icon)
+    if not running:
+        return
+    phase = getattr(props, "task_phase", "") or ""
+    if "取消" in phase:
+        layout.label(text="正在取消，等待当前请求结束…", icon="TIME")
+    else:
+        layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
+    tip = SP.hint(stage)
+    if tip:
+        layout.label(text=tip, icon="INFO")
+    bar = layout.column()
+    bar.scale_y = 1.2
+    pct = max(0, min(100, int(round(float(props.progress) * 100))))
+    _draw_progress_bar(bar, props, f"{SP.label(stage)} · {pct}%")
 
 
 def _draw_multiview(adv, context, props, busy):

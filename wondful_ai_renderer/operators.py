@@ -88,7 +88,7 @@ _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_OPERATOR = None
 _AGY_AUTH = None
 _AGY_AUTH_OWNER = None
-_ASYNC_STATUSES = frozenset({"AUTHENTICATING", "REFRESHING_MODELS", "CLASSIFYING", "POLISHING", "RENDERING"})
+_ASYNC_STATUSES = frozenset({"AUTHENTICATING", "REFRESHING_MODELS", "CLASSIFYING", "POLISHING", "RENDERING", "BLOCKOUT"})
 
 
 def cancel_auth_session(*, detach=False, context=None):
@@ -106,7 +106,7 @@ def _addon_prefs(context):
 def _status(props, status, error=""):
     props.status = status
     props.last_error = error
-    if status not in {"POLISHING", "RENDERING"}:
+    if status not in {"POLISHING", "RENDERING", "BLOCKOUT"}:
         props.task_phase = ""
 
 
@@ -623,6 +623,7 @@ class _BaseAsyncOperator(Operator):
                 return {"RUNNING_MODAL"}
             self._cleanup(context)
             if self._origin_scene and self._origin_scene in list(bpy.data.scenes):
+                self._on_cancelled(self._origin_scene.wondful_ai)
                 _status(self._origin_scene.wondful_ai, "IDLE", "任务已被取消")
                 self._origin_scene.wondful_ai.progress = 0.0
                 self._origin_scene.wondful_ai.eta_seconds = 0
@@ -644,6 +645,9 @@ class _BaseAsyncOperator(Operator):
             _status(self._origin_scene.wondful_ai, "ERROR", f"任务收尾失败：{exc}")
             self.report({"ERROR"}, f"任务收尾失败：{exc}")
             return {"CANCELLED"}
+
+    def _on_cancelled(self, props):
+        """Hook: an operator can leave a note in its own panel section when the user cancels."""
 
     def _progress_update(self, props, floor=0.10, ceiling=0.88):
         elapsed = max(0.0, time.time() - self._started_at)
@@ -1197,9 +1201,13 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     def execute(self, context):
         from . import scene_blockout as SB
         from . import codex_direct as CD
+        from . import sb_progress as SP
         scene = context.scene
         props = scene.wondful_ai
         prefs = _addon_prefs(context)
+        props.sb_failed_stage = ""
+        props.sb_stage = ""
+        props.sb_elapsed = 0
         ref, source = _sb_reference(props)
         if not ref or not Path(ref).is_file():
             msg = "请先在 ③ 放一张环境参考图，或在这里选择一张参考图。" if not ref else f"参考图不存在：{ref}"
@@ -1214,11 +1222,20 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                 props.last_sb_note = msg
                 self.report({"ERROR"}, msg)
                 return {"CANCELLED"}
+        correct = bool(props.sb_correct) and not cached
+        ids = SP.stages(correct, bool(props.sb_set_camera))
+        t0 = time.time()
+        self._sb = {"t0": t0, "ids": ids, "stage_id": SP.READ, "stage_t0": t0, "cached": bool(cached),
+                    "pending": None, "drawn": -1}
+        props.sb_stage_ids = SP.encode(ids)
+        props.sb_stage = SP.READ
         session = create_session()
         try:
             upload, frame = _sb_prepare_png(ref, session.directory / "scene_ref.png", SB.WORK_LONG)
         except Exception as exc:
-            props.last_sb_note = f"场景粗模失败：{exc}"
+            props.sb_failed_stage = SP.READ
+            props.sb_stage = ""
+            props.last_sb_note = SP.failure_note(SP.READ, time.time() - t0, exc)
             self.report({"ERROR"}, props.last_sb_note)
             return {"CANCELLED"}
         coll = getattr(props, "product_collection", None)
@@ -1233,16 +1250,14 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             vehicle = coll is None
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
-        self._sb = {"session": session.directory, "upload": upload, "frame": frame, "set_camera": bool(props.sb_set_camera),
-                    "correct": bool(props.sb_correct) and not cached, "stage": 1, "scores": [], "rounds": [],
-                    "model": model, "client_version": client_version, "cached": bool(cached), "source": source}
+        self._sb.update({"session": session.directory, "upload": upload, "frame": frame,
+                         "set_camera": bool(props.sb_set_camera), "correct": correct, "stage": 1, "scores": [],
+                         "rounds": [], "model": model, "client_version": client_version, "source": source})
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
         self._sb["content"] = content
-        self._phase = "场景粗模：分析参考图…"
-        self._estimated_total = 8.0 if cached else 180.0
-        _status(props, "POLISHING")
-        props.progress = 0.05
-        props.last_sb_note = "场景粗模：分析参考图…"
+        self._estimated_total = 8.0 if cached else 240.0
+        _status(props, "BLOCKOUT")
+        self._set_stage(props, SP.ANALYZE)
 
         def job():
             from .cli_transport import is_cancellation_requested as cancelled
@@ -1252,8 +1267,62 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                                     cancel_check=cancelled)
 
         if not self._start_thread(context, job):
+            _status(props, "IDLE")
+            props.sb_stage = ""
+            props.progress = 0.0
             return {"CANCELLED"}
         return {"RUNNING_MODAL"}
+
+    # ------------------------------------------------------------------ stage progress
+    def _set_stage(self, props, stage):
+        sb = self._sb
+        sb["stage_id"] = stage
+        sb["stage_t0"] = time.time()
+        props.sb_stage = stage
+        self._tick(props, force=True)
+
+    def _tick(self, props, force=False):
+        """Called every timer tick: elapsed seconds, deterministic bar factor, phase text; redraw once a second."""
+        from . import sb_progress as SP
+        sb = self._sb
+        now = time.time()
+        elapsed = int(now - sb["t0"])
+        props.sb_elapsed = elapsed
+        props.progress = SP.fraction(sb["ids"], sb["stage_id"], now - sb["stage_t0"], cached=sb["cached"])
+        props.eta_seconds = 0
+        props.task_phase = "场景粗模：" + SP.status_text(sb["stage_id"], elapsed)
+        if force or elapsed != sb.get("drawn"):
+            sb["drawn"] = elapsed
+            _redraw_all()
+
+    def _then(self, props, stage, step):
+        """Show ``stage`` now and run ``step`` on the next timer tick (so the panel draws the stage first)."""
+        self._set_stage(props, stage)
+        self._sb["pending"] = step
+
+    def _on_cancelled(self, props):
+        from . import sb_progress as SP
+        sb = getattr(self, "_sb", None) or {}
+        stage = sb.get("stage_id", "")
+        kept = "；已搭好的第 1 轮粗模保留" if sb.get("rounds") else ""
+        props.last_sb_note = f"场景粗模已取消（{SP.label(stage)} · 已用 {SP.fmt_elapsed(time.time() - sb.get('t0', time.time()))}）{kept}"
+        props.sb_stage = ""
+        props.sb_failed_stage = ""
+
+    def _fail(self, context, props, exc, prefix=""):
+        from . import sb_progress as SP
+        sb = self._sb
+        stage = sb.get("stage_id", "")
+        self._cleanup(context)
+        props.progress = 0.0
+        props.eta_seconds = 0
+        props.sb_failed_stage = stage
+        props.sb_stage = ""
+        props.last_sb_note = SP.failure_note(stage, time.time() - sb["t0"], f"{prefix}{exc}")
+        _status(props, "ERROR", props.last_sb_note)
+        self.report({"ERROR"}, props.last_sb_note[:200])
+        _redraw_all()
+        return {"CANCELLED"}
 
     def _spawn(self, target):
         """Run the next network step on a new worker thread (the task lock stays with this operator)."""
@@ -1294,13 +1363,14 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             props.massing_collection = bpy.data.collections.get(info["collection"])
         return info
 
-    def _score(self, context, info, tag):
+    def _score(self, context, info, tag, rendered=None):
         from . import scene_blockout as SB
         from . import scene_blockout_build as SBB
         from .png_io import read_png, write_png
         d = Path(self._sb["session"])
         path = d / f"scene_preview_{tag}.png"
-        SBB.render_preview(context, info, str(path))
+        if rendered is None or not Path(rendered).is_file():
+            SBB.render_preview(context, info, str(path))
         photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
         render = read_png(str(path)).astype("float32")
         sc = SB.fit_score(photo, render)
@@ -1325,6 +1395,9 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             pass
         props.progress = 0.0
         props.eta_seconds = 0
+        props.sb_stage = "DONE"
+        props.sb_elapsed = int(time.time() - self._sb["t0"])
+        props.sb_failed_stage = ""
         _status(props, "IDLE")
         self.report({"INFO"}, props.last_sb_note[:200])
         _redraw_all()
@@ -1333,74 +1406,118 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     def _modal(self, context, event):
         from . import scene_blockout as SB
         from . import codex_direct as CD
+        from . import sb_progress as SP
         props = self._origin_scene.wondful_ai
         if event.type != "TIMER":
             return {"PASS_THROUGH"}
-        if self._thread and self._thread.is_alive():
-            self._progress_update(props, 0.10 if self._sb["stage"] == 1 else 0.55, 0.50 if self._sb["correct"] else 0.92)
-            return {"RUNNING_MODAL"}
         sb = self._sb
-        if self._error:
-            exc = self._error[0]
-            if sb["stage"] == 2 and sb["rounds"]:
-                # correction failed: keep round 1
+        if self._thread is not None and self._thread.is_alive():
+            self._tick(props)
+            return {"RUNNING_MODAL"}
+        try:
+            if self._thread is not None:
+                # an AI step (first analysis or correction) has just ended
+                self._thread = None
+                if self._error:
+                    exc = self._error[0]
+                    if sb["stage"] == 2 and sb["rounds"]:
+                        # correction failed: keep round 1
+                        self._cleanup(context)
+                        info = sb["info1"]
+                        info.setdefault("notes", []).append(f"校正失败，保留第 1 轮（{str(exc)[:60]}）")
+                        return self._finish(context, info, 1)
+                    return self._fail(context, props, exc)
+                data = SB.normalize(self._result)
+                try:
+                    Path(sb["session"], f"scene_analysis_r{sb['stage']}.json").write_text(
+                        json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")
+                except Exception:
+                    pass
+                sb["data"] = data
+                self._then(props, SP.BUILD if sb["stage"] == 1 else SP.REBUILD, self._step_build)
+                return {"RUNNING_MODAL"}
+            step, sb["pending"] = sb.get("pending"), None
+            if step is None:
                 self._cleanup(context)
-                info = sb["info1"]
-                info.setdefault("notes", []).append(f"校正失败，保留第 1 轮（{str(exc)[:60]}）")
+                return self._finish(context, sb["info1"], 1)
+            return step(context, props)
+        except Exception as exc:
+            print(traceback.format_exc())
+            return self._fail(context, props, exc, "搭建失败：" if sb.get("stage_id") != SP.ANALYZE else "")
+
+    # each step runs on its own timer tick, after the panel has drawn its stage
+    def _step_build(self, context, props):
+        from . import sb_progress as SP
+        sb = self._sb
+        info = self._build(context, sb["data"])
+        sb["rounds"].append(sb["data"])
+        if sb["stage"] == 2:
+            sc, _f, _o = self._score(context, info, "r2")
+            sb["scores"].append(sc["score"])
+            from . import scene_blockout as SB
+            if sc["score"] <= sb["scores"][0] + SB.MIN_GAIN:
+                info = self._build(context, sb["rounds"][0])
+                self._cleanup(context)
                 return self._finish(context, info, 1)
             self._cleanup(context)
-            props.progress = 0.0
-            props.eta_seconds = 0
-            props.last_sb_note = f"场景粗模失败：{exc}"
-            _status(props, "ERROR", props.last_sb_note)
-            self.report({"ERROR"}, props.last_sb_note[:200])
-            return {"CANCELLED"}
-        try:
-            data = SB.normalize(self._result)
-            try:
-                Path(sb["session"], f"scene_analysis_r{sb['stage']}.json").write_text(
-                    json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")
-            except Exception:
-                pass
-            props.task_phase = "场景粗模：搭建体块…"
-            info = self._build(context, data)
-            sb["rounds"].append(data)
-            if sb["stage"] == 1 and sb["correct"]:
-                sc, flat, ov = self._score(context, info, "r1")
-                sb["scores"].append(sc["score"])
-                sb["info1"] = info
-                sb["stage"] = 2
-                self._phase = "场景粗模：校正一轮…"
-                self._estimated_total = 120.0
-                content = SB.correction_content(sb["content"], data, {k: v for k, v in sc.items() if k != "hints"},
-                                                sc.get("hints", []), CD.data_url(flat)[0], CD.data_url(ov)[0])
-                model, cv = sb["model"], sb["client_version"]
+            return self._finish(context, info, 2)
+        sb["info1"] = info
+        if sb["set_camera"]:
+            self._then(props, SP.CAMERA, self._step_camera)
+            return {"RUNNING_MODAL"}
+        return self._after_camera(context, props)
 
-                def job():
-                    from .cli_transport import is_cancellation_requested as cancelled
-                    return SB.call_analysis(content, effort=SB.EFFORT_CORRECT, model=model, client_version=cv,
-                                            cancel_check=cancelled)
-                self._spawn(job)
-                return {"RUNNING_MODAL"}
-            if sb["stage"] == 2:
-                sc, _f, _o = self._score(context, info, "r2")
-                sb["scores"].append(sc["score"])
-                if sc["score"] <= sb["scores"][0] + SB.MIN_GAIN:
-                    info = self._build(context, sb["rounds"][0])
-                    self._cleanup(context)
-                    return self._finish(context, info, 1)
-                self._cleanup(context)
-                return self._finish(context, info, 2)
-        except Exception as exc:
-            self._cleanup(context)
-            props.progress = 0.0
-            props.last_sb_note = f"场景粗模搭建失败：{exc}"
-            _status(props, "ERROR", props.last_sb_note)
-            print(traceback.format_exc())
-            self.report({"ERROR"}, props.last_sb_note[:200])
-            return {"CANCELLED"}
+    def _step_camera(self, context, props):
+        """The analysis camera is placed with the blocks; this stage makes it the scene camera and checks it."""
+        sb = self._sb
+        info = sb["info1"]
+        cam = bpy.data.objects.get(info.get("camera_name") or "")
+        if cam is None or cam.type != "CAMERA":
+            raise RuntimeError("没有生成参考相机")
+        if context.scene.camera is not cam:
+            context.scene.camera = cam
+        return self._after_camera(context, props)
+
+    def _after_camera(self, context, props):
+        from . import sb_progress as SP
+        sb = self._sb
+        if sb["correct"]:
+            self._then(props, SP.PREVIEW, self._step_preview)
+            return {"RUNNING_MODAL"}
         self._cleanup(context)
-        return self._finish(context, info, 1)
+        return self._finish(context, sb["info1"], 1)
+
+    def _step_preview(self, context, props):
+        from . import scene_blockout_build as SBB
+        from . import sb_progress as SP
+        sb = self._sb
+        path = Path(sb["session"]) / "scene_preview_r1.png"
+        SBB.render_preview(context, sb["info1"], str(path))
+        sb["preview_r1"] = path
+        self._then(props, SP.SCORE, self._step_score)
+        return {"RUNNING_MODAL"}
+
+    def _step_score(self, context, props):
+        from . import scene_blockout as SB
+        from . import codex_direct as CD
+        from . import sb_progress as SP
+        sb = self._sb
+        sc, flat, ov = self._score(context, sb["info1"], "r1", rendered=sb.get("preview_r1"))
+        sb["scores"].append(sc["score"])
+        sb["stage"] = 2
+        self._estimated_total = 120.0
+        data = sb["rounds"][0]
+        content = SB.correction_content(sb["content"], data, {k: v for k, v in sc.items() if k != "hints"},
+                                        sc.get("hints", []), CD.data_url(flat)[0], CD.data_url(ov)[0])
+        model, cv = sb["model"], sb["client_version"]
+
+        def job():
+            from .cli_transport import is_cancellation_requested as cancelled
+            return SB.call_analysis(content, effort=SB.EFFORT_CORRECT, model=model, client_version=cv,
+                                    cancel_check=cancelled)
+        self._set_stage(props, SP.CORRECT)
+        self._spawn(job)
+        return {"RUNNING_MODAL"}
 
 
 class WONDFUL_OT_codex_check(_BaseAsyncOperator):

@@ -607,6 +607,7 @@ class WONDFUL_AISettings(PropertyGroup):
             ("CLASSIFYING", "Classifying References", "正在通过 Jev 整理参考图语义角色"),
             ("POLISHING", "Polishing Prompt", "正在分析 Blender 构图并润色提示词"),
             ("RENDERING", "Rendering", "正在通过当前 AI Provider 生成最终图片"),
+            ("BLOCKOUT", "Scene Blockout", "正在从参考图生成场景粗模"),
             ("SUCCESS", "Success", "生成成功"),
             ("ERROR", "Error", "发生错误"),
         ],
@@ -834,6 +835,11 @@ class WONDFUL_AISettings(PropertyGroup):
     sb_correct: BoolProperty(name="自动校正一轮", default=False,
                              description="搭好后从参考机位渲染粗模、和照片比对吻合度，再让 AI 修正一轮；吻合度变高才采用（多 1–2 分钟）")
     last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
+    # live stage progress of one run (see sb_progress); elapsed seconds are written by the modal timer
+    sb_stage: StringProperty(name="场景粗模阶段", default="", options={"SKIP_SAVE"})
+    sb_stage_ids: StringProperty(name="场景粗模阶段列表", default="", options={"SKIP_SAVE"})
+    sb_elapsed: IntProperty(name="场景粗模已用秒", default=0, min=0, options={"SKIP_SAVE"})
+    sb_failed_stage: StringProperty(name="场景粗模失败阶段", default="", options={"SKIP_SAVE"})
     # 1.2.0 环境体块 › 从三视图生成建筑体块 (visual hull of a building, into the massing collection)
     ui_show_massing_hull: BoolProperty(name="从三视图生成建筑体块", default=False)
     hull_input: EnumProperty(

@@ -387,6 +387,48 @@ def main():
     draw("scene_blockout_built")
     props.last_sb_note = "场景粗模失败：未找到 Codex 登录文件，请先在 ① 连接 Codex"
     draw("scene_blockout_failed")
+    # running: stage list, 「分析参考图 · 已用 1:42」, typical-time hint, bar, 取消 replaces the build button
+    from wondful_ai_renderer import sb_progress as SP
+    for correct in (False, True):
+        ids = SP.stages(correct, True)
+        props.sb_stage_ids = SP.encode(ids)
+        for stage in (SP.ANALYZE, SP.BUILD) + ((SP.CORRECT, SP.REBUILD) if correct else ()):
+            props.status = "BLOCKOUT"
+            props.sb_stage = stage
+            props.sb_elapsed = 102
+            props.progress = SP.fraction(ids, stage, 102)
+            props.task_phase = "场景粗模：" + SP.status_text(stage, 102)
+            log = draw(f"scene_blockout_running_{'corr_' if correct else ''}{stage.lower()}")
+            text = "\n".join(log)
+            if f"{SP.label(stage)} · 已用 1:42" not in text:
+                problems.append(f"running {stage}: elapsed stage text missing")
+            if "op wondful.cancel_task" not in text or "op wondful.scene_blockout_build" in text:
+                problems.append(f"running {stage}: 取消 should replace the build button")
+            if stage == SP.ANALYZE and "约 3–5 分钟" not in text:
+                problems.append("running ANALYZE: typical-time hint missing")
+    props.ui_show_scene_blockout = False
+    log = draw("scene_blockout_running_closed")
+    if "分析参考图" not in "\n".join(log) and "已用" not in "\n".join(log):
+        problems.append("collapsed section should still show the running stage")
+    props.ui_show_scene_blockout = True
+    props.task_phase = "正在取消，等待当前请求结束"
+    draw("scene_blockout_cancelling")
+    # failed at a stage: list shows ERROR on that stage, note names it
+    props.status = "ERROR"
+    props.task_phase = ""
+    props.progress = 0.0
+    props.sb_stage = ""
+    props.sb_stage_ids = SP.encode(SP.stages(True, True))
+    props.sb_failed_stage = SP.CORRECT
+    props.last_sb_note = SP.failure_note(SP.CORRECT, 260, "网络超时")
+    log = draw("scene_blockout_failed_stage")
+    if "ERROR 校正分析  ·  失败" not in "\n".join(log):
+        problems.append("failed stage row missing")
+    props.sb_failed_stage = ""
+    props.status = "IDLE"
+    props.last_error = ""
+    props.last_sb_note = "场景粗模已取消（分析参考图 · 已用 0:40）"
+    draw("scene_blockout_cancelled")
     props.last_sb_note = ""
     props.sb_image_path = ""
     props.ui_show_scene_blockout = False
