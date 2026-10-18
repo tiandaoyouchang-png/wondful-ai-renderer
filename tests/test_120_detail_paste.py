@@ -126,9 +126,10 @@ class KeepMaskTest(unittest.TestCase):
 
 
 class BlendTest(unittest.TestCase):
+    """Legacy whole-product blend (``paste_details_full``, unused by the plugin since 1.2.3)."""
     def test_frequency_split_low_from_ai_high_from_detail(self):
         ai, detail, mask, checker, light = _scene()
-        res = DP.paste_details(ai, detail, mask, strength=1.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
+        res = DP.paste_details_full(ai, detail, mask, strength=1.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         out = res["image"]
         inner = DP.erode(mask > 0.5, 25)
         # low frequencies (the 'lighting' gradient) stay the AI's
@@ -143,7 +144,7 @@ class BlendTest(unittest.TestCase):
 
     def test_strength_zero_is_identity(self):
         ai, detail, mask, _c, _l = _scene()
-        res = DP.paste_details(ai, detail, mask, strength=0.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
+        res = DP.paste_details_full(ai, detail, mask, strength=0.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         self.assertLess(np.abs(res["image"] - ai).max(), 1e-4)
 
     def test_flat_detail_keeps_ai_reflections(self):
@@ -153,7 +154,7 @@ class BlendTest(unittest.TestCase):
         streak = (np.abs(xx - yy - 40) < 2).astype(np.float32)    # a sharp neon reflection line
         ai = np.dstack([0.2 + 0.7 * streak, 0.1 + 0.2 * streak, 0.3 + 0.6 * streak]).astype(np.float32)
         detail = np.dstack([np.full((h, w, 3), 0.5, np.float32), mask])   # flat paint in the detail pass
-        res = DP.paste_details(ai, detail, mask, strength=0.8, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
+        res = DP.paste_details_full(ai, detail, mask, strength=0.8, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         inner = DP.erode(mask > 0.5, 20)
         self.assertLess(np.abs(res["image"] - ai)[inner].max(), 0.02)
 
@@ -167,8 +168,8 @@ class BlendTest(unittest.TestCase):
         fit = {"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0}
         keep = np.zeros((h, w, 4), np.uint8); keep[..., 3] = (mask * 255).astype(np.uint8)   # all matte
         inner = DP.erode(mask > 0.5, 20)
-        plain = DP.paste_details(ai, detail, mask, strength=1.0, fit=fit)
-        matte = DP.paste_details(ai, detail, mask, keep_rgba=keep, strength=1.0, fit=fit)
+        plain = DP.paste_details_full(ai, detail, mask, strength=1.0, fit=fit)
+        matte = DP.paste_details_full(ai, detail, mask, keep_rgba=keep, strength=1.0, fit=fit)
         self.assertGreater(np.abs(_hp(DP.luminance(plain["image"])))[inner].mean(), 0.03)  # glossy rule keeps it
         self.assertLess(np.abs(_hp(DP.luminance(matte["image"])))[inner].mean(), 0.01)     # matte rule removes it
         self.assertEqual(matte["keep"]["matte_px"], int((mask > 0.5).sum()))
@@ -176,7 +177,7 @@ class BlendTest(unittest.TestCase):
     def test_no_halo_silhouette_stays_ai(self):
         ai, detail, mask, _c, _l = _scene()
         detail[..., :3] = 1.0 - detail[..., :3]       # very different detail pass
-        res = DP.paste_details(ai, detail, mask, strength=1.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
+        res = DP.paste_details_full(ai, detail, mask, strength=1.0, fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         edge = (mask > 0.5) & ~DP.erode(mask > 0.5, 2)
         outside = mask < 0.5
         self.assertLess(np.abs(res["image"] - ai)[edge].max(), 1e-4)
@@ -188,7 +189,7 @@ class BlendTest(unittest.TestCase):
         letters = np.zeros((h, w), np.float32); letters[110:130, 150:210:4] = 1   # "text" on the plate
         detail[..., :3] = np.where(letters[..., None] > 0, 0.05, 0.9)
         keep = np.zeros((h, w, 4), np.uint8); keep[105:135, 145:215] = (255, 0, 0, 255)
-        res = DP.paste_details(ai, detail, mask, keep_rgba=keep, strength=0.8,
+        res = DP.paste_details_full(ai, detail, mask, keep_rgba=keep, strength=0.8,
                                fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         out = DP.luminance(res["image"])
         self.assertGreater(res["keep"]["pasted_px"], 1500)
@@ -198,7 +199,7 @@ class BlendTest(unittest.TestCase):
     def test_tiny_badge_not_replaced_outright(self):
         ai, detail, mask, _c, _l = _scene()
         keep = np.zeros(mask.shape + (4,), np.uint8); keep[120:123, 180:183] = (0, 255, 0, 255)   # 3×3 px logo
-        res = DP.paste_details(ai, detail, mask, keep_rgba=keep, strength=0.8,
+        res = DP.paste_details_full(ai, detail, mask, keep_rgba=keep, strength=0.8,
                                fit={"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0})
         self.assertEqual(res["keep"]["pasted_px"], 0)
 
@@ -218,7 +219,7 @@ class AlignTest(unittest.TestCase):
 
     def test_fit_aligns_detail_to_moved_product(self):
         ai, detail, mask, checker, _l = _scene(shift=(6, 4))
-        res = DP.paste_details(ai, detail, mask, strength=1.0)
+        res = DP.paste_details_full(ai, detail, mask, strength=1.0)
         fit = res["fit"]
         self.assertAlmostEqual(fit["dx"], 6, delta=1.5)
         self.assertAlmostEqual(fit["dy"], 4, delta=1.5)
@@ -248,6 +249,8 @@ class AlignTest(unittest.TestCase):
 
 class FileTest(unittest.TestCase):
     def test_paste_file_roundtrip_and_raw_path(self):
+        """1.2.3: nothing small to paste here (no keep-exact part, no material-ID pass) -> the
+        paste is discarded, no file is written and the report says the AI image was kept."""
         ai, detail, mask, checker, _l = _scene()
         ai = ai.copy(); ai[..., :3] += 0.1 * (checker[..., None] - 0.5) * (mask[..., None] > 0.5)
         with tempfile.TemporaryDirectory() as d:
@@ -257,9 +260,9 @@ class FileTest(unittest.TestCase):
             m = np.zeros(mask.shape + (4,), np.uint8); m[..., 3] = u8(mask)
             PNG.write_png(f"{d}/mask.png", m)
             rep = DP.paste_file(f"{d}/ai.png", f"{d}/detail.png", f"{d}/mask.png", f"{d}/out.png")
-            self.assertTrue(Path(f"{d}/out.png").is_file())
-            self.assertGreater(rep["changed_px"], 1000)
-            self.assertIn("细节回贴完成", DP.summarize(rep))
+            self.assertFalse(Path(f"{d}/out.png").exists())
+            self.assertTrue(rep["discarded"])
+            self.assertIn("细节回贴：已放弃", DP.summarize(rep))
         self.assertEqual(DP.raw_path("/x/Wondful_S_C_1.png"), "/x/Wondful_S_C_1_raw.png")
 
 
@@ -271,7 +274,7 @@ class WiringTest(unittest.TestCase):
         init = (PKG / "__init__.py").read_text("utf-8")
         vc = (PKG / "viewport_capture.py").read_text("utf-8")
         self.assertIn("detail_paste: BoolProperty", props)
-        self.assertRegex(props, r"detail_paste: BoolProperty\([^)]*default=True")
+        self.assertRegex(props, r"detail_paste: BoolProperty\([^)]*default=False")
         self.assertIn("detail_paste_strength: FloatProperty", props)
         self.assertIn("default=0.8", props)
         adv = ui.index("# ---- 高级")

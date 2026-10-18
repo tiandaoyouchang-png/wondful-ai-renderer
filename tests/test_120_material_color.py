@@ -207,10 +207,10 @@ class PasteIntegrationTest(unittest.TestCase):
     def test_paste_with_colour_fix_keeps_edge_and_background(self):
         ai, detail, mask, lab = self._inputs()
         fit = {"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0}
-        base = DP.paste_details(ai, detail, mask, fit=fit)
-        off = DP.paste_details(ai, detail, mask, fit=fit, matid=(lab, MATS), colour_strength=0.0)
+        base = DP.paste_details_full(ai, detail, mask, fit=fit)
+        off = DP.paste_details_full(ai, detail, mask, fit=fit, matid=(lab, MATS), colour_strength=0.0)
         np.testing.assert_array_equal(base["image"], off["image"])
-        on = DP.paste_details(ai, detail, mask, fit=fit, matid=(lab, MATS), colour_strength=0.7)
+        on = DP.paste_details_full(ai, detail, mask, fit=fit, matid=(lab, MATS), colour_strength=0.7)
         hard = mask > 0.5
         r_e = DP.paste_weight(hard, max(H, W))[1]          # ≈4 px at 1280 px, 2 px on this canvas
         band = hard & ~DP.erode(hard, r_e)
@@ -230,11 +230,15 @@ class PasteIntegrationTest(unittest.TestCase):
             m = np.zeros((H, W, 4), np.uint8); m[..., 3] = u8(mask); PNG.write_png(f"{d}/mask.png", m)
             PNG.write_png(f"{d}/id.png", ids)
             Path(MC.sidecar_path(f"{d}/id.png")).write_text(json.dumps({"materials": MATS}), "utf-8")
+            # 1.2.3: the colour fix only runs when the region paste kept something; here there is
+            # no small detail part, so the paste (and with it the colour fix) is discarded
             r_off = DP.paste_file(f"{d}/ai.png", f"{d}/detail.png", f"{d}/mask.png", f"{d}/o1.png")
             r_on = DP.paste_file(f"{d}/ai.png", f"{d}/detail.png", f"{d}/mask.png", f"{d}/o2.png",
                                  matid_path=f"{d}/id.png", colour_strength=0.7)
             self.assertEqual(r_off.get("colour"), {})
-            self.assertGreater(r_on["colour"]["changed_px"], 500)
+            self.assertEqual(r_on.get("colour"), {})
+            self.assertTrue(r_on["discarded"])
+            self.assertFalse(Path(f"{d}/o2.png").exists())
             # missing sidecar -> no colour fix, no error
             r_none = DP.paste_file(f"{d}/ai.png", f"{d}/detail.png", f"{d}/mask.png", f"{d}/o3.png",
                                    matid_path=f"{d}/missing.png", colour_strength=0.7)
@@ -290,7 +294,8 @@ class WiringTest(unittest.TestCase):
             self.assertAlmostEqual(spec["colour_strength"], 0.7)
             off = types.SimpleNamespace(**dict(vars(on), detail_colour_fix=False))
             spec = host._detail_spec(None, off)
-            self.assertEqual(spec["matid"], "")
+            # 1.2.3: the ID pass is still rendered (part classes for the region paste); no colour fix
+            self.assertTrue(spec["matid"].endswith("01_material_id.png"))
             self.assertEqual(spec["colour_strength"], 0.0)
         finally:
             if saved is not None:

@@ -543,7 +543,7 @@ def _draw_detail_paste(adv, context, props, busy):
         row.prop(props, "detail_colour_fix", text="按材质校色")
         if getattr(props, "detail_colour_fix", True):
             row.prop(props, "detail_colour_strength", text="强度", slider=True)
-        _hint(box, "光照随 AI；文字 / Logo / 纹理随 Blender", cells)
+        _hint(box, "只贴车牌 / 标识 / 灯 / 轮毂小区域，不如原图自动放弃", cells)
         coll = getattr(props, "product_collection", None)
         if coll is None:
             _hint(box, "需要先在 ② 选择产品集合", cells)
@@ -571,7 +571,7 @@ def _draw_detail_paste(adv, context, props, busy):
     note = getattr(props, "last_detail_note", "")
     if note:
         main, _sep, warn = note.partition(" · 注意：")
-        _note(box, main, cells, _state(main, info=("跳过",)), 2)
+        _note(box, main, cells, _state(main, info=("跳过", "已放弃")), 2)
         if warn:  # 1.2.2: a plate / logo that reads mirrored in the model itself
             _note(box, "注意：" + warn, cells, "info", 4)
 
@@ -1235,8 +1235,10 @@ class WONDFUL_PT_main(Panel):
             detail_note = getattr(props, "last_detail_note", "")
             if "镜像" in detail_note:
                 _note(result, "车牌 / 标识在模型里是镜像的，见 高级 › 产品 › 细节回贴", rcells, "info", 2)
-            if detail_note and ("完成" in detail_note or "失败" in detail_note or "跳过" in detail_note):
-                _note(result, detail_note.partition(" · 注意：")[0], rcells, _state(detail_note, info=("跳过",)), 2)
+            if detail_note and ("完成" in detail_note or "失败" in detail_note or "跳过" in detail_note
+                                or detail_note.startswith("细节回贴：")):
+                _note(result, detail_note.partition(" · 注意：")[0], rcells,
+                      _state(detail_note, info=("跳过", "已放弃")), 2)
             again = result.row(align=True)
             again.scale_y = 1.4
             again.enabled = not busy
@@ -1369,6 +1371,10 @@ class WONDFUL_PT_main(Panel):
                 score_note = getattr(props, "last_score_note", "")
                 if score_note:
                     _note(info, "产品还原度：" + score_note, acells, "ok", 3)
+                detail_note = getattr(props, "last_detail_note", "")
+                if detail_note:   # 1.2.3: 细节回贴：保留 N 处 · 放弃 M 处 / 已放弃，原图更自然
+                    _note(info, detail_note.partition(" · 注意：")[0], acells,
+                          _state(detail_note, info=("跳过", "已放弃")), 3)
                 if props.last_structure_note:
                     _note(info, props.last_structure_note, acells, "plain", 2)
                 if getattr(props, "last_engine_note", ""):

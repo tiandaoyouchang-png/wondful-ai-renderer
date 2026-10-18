@@ -129,7 +129,7 @@ class MudPasteTests(unittest.TestCase):
     def test_paste_never_brightens_mud_or_shadow(self):
         ai, detail, mask, mud, shadow = mud_scene()
         fit = {"scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0}
-        res = DP.paste_details(ai, detail, mask, fit=fit)
+        res = DP.paste_details_full(ai, detail, mask, fit=fit)   # legacy whole-product blend
         out = res["image"]
         lum = LO.luminance
         dirty = (mud | shadow) & LO.erode(mask > 0.5, 6)
@@ -184,7 +184,7 @@ class RealMudTest(unittest.TestCase):
             return np.clip(LO.resize(a, w, h), 0, 1)
         D, M, K = load(REAL / "detail.png"), load(REAL / "mask.png")[..., 3], load(REAL / "keep.png")
         matid = DP.load_matid(str(REAL / "matid.png"), w, h)
-        res = DP.paste_details(I, D, M, K, matid=matid, colour_strength=0.7)
+        res = DP.paste_details_full(I, D, M, K, matid=matid, colour_strength=0.7)
         reg = (slice(470, 560), slice(860, 1040))                 # mud-covered lower door
         self.assertLess(float(np.abs(res["image"][reg] - I[reg]).mean() * 255), 3.0)
         # the region also holds the dark sill trim (dark by design, not an occluder), so only

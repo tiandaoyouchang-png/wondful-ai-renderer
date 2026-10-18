@@ -469,10 +469,14 @@ def occluder_mask(ai: np.ndarray, detail: np.ndarray, region: np.ndarray, L: int
     return (np.maximum(occ, soft) * sel).astype(np.float32)
 
 
-def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
-                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
-                  matid=None, colour_strength: float = 0.0) -> dict:
-    """Paste the detail pass onto the AI image. All inputs on the same canvas (H×W).
+def paste_details_full(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
+                       keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
+                       matid=None, colour_strength: float = 0.0) -> dict:
+    """1.2.0–1.2.2 whole-product paste (frequency blend over the entire product + keep-exact).
+    NOT used by the plugin since 1.2.3 (it dulled car paint, broke the scene lighting and left
+    grey halos round tyres); kept only for comparison / diagnostics. See ``paste_details``.
+
+    Paste the detail pass onto the AI image. All inputs on the same canvas (H×W).
 
     ``ai_rgb`` float 0..1; ``detail_rgba`` float 0..1 (straight alpha); ``product_mask``
     float 0..1; ``keep_rgba`` optional keep render (see ``merge_keep_masks``).
@@ -602,6 +606,342 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
             "timings": dict(timings, total=round(time.time() - t0, 2))}
 
 
+# --------------------------------------------------------------------------- 1.2.3 region paste
+
+# A region is one connected piece of a small detail part. Everything else stays the AI's.
+MAX_REGION_FRAC = 0.015        # a region may cover at most this share of the product mask
+MAX_WHEEL_FRAC = 0.04          # rims / spokes / hubs: thin structure, bounded by the tyre (judgement call)
+MIN_REGION_PX = 24             # smaller pieces carry nothing legible
+EDGE_MARGIN = 0.004            # × long edge: regions keep this far from the product silhouette
+RING = 0.003                   # × long edge: width of the surrounding ring used for matching / the gate
+KEEP_GAIN = (0.85, 1.25)       # contrast range for keep-exact parts (plates / logos stay close to Blender)
+DETAIL_GAIN = (0.6, 1.6)       # contrast range for other detail parts (rims, lamps …)
+MAX_SHIFT = 0.30               # lightness shift (× 100 Lab L) the match may apply; more means the part does not belong
+MAX_AB_CAST = 6.0              # Lab a/b colour-cast shift (detail parts only)
+# A/B gate (paste vs AI-only, per region)
+GATE_SEAM_RATIO = 1.5          # border gradient energy may grow at most ×1.5 (+ GATE_SEAM_ABS)
+GATE_SEAM_ABS = 0.02
+GATE_STEP_L = 8.0              # Lab L: the inner border may step against the ring by ≤ 8 more than the AI did
+GATE_BAND_DE = 14.0            # Lab ΔE of the mean colour of the inner border band vs the AI (grey halo, lighting)
+GATE_MIN_NCC = 0.15            # edge correlation AI vs detail inside the region: below = the AI part is elsewhere
+GATE_TOTAL_SEAM = 1.3          # all kept regions together: border energy ratio limit
+GATE_FLAT = 0.8                # pasted micro-contrast below 80 % of the AI's = flatter / duller than the AI
+GATE_SAME = 0.9                # high-frequency correlation AI vs detail ≥ this: the AI already drew it right
+
+_DETAIL_RE = re.compile(r"(light|lamp|led|灯|rim|wheel|spoke|hub|轮毂|轮辋|辐条|caliper|brake|卡钳|刹车|"
+                        r"disc|disk|grille|grill|格栅|badge|logo|emblem|decal|plate|licen[cs]e|车牌|牌照|车标|"
+                        r"标识|字标|铭牌|徽标)", re.IGNORECASE)
+_WHEEL_RE = re.compile(r"(rim|wheel|spoke|hub|轮毂|轮辋|辐条)", re.IGNORECASE)
+_EXCLUDE_RE = re.compile(r"(tyre|tire|rubber|轮胎|胎|paint|body|车漆|车身|漆|int_|interior|内饰|seat|座椅|"
+                         r"mirror|后视镜)", re.IGNORECASE)
+
+
+def region_class(name="", kind="") -> str:
+    """'detail' | 'wheel' | 'exclude' | '' for one material of the material-ID pass.
+
+    Small detail parts (lamps, rims / spokes, calipers, discs, grille, badges, plates) may be
+    pasted; tyres, glass, body paint, mirrors and interior never are; anything else is left
+    to the AI (not a candidate) unless it is a keep-exact part."""
+    n = str(name or "")
+    lamp = name_looks_lamp(n) or kind == "emissive"
+    if _EXCLUDE_RE.search(n) and not lamp:
+        return "exclude"
+    if (kind == "glass" or name_looks_glass(n)) and not lamp:
+        return "exclude"
+    if kind == "mirror":
+        return "exclude"
+    if _WHEEL_RE.search(n) and not re.search(r"(tyre|tire|轮胎)", n, re.IGNORECASE):
+        return "wheel"
+    if lamp or _DETAIL_RE.search(n):
+        return "detail"
+    return ""
+
+
+def _lab(rgb):
+    from .material_color import srgb_to_lab
+    return srgb_to_lab(rgb)
+
+
+def match_region(D: np.ndarray, A: np.ndarray, union: np.ndarray, keep: bool, region=None) -> np.ndarray:
+    """Lighting of the AI image onto the detail pass, in Lab: lightness contrast from the 2nd–98th
+    percentile spread inside the region (clamped), lightness level from the region's median (a
+    plate's paper white, a rim's metal; shift clamped to ``MAX_SHIFT``), so a few letters / spoke
+    gaps that differ do not move it. a/b stay the detail pass's, so a part's own colour (a red
+    logo) keeps its hue; detail parts (not keep-exact) also take the AI's colour cast over
+    ``union`` (region + ring), clamped to ``MAX_AB_CAST``."""
+    from .material_color import lab_to_srgb, srgb_to_lab
+    if union.sum() < 4:
+        return D
+    region = union if region is None or region.sum() < 4 else region
+    ld, la = srgb_to_lab(D), srgb_to_lab(A)
+    Ld, La = ld[..., 0], la[..., 0]
+    d2, d98 = np.percentile(Ld[region], [2, 98])
+    a2, a98 = np.percentile(La[region], [2, 98])
+    lo, hi = KEEP_GAIN if keep else DETAIL_GAIN
+    k = float(np.clip((a98 - a2 + 0.1) / (d98 - d2 + 0.1), lo, hi))
+    pivot = float(Ld[union].mean())
+    L2 = (Ld - pivot) * k + pivot
+    shift = float(np.clip(float(np.median(La[region])) - float(np.median(L2[region])),
+                          -100 * MAX_SHIFT, 100 * MAX_SHIFT))
+    out = ld.copy()
+    out[..., 0] = np.clip(L2 + shift, 0, 100)
+    if not keep:
+        cast = np.clip(la[..., 1:][union].mean(0) - ld[..., 1:][union].mean(0), -MAX_AB_CAST, MAX_AB_CAST)
+        out[..., 1:] = out[..., 1:] + cast[None, None, :]
+    return np.clip(lab_to_srgb(out), 0, 1).astype(np.float32)
+
+
+def gate_region(A: np.ndarray, C: np.ndarray, D: np.ndarray, region: np.ndarray, ring: np.ndarray,
+                keep: bool = False) -> dict:
+    """A/B check of one pasted region: ``C`` (pasted) vs ``A`` (AI-only), crops of the same size.
+
+    same   — the AI's own high frequencies already match the detail pass: nothing to gain, keep the AI;
+    flat   — the paste has clearly less micro-contrast than the AI (dull / airbrushed patch);
+    seam   — gradient energy on the region border must not grow much (a visible cut / sticker edge);
+    step   — the inner border band may not step in brightness against the surrounding ring more
+             than the AI's own part did (dull / bright patch, wrong lighting);
+    band   — mean Lab colour of the inner border band vs the AI (grey halo, lost colour); for
+             keep-exact parts only its lightness (their own colour may legitimately differ);
+    ncc    — the AI must have the part where the detail pass has it (edge correlation), otherwise
+             the paste would ghost a second copy next to the AI's.
+    Returns dict(ok, reason, metrics)."""
+    border = dilate(region, 1) & ~erode(region, 1)
+    inner = region & ~erode(region, 2)
+    if not inner.any():
+        inner = region
+    la, lc = _lab(A), _lab(C)
+    ga, gc = _grad(la[..., 0] / 100.0), _grad(lc[..., 0] / 100.0)     # lightness edges (lighting)
+    e_a = float(ga[border].mean()) if border.any() else 0.0
+    e_c = float(gc[border].mean()) if border.any() else 0.0
+    ring_l = float(la[..., 0][ring].mean()) if ring.any() else float(la[..., 0][inner].mean())
+    step_a = abs(float(la[..., 0][inner].mean()) - ring_l)
+    step_c = abs(float(lc[..., 0][inner].mean()) - ring_l)
+    # keep-exact parts may differ in colour from the AI's version (that is the point: a logo the
+    # AI recoloured); only their lightness at the border must follow the AI's lighting
+    diff = lc[inner].mean(0) - la[inner].mean(0)
+    band_de = float(abs(diff[0])) if keep else float(np.linalg.norm(diff))
+    sel = dilate(region, 1)
+    ncc = _ncc(_grad(luminance(A)), _grad(luminance(D)), sel) if sel.sum() >= 50 else 1.0
+    core = erode(region, 1) if erode(region, 1).sum() >= 8 else region
+    hf = lambda y: y - blur(y, 1, 1)
+    ya, yc, yd = luminance(A), luminance(C), luminance(D)
+    ea, ec = float(np.abs(hf(ya))[core].mean()), float(np.abs(hf(yc))[core].mean())
+    flat = (ec + 1e-4) / (ea + 1e-4)
+    same = _ncc(hf(ya), hf(yd), core) if core.sum() >= 50 else 0.0
+    m = {"seam_ai": round(e_a, 4), "seam_paste": round(e_c, 4), "step_ai": round(step_a, 2),
+         "step_paste": round(step_c, 2), "band_de": round(band_de, 2), "ncc": round(float(ncc), 3),
+         "contrast": round(float(flat), 3), "same": round(float(same), 3)}
+    reason = ""
+    if ncc < GATE_MIN_NCC:
+        reason = "与 AI 图对不上"
+    elif same >= GATE_SAME:
+        reason = "AI 已画对"
+    elif flat < GATE_FLAT:
+        reason = "比原图更平"
+    elif e_c > e_a * GATE_SEAM_RATIO + GATE_SEAM_ABS:
+        reason = "接缝明显"
+    elif step_c > step_a + GATE_STEP_L:
+        reason = "明暗不匹配"
+    elif band_de > GATE_BAND_DE:
+        reason = "边缘发灰 / 偏色"
+    return {"ok": not reason, "reason": reason, "metrics": m}
+
+
+def _prepare(I, D, Da, product_mask, keep_rgba, fit, labels):
+    """Shared fit / verify / warp. Returns dict or a 'skipped' result."""
+    h, w = I.shape[:2]
+    align = None
+    if fit is None:
+        fit = fit_mask(I, product_mask)
+        align = verify_alignment(I, D, Da, product_mask, fit)
+        if not align["ok"]:
+            return {"skipped": "对齐不可靠（细节底图与成片不匹配）",
+                    "fit": {k: v for k, v in fit.items() if k != "mask"}, "align": align}
+        if (align["scale_x"], align["scale_y"], align["dx"], align["dy"]) != (
+                fit.get("scale_x"), fit.get("scale_y"), fit.get("dx"), fit.get("dy")):
+            fit = {"scale": round((align["scale_x"] + align["scale_y"]) / 2, 4), "scale_x": align["scale_x"],
+                   "scale_y": align["scale_y"], "dx": align["dx"], "dy": align["dy"], "search": align["source"],
+                   "outline_fit": {k: v for k, v in fit.items() if k != "mask"}}
+    sx, sy, dx, dy = fit.get("scale_x", 1.0), fit.get("scale_y", 1.0), fit.get("dx", 0.0), fit.get("dy", 0.0)
+    identity = (sx, sy, dx, dy) == (1.0, 1.0, 0.0, 0.0)
+    ys, xs = np.nonzero(product_mask > 0.5)
+    centre = (float(xs.mean()), float(ys.mean())) if len(xs) else (w / 2, h / 2)
+    keep = glass = None
+    keep_info = {}
+    if keep_rgba is not None:
+        keep, glass, _matte, keep_info = merge_keep_masks(keep_rgba, product_mask)
+    if not identity:
+        if labels is not None:
+            from .material_color import warp_labels
+            labels = warp_labels(labels, (sx, sy), dx, dy, centre)
+        Dp = warp_image(np.dstack([D * Da[..., None], Da]), (sx, sy), dx, dy, centre)
+        Da = Dp[..., 3]
+        D = Dp[..., :3] / np.maximum(Da, 1e-4)[..., None]
+        if keep is not None:
+            keep = warp_image(keep, (sx, sy), dx, dy, centre)
+            glass = warp_image(glass, (sx, sy), dx, dy, centre)
+    fitted = fit.get("mask")
+    if fitted is None:
+        fitted = product_mask if identity else warp_image(product_mask, (sx, sy), dx, dy, centre)
+    return {"fit": fit, "align": align, "D": D, "Da": Da, "keep": keep, "glass": glass, "keep_info": keep_info,
+            "labels": labels, "fitted": fitted}
+
+
+def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
+                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
+                  matid=None, colour_strength: float = 0.0) -> dict:
+    """1.2.3 细节回贴: paste only small detail regions, each matched to the AI's lighting and
+    each checked against the AI-only image; if nothing survives the AI image is kept as it is.
+
+    Candidates: keep-exact parts (plates, badges, logos: keep render) and, with the material-ID
+    pass (``matid`` = (labels, materials)), small detail materials (lamps, rims / spokes, calipers,
+    discs, grille, badges — ``region_class``). Tyres, glass, body paint, mirrors and interior are
+    never pasted. Each 8-connected piece is one region: at most ``MAX_REGION_FRAC`` of the product
+    (rims ``MAX_WHEEL_FRAC``), at least ``EDGE_MARGIN`` × long edge inside the silhouette, feathered
+    inwards only (no pixel outside the region changes → no halo on the tyre / background), lit by
+    ``match_region`` and kept only if ``gate_region`` passes. ``strength`` scales the opacity of
+    non-keep detail parts (keep-exact parts go in fully). ``colour_strength`` > 0 runs 按材质校色
+    afterwards, only when at least one region was kept, and never on body paint / tyres / glass /
+    mirrors / interior.
+
+    Returns dict(image, regions, kept, dropped, discarded, skipped?, fit, keep, colour, timings …)."""
+    t0 = time.time()
+    h, w = ai_rgb.shape[:2]
+    L = max(h, w)
+    I = ai_rgb[..., :3].astype(np.float32)
+    D = detail_rgba[..., :3].astype(np.float32)
+    Da = detail_rgba[..., 3].astype(np.float32) if detail_rgba.shape[-1] == 4 else np.ones((h, w), np.float32)
+    labels = materials = None
+    if matid is not None:
+        labels, materials = matid
+    base = {"image": I.copy(), "regions": [], "kept": 0, "dropped": 0, "keep": {}, "colour": {}, "blend": {},
+            "changed_px": 0, "weight": np.zeros((h, w), np.float32), "keep_mask": None, "occluder": None}
+    prep = _prepare(I, D, Da, product_mask, keep_rgba, fit, labels)
+    timings = {"fit": round(time.time() - t0, 2)}
+    if "skipped" in prep:
+        return dict(base, skipped=prep["skipped"], discarded=True, fit=prep["fit"], align=prep["align"],
+                    timings=dict(timings, total=round(time.time() - t0, 2)))
+    D, Da, keep, glass, labels, fitted = (prep[k] for k in ("D", "Da", "keep", "glass", "labels", "fitted"))
+    D = denoise_detail(D, L)
+    hard = fitted > 0.5
+    margin = max(2, int(round(EDGE_MARGIN * L)))
+    allowed = erode(hard, margin) & (Da > 0.5)
+    if canvas_alpha is not None:
+        allowed &= canvas_alpha > 0.5
+    keep_c = (keep > 0.5) if keep is not None else np.zeros((h, w), bool)
+    det_c = np.zeros((h, w), bool)
+    wheel_c = np.zeros((h, w), bool)
+    excl = (glass > 0.5) if glass is not None else np.zeros((h, w), bool)
+    excl_mat = np.zeros((h, w), bool)          # body paint / tyres / glass / mirrors / interior
+    cls_of = {}
+    if labels is not None and materials:
+        for mat in materials:
+            c = region_class(mat.get("name", ""), mat.get("kind", ""))
+            cls_of[int(mat["index"])] = (c, str(mat.get("name", "")))
+            sel = labels == int(mat["index"])
+            if c == "exclude":
+                excl |= sel
+                excl_mat |= sel
+            elif c == "detail":
+                det_c |= sel
+            elif c == "wheel":
+                wheel_c |= sel
+    cand = (keep_c | det_c | wheel_c) & ~excl & allowed
+    from .layered_output import label_components
+    comp, areas = label_components(cand)
+    prod_px = float(hard.sum())
+    f = max(1, int(round(L / 900)))
+    g = max(3, int(round(RING * L)))
+    out = I.copy()
+    weight = np.zeros((h, w), np.float32)
+    regions = []
+    seam_a = seam_c = 0.0
+    timings["prepare"] = round(time.time() - t0, 2)
+    for lab_id, area in sorted(areas.items(), key=lambda kv: -kv[1]):
+        ys, xs = np.nonzero(comp == lab_id)
+        y0, y1 = max(0, ys.min() - g - 3), min(h, ys.max() + g + 4)
+        x0, x1 = max(0, xs.min() - g - 3), min(w, xs.max() + g + 4)
+        sl = (slice(y0, y1), slice(x0, x1))
+        R = comp[sl] == lab_id
+        is_keep = bool(keep_c[sl][R].mean() > 0.5)
+        is_wheel = (not is_keep) and bool(wheel_c[sl][R].mean() > 0.5)
+        kind = "keep" if is_keep else ("wheel" if is_wheel else "detail")
+        name = ""
+        if labels is not None:
+            vals, cnt = np.unique(labels[sl][R], return_counts=True)
+            top = int(vals[np.argmax(cnt)])
+            name = cls_of.get(top, ("", ""))[1]
+        frac = area / max(prod_px, 1.0)
+        rec = {"kind": kind, "material": name, "px": int(area), "frac": round(frac, 4),
+               "bbox": [int(x0), int(y0), int(x1), int(y1)]}
+        regions.append(rec)
+        cap = MAX_WHEEL_FRAC if is_wheel else MAX_REGION_FRAC
+        if area < MIN_REGION_PX:
+            rec.update(decision="drop", reason="太小")
+            continue
+        if frac > cap:
+            rec.update(decision="drop", reason="区域过大")
+            continue
+        ring = dilate(R, g) & ~R & hard[sl]
+        Ac, Dc = I[sl], D[sl]
+        P = match_region(Dc, Ac, R | ring, keep=is_keep, region=R)
+        wr = np.clip((blur(R.astype(np.float32), f, 1) - 0.5) * 2.0, 0, 1) * R
+        wr = wr * (1.0 if is_keep else float(np.clip(strength, 0, 1)))
+        C = Ac * (1 - wr[..., None]) + P * wr[..., None]
+        gate = gate_region(Ac, C, Dc, R, ring, keep=is_keep)
+        rec["metrics"] = gate["metrics"]
+        if not gate["ok"]:
+            rec.update(decision="drop", reason=gate["reason"])
+            continue
+        rec["decision"] = "keep"
+        out[sl] = C * R[..., None] + out[sl] * ~R[..., None]
+        weight[sl] = np.maximum(weight[sl], wr)
+        seam_a += gate["metrics"]["seam_ai"] * area
+        seam_c += gate["metrics"]["seam_paste"] * area
+    timings["regions"] = round(time.time() - t0 - timings["prepare"], 2)
+    kept = [r for r in regions if r.get("decision") == "keep"]
+    dropped = [r for r in regions if r.get("decision") == "drop" and r.get("reason") != "太小"]
+    res = dict(base, regions=regions, kept=len(kept), dropped=len(dropped), keep=dict(prep["keep_info"]),
+               fit={k: v for k, v in prep["fit"].items() if k != "mask"}, align=prep["align"], keep_mask=keep)
+    discard = ""
+    if not kept:
+        discard = "没有可贴的小细节区域" if not dropped else "原图更自然"
+    elif seam_c > seam_a * GATE_TOTAL_SEAM + GATE_SEAM_ABS * sum(r["px"] for r in kept):
+        discard = "原图更自然"
+    if discard:
+        res.update(skipped=discard, discarded=True, image=I.copy(),
+                   timings=dict(timings, total=round(time.time() - t0, 2)))
+        return res
+    res["discarded"] = False
+    res["keep"]["pasted_px"] = int((weight > 0.5).sum())
+    if labels is not None and colour_strength > 0:
+        t = time.time()
+        from .material_color import correct_colours
+        r_e = max(2, int(round(0.003 * L)))
+        cw = np.clip(blur(erode(hard, r_e + 1).astype(np.float32), 2, 1), 0, 1) * erode(hard, r_e)
+        cw = cw * np.clip((Da - 0.5) * 2.0, 0, 1)
+        if canvas_alpha is not None:
+            cw = cw * (canvas_alpha > 0.5)
+        occ = occluder_mask(I, D, ((hard) & (Da > 0.5)).astype(np.float32), L, labels=labels)
+        cw = cw * (1.0 - occ)
+        # 1.2.3: never recolour body paint, tyres, glass, mirrors or interior (broad areas whose
+        # look must stay the AI's); trim, plastics, wood, fabric … are still pulled to the model
+        protect = np.maximum(weight, excl_mat.astype(np.float32))
+        cres = correct_colours(np.clip(out, 0, 1), D, labels, materials, cw.astype(np.float32), colour_strength,
+                               model_alpha=Da, protect=protect, occluder=occ)
+        out = cres["image"]
+        res["occluder"] = occ
+        res["colour"] = {"cast": cres["cast"], "regions": cres["regions"], "changed_px": cres["changed_px"],
+                         "strength": round(float(colour_strength), 3)}
+        timings["colour"] = round(time.time() - t, 2)
+    out = np.clip(out, 0, 1)
+    res["image"] = out
+    res["weight"] = weight
+    res["changed_px"] = int((np.abs(out - I).max(-1) > (1.5 / 255)).sum())
+    res["timings"] = dict(timings, total=round(time.time() - t0, 2))
+    return res
+
+
 # --------------------------------------------------------------------------- file driver
 
 def raw_path(path) -> str:
@@ -653,13 +993,15 @@ def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="",
     D = load(detail_path, 4)
     M = load(mask_path, 4)[..., 3]
     K = load(keep_path, 4) if keep_path and Path(keep_path).is_file() else None
-    matid = load_matid(matid_path, w, h) if matid_path and colour_strength > 0 else None
+    # 1.2.3: the material-ID pass also tells the region paste which parts are rims / lamps / tyres
+    matid = load_matid(matid_path, w, h) if matid_path else None
     res = paste_details(I, D, M, K, strength=strength, canvas_alpha=ca, matid=matid,
                         colour_strength=colour_strength if matid is not None else 0.0)
-    out = (np.clip(res["image"], 0, 1) * 255 + 0.5).astype(np.uint8)
-    if ca is not None:
-        out = np.dstack([out, rgba[..., 3]])
-    write_png(output_path, out)
+    if not res.get("skipped"):       # discarded / skipped: nothing is written, the AI image stays
+        out = (np.clip(res["image"], 0, 1) * 255 + 0.5).astype(np.uint8)
+        if ca is not None:
+            out = np.dstack([out, rgba[..., 3]])
+        write_png(output_path, out)
     if debug_dir:
         Path(debug_dir).mkdir(parents=True, exist_ok=True)
         stem = Path(output_path).stem
@@ -669,7 +1011,7 @@ def paste_file(image_path, detail_path, mask_path, output_path, *, keep_path="",
             write_png(str(Path(debug_dir) / f"{stem}_keep.png"), gray(res["keep_mask"]))
     rep = {k: v for k, v in res.items() if k not in {"image", "weight", "keep_mask", "occluder"}}
     rep["seconds"] = round(time.time() - t0, 2)
-    rep["output"] = str(output_path)
+    rep["output"] = "" if res.get("skipped") else str(output_path)
     return rep
 
 
@@ -687,6 +1029,17 @@ def summarize(report) -> str:
         return ""
     if report.get("error"):
         return "细节回贴失败：" + str(report["error"])[:80]
+    if "regions" in report and "kept" in report:      # 1.2.3 region paste
+        if report.get("discarded"):
+            why = str(report.get("skipped") or "原图更自然")
+            if why == "原图更自然":
+                return "细节回贴：已放弃，原图更自然"
+            return "细节回贴：已放弃（" + why[:40] + "），保留 AI 原图"
+        colour = (report.get("colour") or {}).get("regions") or []
+        fixed = sum(1 for r in colour if "shift" in r and max(abs(x) for x in r["shift"]) >= 0.5)
+        return (f"细节回贴：保留 {report.get('kept', 0)} 处 · 放弃 {report.get('dropped', 0)} 处"
+                + (f" · 按材质校色 {fixed} 种材质" if fixed else "")
+                + f" · {report.get('seconds', 0):.1f} 秒")
     if report.get("skipped"):
         return "细节回贴已跳过：" + str(report["skipped"])[:60] + "，保留 AI 原图"
     keep = (report.get("keep") or {}).get("pasted_px", 0)

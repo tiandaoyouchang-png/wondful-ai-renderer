@@ -40,12 +40,14 @@ class KeepPerRegion(unittest.TestCase):
 
 class ExactKeepIsExact(unittest.TestCase):
     def test_red_logo_keeps_its_red(self):
+        """1.2.3 region paste: the logo takes the AI's lightness (Lab L match) but
+        keeps its own hue — a pure red logo is never turned grey-red."""
         ai = np.zeros((H, W, 3), np.float32)
         ai[...] = (0.45, 0.30, 0.25)
         det = np.zeros((H, W, 4), np.float32)
         det[..., :3] = (0.45, 0.30, 0.25)
         det[..., 3] = PROD
-        logo = (PROD > 0) & (abs(xx - 330) < 30) & (abs(yy - 180) < 14)
+        logo = (PROD > 0) & (abs(xx - 330) < 20) & (abs(yy - 180) < 10)    # ≈ 1 % of the product
         det[logo, :3] = (0.9, 0.05, 0.05)
         ai[logo] = (0.62, 0.22, 0.18)              # the AI drew the logo, in a duller red
         keep = np.zeros((H, W, 4), np.float32)
@@ -53,10 +55,17 @@ class ExactKeepIsExact(unittest.TestCase):
         keep[logo, 3] = 1
         fit = {"scale": 1.0, "scale_x": 1.0, "scale_y": 1.0, "dx": 0.0, "dy": 0.0}
         out = DP.paste_details(ai, det, PROD, keep_rgba=keep, fit=fit)
-        core = logo & (abs(xx - 330) < 20) & (abs(yy - 180) < 8)
+        self.assertFalse(out["discarded"], out["regions"])
+        core = logo & (abs(xx - 330) < 14) & (abs(yy - 180) < 6)
         mean = out["image"][core].mean(0)
-        self.assertGreater(mean[0], 0.85)
-        self.assertLess(mean[1], 0.1)
+        lab_out = MC.srgb_to_lab(out["image"])[core].mean(0)
+        lab_ai = MC.srgb_to_lab(ai)[core].mean(0)
+        lab_det = MC.srgb_to_lab(det[..., :3])[core].mean(0)
+        self.assertAlmostEqual(float(lab_out[0]), float(lab_ai[0]), delta=3.0)    # lightness: the AI's
+        # colour: Blender's red (a little gamut clipping at the darker lightness), far from the AI's
+        self.assertAlmostEqual(float(lab_out[1]), float(lab_det[1]), delta=10.0)
+        self.assertGreater(float(lab_out[1]), float(lab_ai[1]) + 20.0)
+        self.assertGreater(float(mean[0] - mean[1]), 0.6)                        # still clearly red, not grey-red
 
 
 class CastNeedsReference(unittest.TestCase):

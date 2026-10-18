@@ -2432,7 +2432,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         try:
             props.last_detail_note = ""
             props.last_score_note = ""
-            if not bool(getattr(props, "detail_paste", True)):
+            if not bool(getattr(props, "detail_paste", False)):
                 return None
             coll = getattr(props, "product_collection", None)
             if coll is None:
@@ -2453,7 +2453,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 "keep": str(work / "01_keep_mask.png"),
                 "mask": str(work / "01_product_mask.png"),
                 "strength": float(getattr(props, "detail_paste_strength", 0.8)),
-                "matid": str(work / "01_material_id.png") if bool(getattr(props, "detail_colour_fix", True)) else "",
+                # 1.2.3: always rendered — the region paste reads part classes (rim / lamp / tyre) from it
+                "matid": str(work / "01_material_id.png"),
                 "colour_strength": (float(getattr(props, "detail_colour_strength", 0.7))
                                     if bool(getattr(props, "detail_colour_fix", True)) else 0.0),
                 "keep_slots": len(slots),
@@ -4131,7 +4132,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         size = CD.choose_edit_size(W, H, int(getattr(prefs, "long_edge", 2048) or 2048))
-        paste = bool(getattr(props, "detail_paste", True))
+        paste = bool(getattr(props, "detail_paste", False))
         colour_fix = bool(getattr(props, "detail_colour_fix", True))
         strength = float(getattr(props, "detail_paste_strength", 0.8))
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
@@ -4212,7 +4213,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 work = Path(pre + "_work")
                 work.mkdir(exist_ok=True)
                 spec = {"detail": v["files"]["detail"], "mask": v["files"]["mask"], "keep": v["files"]["keep"],
-                        "matid": v["files"]["matid"] if colour_fix else "", "strength": strength,
+                        "matid": v["files"]["matid"], "strength": strength,
                         "colour_strength": colour_strength, "work_dir": str(work), "mirrored": []}
                 matid = spec["matid"] if spec["matid"] and Path(spec["matid"]).is_file() else ""
                 tries = []
