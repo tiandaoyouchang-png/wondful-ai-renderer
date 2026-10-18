@@ -1,4 +1,4 @@
-"""1.2.3 高级 › 环境体块 › 从参考图生成场景粗模 — analysis side (no bpy).
+"""1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模 — analysis side (no bpy).
 
 One environment photo → strict-JSON scene layout (camera, heightfield terrain, roads, cliffs,
 distant bands, foliage, primitives, product spot, palette) from the reasoning model with the

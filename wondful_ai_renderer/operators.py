@@ -111,7 +111,7 @@ def _status(props, status, error=""):
 
 
 def _apply_model_notice(props):
-    """1.2.2: surface a 推理-model fallback (old Codex CLI) in step ⑤."""
+    """1.2.2: surface a 推理-model fallback (old Codex CLI) in step ⑥."""
     try:
         notice = codex_pop_model_notice()
         if notice:
@@ -1187,10 +1187,10 @@ def _sb_prepare_png(src, dst, long_edge):
 
 
 class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
-    """1.2.3 高级 › 环境体块 › 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
+    """1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
     bl_idname = "wondful.scene_blockout_build"
     bl_label = "从参考图生成场景粗模"
-    bl_description = ("让 AI 分析环境参考图（③ 第一张，或这里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
+    bl_description = ("让 AI 分析环境参考图（③ 第一张，或 ④ 里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
                       "放进环境体块里的「Wondful 场景粗模」集合（重新生成会替换它），每个体块都按照片命名；产品位置不变。"
                       "参考图只用于分析，不会发给生图模型")
     bl_options = {"REGISTER", "UNDO"}
@@ -1210,7 +1210,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         props.sb_elapsed = 0
         ref, source = _sb_reference(props)
         if not ref or not Path(ref).is_file():
-            msg = "请先在 ③ 放一张环境参考图，或在这里选择一张参考图。" if not ref else f"参考图不存在：{ref}"
+            msg = "请先在 ③ 放一张环境参考图，或在 ④ 选择一张参考图。" if not ref else f"参考图不存在：{ref}"
             props.last_sb_note = msg
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
@@ -2288,7 +2288,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 props.progress = 1.0
                 props.eta_seconds = 0
                 _status(props, "IDLE")
-                if chain_render:  # 1.2.2: the chain stops here on purpose; say so in ⑤
+                if chain_render:  # 1.2.2: the chain stops here on purpose; say so in ⑥
                     _status(props, "ERROR", "写提示词期间你修改了提示词：已保留你的修改，AI 版本在“AI 润色建议”里；"
                                             "没有自动生图，确认后点「生成」继续。")
                 self.report({"WARNING"}, props.prompt_notice)

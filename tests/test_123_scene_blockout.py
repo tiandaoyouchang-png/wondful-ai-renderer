@@ -263,14 +263,17 @@ class FitScoreTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_registered_and_in_advanced_only(self):
+    def test_registered_and_in_main_flow_step4(self):
         init = (PKG / "__init__.py").read_text(encoding="utf-8")
         self.assertEqual(init.count("WONDFUL_OT_scene_blockout_build"), 2)
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        self.assertIn('_draw_scene_blockout(box, props, busy)', ui.split("def _draw_multiview")[0])
+        # 1.2.3: moved out of 高级 › 场景 › 环境体块 into the main flow as ④ 场景粗模（可选）
+        massing = ui[ui.index("def _draw_massing("):ui.index("def _draw_block_refs")]
+        self.assertNotIn("scene_blockout", massing)
         main = ui.split("class WONDFUL_PT_main")[1]
-        self.assertNotIn("scene_blockout", main)             # main panel unchanged
-        self.assertIn('"wondful.scene_blockout_build", text="从参考图生成场景粗模"', ui)
+        self.assertEqual(main.count("_draw_blockout_step("), 1)
+        self.assertEqual(ui.count('"wondful.scene_blockout_build"'), 1)
+        self.assertIn('"wondful.scene_blockout_build", text="生成场景粗模"', ui)
         for label in ("同时设置相机", "自动校正一轮"):
             self.assertIn(label, ui)
         props = (PKG / "properties.py").read_text(encoding="utf-8")

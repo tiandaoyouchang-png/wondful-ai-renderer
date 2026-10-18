@@ -126,7 +126,7 @@ def s2_connected_refs(p, scene):
 
 @state
 def s2b_count_2(p, scene):
-    """1.2.2: ⑤ 张数 1/2/3/4 above 生成 (2 selected)."""
+    """1.2.2: ⑥ 张数 (⑤ before 1.2.3) 1/2/3/4 above 生成 (2 selected)."""
     p.render_count = "2"
 
 

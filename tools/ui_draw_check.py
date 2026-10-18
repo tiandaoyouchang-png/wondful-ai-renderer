@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模 as main-flow step ④（可选）, six step cards).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -152,6 +152,39 @@ def draw(state_name):
     return log
 
 
+def main_part(log):
+    """The main flow (step cards) part of a log, i.e. everything above 高级."""
+    for i, line in enumerate(log):
+        if "label" in line and line.rstrip().endswith(" 高级"):
+            return log[:i]
+    return log
+
+
+def step4(log):
+    """The ④ 场景粗模 card: from its title to the ⑤ 提示词 title."""
+    start = next((i for i, l in enumerate(log) if l.rstrip().endswith("④  场景粗模") or l.rstrip().endswith("CHECKMARK 场景粗模")), -1)
+    end = next((i for i, l in enumerate(log) if i > start and ("⑤  提示词" in l or "CHECKMARK 提示词" in l)), len(log))
+    return log[start:end] if start >= 0 else []
+
+
+def check_six_steps(name, log):
+    """① ② ③ ④ ⑤ ⑥ in order, ④ = 场景粗模 with the 可选 tag; the build button only in ④, never in 高级."""
+    titles = []
+    for title in ("连接", "产品三视图（可选）", "环境参考图", "场景粗模", "提示词", "生成"):
+        idx = next((i for i, l in enumerate(log) if "label" in l and (l.rstrip().endswith("  " + title)
+                    or l.rstrip().endswith("CHECKMARK " + title))), -1)
+        titles.append(idx)
+    if -1 in titles or titles != sorted(titles):
+        problems.append(f"[{name}] six step cards missing or out of order: {titles}")
+    card = step4(log)
+    if not any(l.rstrip().endswith("label  可选") for l in card[:3]):
+        problems.append(f"[{name}] ④ has no 可选 tag")
+    builds = [i for i, l in enumerate(log) if "op wondful.scene_blockout_build" in l]
+    if len(builds) > 1 or (builds and "op wondful.scene_blockout_build" not in "\n".join(card)):
+        problems.append(f"[{name}] 生成场景粗模 button outside ④ (or twice)")
+    return card
+
+
 def main():
     bpy.ops.preferences.addon_install(filepath=ZIP, overwrite=True)
     bpy.ops.preferences.addon_enable(module="wondful_ai_renderer")
@@ -215,7 +248,7 @@ def main():
     draw("terrain_custom_level")
     props.clay_ground = "AUTO"
 
-    # 1.2.2: ⑤ 张数 1/2/3/4 right above 生成; Antigravity cap note; 推理 model fallback notice
+    # 1.2.2: ⑥ 张数 (⑤ before 1.2.3) 1/2/3/4 right above 生成; Antigravity cap note; 推理 model fallback notice
     log = draw("count_default")
     if not any("render_count" in line for line in log):
         problems.append("count_default: 张数 (render_count) buttons missing")
@@ -360,24 +393,38 @@ def main():
     props.last_hull_note = ""
     props.ui_show_massing_hull = False
 
-    # 4a. 1.2.3 环境体块 › 从参考图生成场景粗模: closed / no reference / file reference / after a build / failed
-    draw("scene_blockout_closed")
-    props.ui_show_scene_blockout = True
+    # 4a. 1.2.3 ④ 场景粗模（可选）: no reference / refused / file reference / built (✓) / failed / running / cancelled
+    for tab in ADV_TABS + ("CLOSED",):
+        props.ui_show_advanced = tab != "CLOSED"
+        if tab != "CLOSED":
+            props.ui_adv_tab = tab
+        log = draw("sb_idle_tab_" + tab.lower())
+        card = check_six_steps("sb_idle_tab_" + tab.lower(), log)
+        text = "\n".join(card)
+        if "op wondful.scene_blockout_build MOD_BUILD 生成场景粗模" not in text or "prop sb_image_path" not in text \
+                or "prop sb_set_camera" not in text or "prop sb_correct" not in text or "约 3–5 分钟" not in text:
+            problems.append(f"sb idle ({tab}): ④ compact contents missing")
+        if "CHECKMARK 场景粗模" in text:
+            problems.append(f"sb idle ({tab}): ④ checked without a blockout")
+    props.ui_show_advanced = True
+    props.ui_adv_tab = "SCENE"
     props.style_images.clear()
     props.sb_image_path = ""
-    draw("scene_blockout_no_ref")
+    log = draw("scene_blockout_no_ref")
+    if "③ 还没有环境参考图" not in "\n".join(step4(log)):
+        problems.append("sb no ref: ④ should say ③ has no reference")
     try:
         res = bpy.ops.wondful.scene_blockout_build()
     except RuntimeError:          # an ERROR report raises in bpy.ops
         res = {"CANCELLED"}
-    if res != {"CANCELLED"} or "③" not in props.last_sb_note:
+    if res != {"CANCELLED"} or "③" not in props.last_sb_note or "④" not in props.last_sb_note:
         problems.append(f"scene_blockout_build without a reference should refuse: {res} {props.last_sb_note}")
     draw("scene_blockout_refused")
     ref_png = os.path.join(tmp, "env_ref.png")
     png_io.write_png(ref_png, np.full((90, 160, 4), 180, np.uint8))
     props.sb_image_path = ref_png
     props.last_sb_note = ""
-    draw("scene_blockout_ready")
+    check_six_steps("scene_blockout_ready", draw("scene_blockout_ready"))
     import json as _json
     from pathlib import Path as _P
     fixture = _P(__file__).resolve().parents[1] / "tests" / "fixtures" / "scene_blockout" / "desert_v3.json"
@@ -394,10 +441,17 @@ def main():
     if bpy.context.scene.camera is None or bpy.context.scene.camera.name != SB.CAMERA_NAME:
         problems.append("场景粗模 did not set its reference camera")
     print("scene blockout", props.last_sb_note)
-    draw("scene_blockout_built")
+    log = draw("scene_blockout_built")
+    card = check_six_steps("scene_blockout_built", log)
+    if "CHECKMARK 场景粗模" not in "\n".join(card):
+        problems.append("sb built: ④ number should turn into ✓")
+    props.last_sb_note = ""
+    if "已有场景粗模" not in "\n".join(step4(draw("scene_blockout_built_reopened"))):
+        problems.append("sb built (no note): ④ should say a blockout exists")
     props.last_sb_note = "场景粗模失败：未找到 Codex 登录文件，请先在 ① 连接 Codex"
     draw("scene_blockout_failed")
-    # running: stage list, 「分析参考图 · 已用 1:42」, typical-time hint, bar, 取消 replaces the build button
+    # running: stage list, 「分析参考图 · 已用 1:42」, typical-time hint, bar, 取消 replaces the build button (all in ④);
+    # ⑥ carries one compact 「④ 场景粗模 · … · N%」 line, whatever 高级 tab is open
     from wondful_ai_renderer import sb_progress as SP
     for correct in (False, True):
         ids = SP.stages(correct, True)
@@ -408,32 +462,35 @@ def main():
             props.sb_elapsed = 102
             props.progress = SP.fraction(ids, stage, 102)
             props.task_phase = "场景粗模：" + SP.status_text(stage, 102)
-            log = draw(f"scene_blockout_running_{'corr_' if correct else ''}{stage.lower()}")
-            text = "\n".join(log)
-            if f"{SP.label(stage)} · 已用 1:42" not in text:
-                problems.append(f"running {stage}: elapsed stage text missing")
-            if "op wondful.cancel_task" not in text or "op wondful.scene_blockout_build" in text:
-                problems.append(f"running {stage}: 取消 should replace the build button")
-            if stage == SP.ANALYZE and "约 3–5 分钟" not in text:
-                problems.append("running ANALYZE: typical-time hint missing")
-            # 1.2.3: the running stage + bar stay visible in ⑤ whatever 高级 tab is open (or 高级 closed)
+            pct = int(round(props.progress * 100))
             for tab in ADV_TABS + ("CLOSED",):
                 props.ui_show_advanced = tab != "CLOSED"
                 if tab != "CLOSED":
                     props.ui_adv_tab = tab
-                tlog = "\n".join(draw(f"sb_running_{stage.lower()}_tab_{tab.lower()}"))
-                if f"场景粗模 · {SP.label(stage)} · 已用 1:42" not in tlog or "progress" not in tlog \
-                        or "op wondful.cancel_task" not in tlog:
-                    problems.append(f"running {stage}: ⑤ progress missing with tab {tab}")
+                name = f"sb_running_{'corr_' if correct else ''}{stage.lower()}_tab_{tab.lower()}"
+                log = draw(name)
+                card = "\n".join(check_six_steps(name, log))
+                main_text = "\n".join(main_part(log))
+                if f"{SP.label(stage)} · 已用 1:42" not in card or "progress" not in card \
+                        or "op wondful.cancel_task" not in card or "op wondful.scene_blockout_build" in card:
+                    problems.append(f"{name}: ④ stage / bar / 取消 wrong")
+                if f"progress 第 {ids.index(stage) + 1}/{len(ids)} 步 · {pct}%" not in card or "PLAY" in card:
+                    problems.append(f"{name}: ④ bar should read 第 i/n 步 · N% (no stage list while running)")
+                if stage == SP.ANALYZE and "约 3–5 分钟" not in card:
+                    problems.append(f"{name}: typical-time hint missing")
+                if "CHECKMARK 场景粗模" in card:
+                    problems.append(f"{name}: ④ checked while running")
+                six = main_text[main_text.index("⑥  生成"):] if "⑥  生成" in main_text else ""
+                if f"TIME ④ 场景粗模 · {SP.label(stage)} · 已用 1:42 · {pct}%" not in six or "op wondful.cancel_task" not in six:
+                    problems.append(f"{name}: ⑥ one-line status / 取消 missing")
+                if six.count("progress") or "读产品图" in six:
+                    problems.append(f"{name}: ⑥ should carry one line, not a second bar / the 生成 stages")
             props.ui_show_advanced = True
             props.ui_adv_tab = "SCENE"
-    props.ui_show_scene_blockout = False
-    log = draw("scene_blockout_running_closed")
-    if "分析参考图" not in "\n".join(log) and "已用" not in "\n".join(log):
-        problems.append("collapsed section should still show the running stage")
-    props.ui_show_scene_blockout = True
     props.task_phase = "正在取消，等待当前请求结束"
-    draw("scene_blockout_cancelling")
+    text = "\n".join(draw("scene_blockout_cancelling"))
+    if "正在取消，等待当前请求结束…" not in text or "④ 场景粗模 · 正在取消…" not in text:
+        problems.append("sb cancelling: ④ / ⑥ texts missing")
     # failed at a stage: list shows ERROR on that stage, note names it
     props.status = "ERROR"
     props.task_phase = ""
@@ -442,9 +499,11 @@ def main():
     props.sb_stage_ids = SP.encode(SP.stages(True, True))
     props.sb_failed_stage = SP.CORRECT
     props.last_sb_note = SP.failure_note(SP.CORRECT, 260, "网络超时")
+    props.last_error = props.last_sb_note
     log = draw("scene_blockout_failed_stage")
-    if "ERROR 校正分析 · 失败" not in "\n".join(log):
-        problems.append("failed stage row missing")
+    card = "\n".join(check_six_steps("scene_blockout_failed_stage", log))
+    if "ERROR 校正分析 · 失败" not in card or "op wondful.scene_blockout_build" not in card:
+        problems.append("sb error: ④ failed stage row / rebuild button missing")
     props.sb_failed_stage = ""
     props.status = "IDLE"
     props.last_error = ""
@@ -452,8 +511,9 @@ def main():
     draw("scene_blockout_cancelled")
     props.last_sb_note = ""
     props.sb_image_path = ""
-    props.ui_show_scene_blockout = False
     SBB.remove_existing()
+    if "CHECKMARK 场景粗模" in "\n".join(step4(draw("scene_blockout_removed"))):
+        problems.append("sb removed: ④ still checked")
 
     # 4b. 1.2.3 多角度场景一致: closed, open without master, with master + selected cameras, after a run
     props.ui_show_multiview = True
@@ -548,7 +608,7 @@ def main():
     draw("multiview_block_name_empty")
     props.ui_show_multiview = False
 
-    # 4c. 1.2.3: a 多角度 run reports in ⑤ (phase + bar, not the four 生成 stages) on every tab
+    # 4c. 1.2.3: a 多角度 run reports in ⑥ (phase + bar, not the four 生成 stages) on every tab
     props.status = "RENDERING"
     props.task_phase = "多角度场景一致：MV其他（1/2）"
     props.progress = 0.4
@@ -557,7 +617,7 @@ def main():
         text = "\n".join(draw("mv_running_tab_" + tab.lower()))
         if "多角度场景一致：MV其他（1/2）" not in text or "progress" not in text or "读产品图" in text \
                 or "op wondful.cancel_task" not in text:
-            problems.append(f"multiview running: ⑤ progress wrong with tab {tab}")
+            problems.append(f"multiview running: ⑥ progress wrong with tab {tab}")
     props.status = "IDLE"
     props.task_phase = ""
     props.progress = 0.0

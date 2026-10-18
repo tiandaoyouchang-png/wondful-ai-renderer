@@ -135,7 +135,7 @@ class IdentityScoreTests(unittest.TestCase):
         self.assertIn("score_{variant_index:02d}.json", ops)
         self.assertIn("last_score_note: StringProperty", props)
         self.assertIn('getattr(props, "last_score_note", "")', ui)
-        # not in the five main cards: only inside 上次渲染 (高级)
+        # not in the six main cards: only inside 上次渲染 (高级)
         self.assertGreater(ui.index('getattr(props, "last_score_note", "")'), ui.index('_section(adv, "上次渲染"'))
 
 

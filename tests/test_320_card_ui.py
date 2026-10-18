@@ -1,4 +1,4 @@
-"""3.2.0: five step cards, large reference thumbnails, staged generate progress (source-level checks)."""
+"""3.2.0 step cards (1.2.3: six, ④ 场景粗模 optional), large reference thumbnails, staged generate progress (source-level checks)."""
 import ast
 import unittest
 from pathlib import Path
@@ -11,12 +11,17 @@ class CardUITests(unittest.TestCase):
         self.src = (PKG / "ui.py").read_text()
         ast.parse(self.src)
 
-    def test_five_steps_in_order(self):
-        order = ['"连接"', '"产品三视图（可选）"', '"环境参考图"', '"提示词"', '"生成"']
+    def test_six_steps_in_order(self):
+        # 1.2.3: ④ 场景粗模（可选） is drawn by its own helper, called between ③ and ⑤
         draw = self.src[self.src.index("class WONDFUL_PT_main"):]
-        positions = [draw.index(f"_step_card(layout, {i + 1}, {name}") for i, name in enumerate(order)]
+        positions = [draw.index('_step_card(layout, 1, "连接"'), draw.index('_step_card(layout, 2, "产品三视图（可选）"'),
+                     draw.index('_step_card(layout, 3, "环境参考图"'), draw.index("_draw_blockout_step(layout, context"),
+                     draw.index('_step_card(layout, 5, "提示词"'), draw.index('_step_card(layout, 6, "生成"')]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn('STEP_NUMBERS = ("①", "②", "③", "④", "⑤")', self.src)
+        helper = self.src[self.src.index("def _draw_blockout_step"):self.src.index("def _draw_sb_progress")]
+        self.assertIn('_step_card(layout, 4, "场景粗模"', helper)
+        self.assertIn('tools.label(text="可选")', helper)
+        self.assertIn('STEP_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥")', self.src)
         self.assertIn('icon="CHECKMARK"', self.src)
 
     def test_cards_grey_but_never_disable(self):

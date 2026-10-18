@@ -521,10 +521,10 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_expanded: BoolProperty(name="展开提示词", description="展开自动换行全文或收起为 6 行；完整编辑按钮支持多行输入", default=False)
     render_mode: EnumProperty(
         name="渲染模式",
-        description="控制单次渲染的远程调用数量。张数在 ⑤ 选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
+        description="控制单次渲染的远程调用数量。张数在 ⑥ 选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
         items=[
-            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按 ⑤ 的选择；用于快速看方向"),
-            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按 ⑤ 的选择；推荐默认"),
+            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按 ⑥ 的选择；用于快速看方向"),
+            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按 ⑥ 的选择；推荐默认"),
             ("STRICT", "严格对齐", "使用完整 Structure Packet（含 Part ID），生成后远程验收；未达阈值时按设置自动修复重试"),
         ],
         default="STANDARD",
@@ -833,7 +833,8 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
-    # 1.2.3 环境体块 › 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
+    # 1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
+    # ui_show_scene_blockout: the old 高级 disclosure; unused since ④, kept so saved .blend files load unchanged
     ui_show_scene_blockout: BoolProperty(name="从参考图生成场景粗模", default=False)
     sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；这张图只用于分析，不会发给生图模型",
                                   subtype="FILE_PATH", default="")
@@ -930,12 +931,12 @@ class WONDFUL_AISettings(PropertyGroup):
     # 1.2.3 UI tidy: 高级 shows one group at a time; level-3 tools that had no disclosure yet
     ui_adv_tab: EnumProperty(
         name="高级分组",
-        description="高级设置分组，一次只显示一组；正在运行的任务进度始终显示在 ⑤",
+        description="高级设置分组，一次只显示一组；正在运行的任务进度始终显示在 ⑥",
         items=[
             ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
             ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
             ("PRODUCT", "产品", "轮廓验收、细节回贴与产品外观锁定"),
-            ("SCENE", "场景", "地面 / 地形、环境体块、场景粗模、环境分析与人物参考"),
+            ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在主流程 ④）"),
             ("MULTIVIEW", "多角度", "多角度场景一致"),
             ("DIAG", "诊断", "上次渲染、产品还原度、诊断信息与偏好设置"),
         ],

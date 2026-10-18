@@ -204,10 +204,10 @@ def _draw_reference_group(layout, props, title, collection_attr, index_attr, kin
 
 
 # ---------------------------------------------------------------------------
-# 3.2.0 five-step card layout helpers
+# 3.2.0 step card layout helpers (1.2.3: six steps, ④ 场景粗模 optional)
 # ---------------------------------------------------------------------------
 
-STEP_NUMBERS = ("①", "②", "③", "④", "⑤")
+STEP_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥")
 GENERATE_STAGES = ("读产品图", "分析环境", "写提示词", "渲染验收")
 BUSY_STATUSES = {"AUTHENTICATING", "CLASSIFYING", "POLISHING", "RENDERING", "REFRESHING_MODELS", "BLOCKOUT"}
 
@@ -372,7 +372,7 @@ def _draw_progress_bar(layout, props, text):
 
 # ---------------------------------------------------------------------------
 # 1.2.3 UI tidy: one text / header style for the whole panel
-#   level 0  step card ①–⑤            box · number (✓ when done) · title · right-hand tools
+#   level 0  step card ①–⑥            box · number (✓ when done) · title · right-hand tools
 #   level 1  高级                      box · disclosure · PREFERENCES · tab row (one group at a time)
 #   level 2  section inside a tab      box · icon + title, or switch (checkbox) + icon + title
 #   level 3  tool inside a section     nested box · disclosure · icon + title
@@ -494,22 +494,21 @@ def _subsection(layout, props, attr, title, icon):
 
 
 def _draw_task_progress(layout, props, cells):
-    """⑤ while a task started from 高级 runs (多角度 / 场景粗模): what it does now + a bar, on every tab."""
+    """⑥ while a side task runs: 场景粗模 (④) as one compact line (its stages + bar are in ④), 多角度 (高级)
+    as what it does now + a bar; visible whatever 高级 tab is open."""
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
     phase = getattr(props, "task_phase", "") or ""
     if props.status == "BLOCKOUT":
         from . import sb_progress as SP
         stage = getattr(props, "sb_stage", "") or SP.READ
-        text = ("正在取消，等待当前请求结束…" if "取消" in phase
-                else "场景粗模" + SEP + SP.status_text(stage, getattr(props, "sb_elapsed", 0)))
-        bar_text = f"{SP.label(stage)}{SEP}{pct}%"
-    else:
-        text = phase or "后台任务进行中"
-        bar_text = f"估算 {pct}%"
-    _note(layout, text, cells, "run", 2)
+        text = ("④ 场景粗模" + SEP + "正在取消…" if "取消" in phase
+                else "④ 场景粗模" + SEP + SP.status_text(stage, getattr(props, "sb_elapsed", 0)) + f"{SEP}{pct}%")
+        _note(layout, text, cells, "run", 1)
+        return
+    _note(layout, phase or "后台任务进行中", cells, "run", 2)
     bar = layout.column()
     bar.scale_y = 1.4
-    _draw_progress_bar(bar, props, bar_text)
+    _draw_progress_bar(bar, props, f"估算 {pct}%")
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +637,8 @@ def _draw_terrain(layout, props):
 
 
 def _draw_massing(adv, context, props, busy):
-    """高级 › 场景 › 环境体块 (1.2.0): collection, per-block 建筑参考, blocks from three views, 场景粗模."""
+    """高级 › 场景 › 环境体块 (1.2.0): collection, per-block 建筑参考, blocks from three views
+    (1.2.3: 从参考图生成场景粗模 moved to the main flow as ④)."""
     box, _head, on = _section(adv, "环境体块", "MESH_CUBE", props, "massing_enabled")
     if not on:
         return
@@ -667,7 +667,6 @@ def _draw_massing(adv, context, props, busy):
     if coll is not None:
         _draw_block_refs(box, context, props, busy, blocks)
     _draw_massing_hull(box, props, busy)
-    _draw_scene_blockout(box, props, busy)
 
 
 def _draw_block_refs(box, context, props, busy, blocks):
@@ -749,71 +748,90 @@ def _draw_massing_hull(box, props, busy):
         _note(col, note, cells, _state(note), 5 if "失败" in note else 3)
 
 
-def _draw_scene_blockout(box, props, busy):
-    """1.2.3 从参考图生成场景粗模: one environment photo → a whole blockout (Wondful 场景粗模)."""
-    from . import sb_progress as SP
-    sub, opened = _subsection(box, props, "ui_show_scene_blockout", "从参考图生成场景粗模", "WORLD")
-    cells = _cols(bpy.context, 3)
-    running = props.status == "BLOCKOUT"
-    if not opened:
-        if running:
-            _note(sub, SP.status_text(getattr(props, "sb_stage", "") or SP.READ, getattr(props, "sb_elapsed", 0)),
-                  cells, "run", 1)
-        return
-    col = sub.column()
-    col.enabled = not busy
-    _hint(col, "一张环境照片 → 地形 / 道路 / 建筑 / 树 / 远山", cells)
-    col.prop(props, "sb_image_path", text="参考图")
-    custom = (getattr(props, "sb_image_path", "") or "").strip()
-    first = ""
+def _scene_blockout_exists(context):
+    """④ is done once a 「从参考图生成场景粗模」 blockout is in the scene: its tagged collection
+    (the same marker as the 「· 来自场景参考图」 block label) still holds objects."""
+    try:
+        for coll in context.scene.collection.children_recursive:
+            if coll.get("wondful_scene_blockout") and len(coll.all_objects):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _sb_first_reference_name(props):
     try:
         items = list(getattr(props, "style_images", []) or [])
         if items:
-            first = Path(getattr(items[0], "source_path", "") or getattr(getattr(items[0], "image", None), "filepath", "")
-                         or "").name
+            return Path(getattr(items[0], "source_path", "") or getattr(getattr(items[0], "image", None), "filepath", "")
+                        or "").name or getattr(getattr(items[0], "image", None), "name", "") or "③"
     except Exception:
-        first = ""
-    if not custom:
-        if first:
-            _note(col, f"留空 = 用 ③ 第一张「{_short(first, 24)}」", cells, "plain", 2)
-        else:
-            _note(col, "留空 = 用 ③ 第一张环境参考图（现在还没有）", cells, "info", 2)
+        pass
+    return ""
+
+
+def _draw_blockout_step(layout, context, props, busy, connected, is_antigravity, cells):
+    """④ 场景粗模（可选）(1.2.3, was 高级 › 场景 › 环境体块): one environment photo → a whole blockout
+    (Wondful 场景粗模) + optional camera. Compact: hint · 参考图 · two toggles · one button; stages + bar while running."""
+    from . import sb_progress as SP
+    running = props.status == "BLOCKOUT"
+    done = (not running) and _scene_blockout_exists(context)
+    card, tools = _step_card(layout, 4, "场景粗模", done=done, ready=connected)
+    _fit(tools, 2.4)
+    tools.label(text="可选")
+    custom = (getattr(props, "sb_image_path", "") or "").strip()
+    first = _sb_first_reference_name(props)
+    col = card.column()
+    col.enabled = not busy
+    if not running:
+        _hint(col, "用 ③ 的参考图搭灰模和相机，约 3–5 分钟", cells, 1)
+    if _supports_placeholder():
+        col.prop(props, "sb_image_path", text="参考图", placeholder="留空 = 用 ③ 第一张")
+    else:
+        col.prop(props, "sb_image_path", text="参考图")
+        if not custom and first:
+            _note(col, "留空 = 用 ③ 第一张", cells, "plain", 1)
+    if not custom and not first and not running:
+        _note(col, "③ 还没有环境参考图：先放一张，或在这里选图", cells, "info", 2)
     row = col.row(align=True)
     row.prop(props, "sb_set_camera", text="同时设置相机")
     row.prop(props, "sb_correct", text="自动校正一轮")
     failed = (getattr(props, "sb_failed_stage", "") or "") if not running else ""
     if running or failed:
-        _draw_sb_progress(sub, props, running, failed, SP)
+        _draw_sb_progress(card, props, running, failed, SP)
     if running:
-        # the only live control while it runs: 取消 replaces the build button
-        cancel = sub.row(align=True)
-        cancel.scale_y = 1.2
+        # the only live control while it runs: 取消 takes the build button's place
+        cancel = card.row(align=True)
+        cancel.scale_y = 1.3
         cancel.operator("wondful.cancel_task", text="取消", icon="CANCEL")
         return
-    build = col.row(align=True)
-    build.scale_y = 1.2
+    build = card.row(align=True)
+    build.scale_y = 1.3
     build.enabled = bool(custom or first) and not busy
-    build.operator("wondful.scene_blockout_build", text="从参考图生成场景粗模", icon="MOD_BUILD")
+    build.operator("wondful.scene_blockout_build", text="生成场景粗模", icon="MOD_BUILD")
+    if is_antigravity:
+        _hint(card, "需要 Codex 登录（高级 › 模型 › AI 服务）", cells, 1)
     note = getattr(props, "last_sb_note", "")
     if note:
-        _note(col, note, cells, _state(note, fail=("失败", "不存在"), info=("请先", "需要", "取消")), 4)
-    else:
-        _note(col, "约 3–5 分钟；重新生成会替换上一次的场景粗模", cells, "plain", 2)
+        _note(card, note, cells, _state(note, fail=("失败", "不存在"), info=("请先", "需要", "取消")), 4)
+    elif done:
+        _note(card, "已有场景粗模；重新生成会替换它", cells, "plain", 1)
 
 
 def _draw_sb_progress(layout, props, running, failed, SP):
-    """Stage list + 「分析参考图 · 已用 1:42」 + typical-time hint + bar (running), or the failed stage."""
+    """④ running: 「分析参考图 · 已用 1:42」 + typical-time hint + bar 「第 2/5 步 · 24%」 (compact, no stage list);
+    failed: the stage list with the failed stage marked."""
     ids = SP.decode(getattr(props, "sb_stage_ids", ""))
     stage = getattr(props, "sb_stage", "") or SP.READ
     elapsed = int(getattr(props, "sb_elapsed", 0) or 0)
-    stages = layout.column(align=True)
-    stages.scale_y = 0.8
-    for name, icon, active in SP.row_icons(ids, stage, failed):
-        cell = stages.row(align=True)
-        cell.active = active
-        suffix = SEP + "进行中" if (running and icon == "PLAY") else (SEP + "失败" if icon == "ERROR" else "")
-        cell.label(text=name + suffix, icon=icon)
     if not running:
+        stages = layout.column(align=True)
+        stages.scale_y = 0.8
+        for name, icon, active in SP.row_icons(ids, stage, failed):
+            cell = stages.row(align=True)
+            cell.active = active
+            cell.label(text=name + (SEP + "失败" if icon == "ERROR" else ""), icon=icon)
         return
     phase = getattr(props, "task_phase", "") or ""
     if "取消" in phase:
@@ -822,11 +840,13 @@ def _draw_sb_progress(layout, props, running, failed, SP):
         layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
     tip = SP.hint(stage)
     if tip:
-        _hint(layout, tip, _cols(bpy.context, 3))
+        _hint(layout, tip, _cols(bpy.context, 2))
     bar = layout.column()
     bar.scale_y = 1.2
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
-    _draw_progress_bar(bar, props, f"{SP.label(stage)}{SEP}{pct}%")
+    i = SP.index(ids, stage)
+    step = f"第 {i + 1}/{len(ids)} 步{SEP}" if i >= 0 and ids else ""
+    _draw_progress_bar(bar, props, f"{step}{pct}%")
 
 
 def _draw_style_summary(adv, context, props):
@@ -888,7 +908,7 @@ def _draw_multiview(adv, context, props, busy):
     row.prop(props, "mv_widen", text="加宽体块")
     row.prop(props, "mv_env_check", text="环境一致性检查")
     if master is None:
-        _hint(box, "先用 ⑤ 渲染满意的一张，再点「设为主视角」", cells)
+        _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:
         _hint(box, "每个相机 1 次生图；产品超标最多重试 1 次", cells)
     act = box.row(align=True)
@@ -968,7 +988,7 @@ class WONDFUL_PT_main(Panel):
     bl_category = "Wondful AI"
 
     def draw(self, context):
-        """3.2.0: five step cards (连接 / 产品三视图（可选） / 环境参考图 / 提示词 / 生成); the rest in 高级 (tabs, 1.2.3)."""
+        """Six step cards (连接 / 产品三视图（可选） / 环境参考图 / 场景粗模（可选） / 提示词 / 生成); the rest in 高级 (tabs, 1.2.3)."""
         from .operators import generate_needs_polish
         layout = self.layout
         props = context.scene.wondful_ai
@@ -1086,8 +1106,11 @@ class WONDFUL_PT_main(Panel):
                                               caption=f"辅助 {index + 1}", caption_icon="IMAGE_DATA",
                                               placeholder="参考什么", movable=True)
 
-        # ---- ④ 提示词 -----------------------------------------------------------
-        step4, tools = _step_card(layout, 4, "提示词", done=prompt_ready, ready=connected and product_done)
+        # ---- ④ 场景粗模（可选）--------------------------------------------------
+        _draw_blockout_step(layout, context, props, busy, connected, active_is_antigravity, cells)
+
+        # ---- ⑤ 提示词 -----------------------------------------------------------
+        step4, tools = _step_card(layout, 5, "提示词", done=prompt_ready, ready=connected and product_done)
         _fit(tools, 3)
         tools.label(text=f"{_prompt_char_count(props.prompt)} 字")
         brief = step4.row(align=True)
@@ -1120,14 +1143,14 @@ class WONDFUL_PT_main(Panel):
             polish.enabled = bool(not busy and connected)
             polish.operator("wondful.polish_prompt", text="只重写提示词", icon="TEXT")
 
-        # ---- ⑤ 生成 -------------------------------------------------------------
+        # ---- ⑥ 生成 -------------------------------------------------------------
         result_done = bool(props.result_image) and not busy
-        step5, tools = _step_card(layout, 5, "生成", done=result_done, ready=can_generate or busy)
+        step5, tools = _step_card(layout, 6, "生成", done=result_done, ready=can_generate or busy)
         if props.two_step and not busy:
             _fit(tools, 3)
             tools.label(text="分两步")
         generating = props.status in {"POLISHING", "RENDERING"}
-        # 1.2.3: tasks started from 高级 (多角度 renders, 场景粗模) report here too, whatever tab is open
+        # 1.2.3: side tasks report here too (场景粗模 from ④ as one line, 多角度 from 高级), whatever tab is open
         side_task = props.status == "BLOCKOUT" or (generating and (props.task_phase or "").startswith("多角度"))
         if side_task:
             _draw_task_progress(step5, props, cells)
@@ -1184,7 +1207,7 @@ class WONDFUL_PT_main(Panel):
             _note(err, props.last_error, _cols(context, 2), "fail", 6)
             err.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
 
-        # ---- 结果（属于 ⑤）------------------------------------------------------
+        # ---- 结果（属于 ⑥）------------------------------------------------------
         provider_variant_count = render_variant_count("antigravity" if active_is_antigravity else "codex", props)
         if props.result_image:
             rcells = _cols(context, 2)
@@ -1224,7 +1247,7 @@ class WONDFUL_PT_main(Panel):
             actions.operator("wondful.open_output_directory", text="打开文件夹", icon="FILE_FOLDER")
 
         # ---- 高级 ---------------------------------------------------------------
-        # 1.2.3: one group at a time (模型 · 输出 · 产品 · 场景 · 多角度 · 诊断); running progress stays in ⑤.
+        # 1.2.3: one group at a time (模型 · 输出 · 产品 · 场景 · 多角度 · 诊断); running progress stays in ⑥ (场景粗模: ④ + one line in ⑥).
         layout.separator()
         advanced = layout.box()
         if not _disclosure(advanced.row(align=True), props, "ui_show_advanced", "高级", icon="PREFERENCES"):
