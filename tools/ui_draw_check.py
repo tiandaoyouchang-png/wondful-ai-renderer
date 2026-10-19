@@ -118,12 +118,35 @@ class FakeLayout:
         if prop not in data.bl_rna.properties.keys():
             problems.append(f"template_ID_preview: missing {prop!r}")
 
-    def template_list(self, *a, **kw):
+    def template_list(self, listtype, list_id, data, prop, active_data, active_prop, **kw):
         _check_kwargs("template_list", kw)
+        for d, a in ((data, prop), (active_data, active_prop)):
+            if a not in d.bl_rna.properties.keys():
+                problems.append(f"template_list: missing {a!r}")
+        cls = getattr(bpy.types, listtype, None)
+        if cls is None:
+            problems.append(f"template_list: UIList {listtype!r} not registered")
+            return
+        self._log.append(("  " * self._depth) + f"[template_list {listtype}]")
+        for index, item in enumerate(getattr(data, prop)):
+            row = FakeLayout(self._log, self._depth + 1)
+            self._log.append(("  " * (self._depth + 1)) + f"[item {index}]")
+            cls.draw_item(cls, bpy.context, row, data, item, 0, active_data, active_prop, index)
 
 
 class FakePanel:
     pass
+
+
+class _PrefsProxy:
+    """AddonPreferences.draw with a recording layout: attribute reads go to the real preferences."""
+
+    def __init__(self, prefs, layout):
+        object.__setattr__(self, "_prefs", prefs)
+        object.__setattr__(self, "layout", layout)
+
+    def __getattr__(self, key):
+        return getattr(self._prefs, key)
 
 
 def make_image(name, color):
@@ -142,6 +165,10 @@ def draw(state_name):
         WONDFUL_PT_main.draw(panel, bpy.context)
     except Exception:
         problems.append(f"[{state_name}] draw raised:\n" + traceback.format_exc())
+    ops_lines = [l.strip() for l in log if l.strip().startswith("op ")]
+    star = "op wm.url_open SOLO_ON GitHub · 欢迎点 Star"
+    if not ops_lines or ops_lines[-1] != star or ops_lines.count(star) != 1:
+        problems.append("GitHub footer is not the single last row of the panel")
     new = problems[before:]
     for i in range(before, len(problems)):
         problems[i] = f"[{state_name}] " + problems[i]
@@ -185,6 +212,124 @@ def check_six_steps(name, log):
     return card
 
 
+def step6(log):
+    """The ⑥ 生成 card up to 高级."""
+    main = main_part(log)
+    start = next((i for i, l in enumerate(main) if l.rstrip().endswith("⑥  生成") or l.rstrip().endswith("CHECKMARK 生成")), -1)
+    return main[start:] if start >= 0 else []
+
+
+def views_box(log):
+    """The 渲染视角 box lines inside ⑥ (empty when absent)."""
+    six = step6(log)
+    start = next((i for i, l in enumerate(six) if "label OUTLINER_OB_CAMERA 渲染视角" in l), -1)
+    if start < 0:
+        return []
+    end = next((i for i, l in enumerate(six) if i > start and "op wondful.generate" in l), len(six))
+    return six[start - 1:end]
+
+
+def check_render_views(scene, props):
+    """1.2.3 ⑥ 渲染视角 (blockout in the scene): empty list, 3 cameras with 2 checked, drop fields, plan / flip."""
+    import json as _json
+    old_cam = scene.camera
+    props.mv_cameras.clear()
+    log = draw("views_blockout_empty")
+    box = "\n".join(views_box(log))
+    print("    ---- 渲染视角 box (blockout, empty list) ----\n" + box)
+    for want in ("当前相机", "prop mv_drop_camera 拖入相机", "prop mv_drop_collection 拖入集合",
+                 "op wondful.mv_camera_from_view VIEW_CAMERA 从当前视图新建相机", "不选 = 用当前场景相机"):
+        if want not in box:
+            problems.append(f"views empty: missing {want!r}")
+    if "template_list" in box or "op wondful.generate RENDER_STILL 生成\n" not in "\n".join(step6(log)) + "\n":
+        problems.append("views empty: list drawn without rows, or 生成 label changed")
+    cams = []
+    holder = bpy.data.collections.new("视角相机")
+    scene.collection.children.link(holder)
+    sub = bpy.data.collections.new("视角相机_子")
+    holder.children.link(sub)
+    for i, name in enumerate(("视角前", "视角侧", "视角后")):
+        o = bpy.data.objects.new(name, bpy.data.cameras.new(name))
+        (holder if i < 2 else sub).objects.link(o)
+        cams.append(o)
+    props.mv_drop_camera = cams[1]                       # drag one camera from the Outliner
+    if [i.camera for i in props.mv_cameras] != [cams[1]] or props.mv_drop_camera is not None:
+        problems.append("drop camera: not appended / field not cleared")
+    props.mv_drop_collection = holder                    # drag the collection: the rest, recursive, no repeat
+    if [i.camera.name for i in props.mv_cameras] != ["视角侧", "视角前", "视角后"] or props.mv_drop_collection is not None:
+        problems.append(f"drop collection: {[i.camera.name for i in props.mv_cameras]}")
+    props.mv_camera_index = 1
+    bpy.ops.wondful.mv_camera_move(direction="UP")       # 视角前 first
+    if [i.camera.name for i in props.mv_cameras] != ["视角前", "视角侧", "视角后"] or props.mv_camera_index != 0:
+        problems.append("mv_camera_move UP wrong")
+    props.mv_cameras[1].enabled = False                  # 3 cameras, 2 checked
+    log = draw("views_blockout_three")
+    box = "\n".join(views_box(log))
+    print("    ---- 渲染视角 box (blockout, 3 cameras, 2 checked) ----\n" + box)
+    for want in ("已选 2 个", "[template_list WONDFUL_UL_render_views]", "label OUTLINER_OB_CAMERA 视角前",
+                 "label SOLO_ON 主视角", "op wondful.mv_camera_move TRIA_UP", "op wondful.mv_camera_remove X",
+                 "先渲染主视角 视角前，其余 1 个按场景粗模保持一致", "已加入 2 个相机 · 视角侧 已在列表"):
+        if want not in box:
+            problems.append(f"views three: missing {want!r}")
+    if box.count("主视角") != 2:                                       # the tag once + the hint once
+        problems.append("views three: 主视角 tag should be on exactly one row")
+    if "op wondful.generate RENDER_STILL 生成 2 个视角" not in "\n".join(step6(log)):
+        problems.append("views three: 生成 button should read 生成 2 个视角")
+    from wondful_ai_renderer.operators import generate_views
+    if [o.name for o in generate_views(bpy.context, props)] != ["视角前", "视角后"]:
+        problems.append("generate_views: wrong cameras / order")
+    props.mv_cameras[0].enabled = False
+    if "label SOLO_ON 主视角" not in "\n".join(views_box(draw("views_blockout_one"))):
+        problems.append("views one: 主视角 tag missing")
+    props.mv_cameras[0].enabled = True
+    # running a plan: 视角 1/2 above the stages, box hidden
+    props.views_plan = _json.dumps({"cameras": ["视角前", "视角后"], "total": 2}, ensure_ascii=False)
+    props.status, props.task_phase, props.progress = "RENDERING", "生成第 1/4 张 · 尝试 1/3", 0.4
+    six = "\n".join(step6(draw("views_plan_main")))
+    if "视角 1/2 · 视角前（主视角）" not in six or "渲染视角" in six:
+        problems.append("views plan main: 视角 1/2 line missing or box shown while running")
+    props.task_phase = "多角度场景一致 · 视角 2/2：视角后"
+    six = "\n".join(step6(draw("views_plan_rest")))
+    if "多角度场景一致 · 视角 2/2：视角后" not in six or "progress" not in six:
+        problems.append("views plan rest: phase / bar missing")
+    props.views_plan = ""
+    props.status, props.task_phase, props.progress = "SUCCESS", "", 0.0
+    # result card flips between views
+    import tempfile as _tf, os as _os
+    import numpy as _np
+    from wondful_ai_renderer import png_io as _png
+    d = _tf.mkdtemp()
+    paths = []
+    for i, n in enumerate(("视角前", "视角后")):
+        pth = _os.path.join(d, f"{n}.png")
+        _png.write_png(pth, _np.full((24, 32, 4), 60 + 90 * i, _np.uint8))
+        paths.append(pth)
+    props.result_image = make_image("view_result.png", (0.4, 0.4, 0.4, 1))
+    props.view_results = _json.dumps([{"camera": "视角前", "path": paths[0], "master": True},
+                                      {"camera": "视角后", "path": paths[1], "master": False}], ensure_ascii=False)
+    props.view_result_index = 0
+    log = "\n".join(step6(draw("views_result_flip")))
+    if "视角 1/2 · 视角前（主视角）" not in log or "op wondful.view_result_step TRIA_RIGHT" not in log:
+        problems.append("views result: flip row missing")
+    bpy.ops.wondful.view_result_step(step=1)
+    if props.view_result_index != 1 or props.last_result_path != paths[1] or "视角 2/2 · 视角后" not in "\n".join(draw("views_result_flip2")):
+        problems.append("view_result_step did not switch the shown view")
+    bpy.ops.wondful.view_result_step(step=1)
+    if props.view_result_index != 0:
+        problems.append("view_result_step does not wrap")
+    props.view_results = ""
+    props.view_result_index = 0
+    props.result_image = None
+    props.status = "IDLE"
+    props.mv_drop_note = ""
+    props.mv_cameras.clear()
+    for o in cams:
+        bpy.data.objects.remove(o, do_unlink=True)
+    for c in (sub, holder):
+        bpy.data.collections.remove(c)
+    scene.camera = old_cam
+
+
 def main():
     bpy.ops.preferences.addon_install(filepath=ZIP, overwrite=True)
     bpy.ops.preferences.addon_enable(module="wondful_ai_renderer")
@@ -214,7 +359,9 @@ def main():
     props.scene_brief = "雪地清晨，冷色调"
     props.ui_show_prompt = True
     props.ui_show_advanced = True
-    draw("connected_refs")
+    log = draw("connected_refs")
+    if views_box(log) or "渲染视角" in "\n".join(main_part(log)):       # no 粗模: ⑥ exactly as before
+        problems.append("connected_refs: 渲染视角 box shown without a 场景粗模")
     # 1.2.3: 高级 shows one tab at a time; every tab must draw cleanly in this state
     for tab in ADV_TABS:
         props.ui_adv_tab = tab
@@ -471,6 +618,7 @@ def main():
     props.last_sb_note = ""
     if "已有场景粗模" not in "\n".join(step4(draw("scene_blockout_built_reopened"))):
         problems.append("sb built (no note): ④ should say a blockout exists")
+    check_render_views(scene, props)
     props.last_sb_note = "场景粗模失败：未找到 Codex 登录文件，请先在 ① 连接 Codex"
     draw("scene_blockout_failed")
     # running: stage list, 「分析参考图 · 已用 1:42」, typical-time hint, bar, 取消 replaces the build button (all in ④);
@@ -535,8 +683,11 @@ def main():
     props.last_sb_note = ""
     props.sb_image_path = ""
     SBB.remove_existing()
-    if "CHECKMARK 场景粗模" in "\n".join(step4(draw("scene_blockout_removed"))):
+    log = draw("scene_blockout_removed")
+    if "CHECKMARK 场景粗模" in "\n".join(step4(log)):
         problems.append("sb removed: ④ still checked")
+    if views_box(log):
+        problems.append("sb removed: 渲染视角 box still shown")
 
     # 4b. 1.2.3 多角度场景一致: closed, open without master, with master + selected cameras, after a run
     props.ui_show_multiview = True
@@ -702,6 +853,21 @@ def main():
         problems.append("update check failed: 诊断 should show the error, no banner")
     UO.STATE.update(phase="IDLE", manifest=None, message="", progress=0.0, notes=[])
     props.ui_adv_tab = "SCENE"
+
+    # 1.2.3: GitHub link in the add-on preferences too (url checked on the operator properties)
+    prefs_log = []
+    holder = type("P", (), {})()
+    holder.layout = FakeLayout(prefs_log)
+    try:
+        type(prefs).draw(_PrefsProxy(prefs, holder.layout), bpy.context)
+    except Exception:
+        problems.append("preferences draw raised:\n" + traceback.format_exc())
+    if not any("op wm.url_open SOLO_ON GitHub · 欢迎点 Star" in l for l in prefs_log):
+        problems.append("preferences: GitHub link missing")
+    from wondful_ai_renderer.ui import GITHUB_URL
+    if GITHUB_URL != "https://github.com/tiandaoyouchang-png/wondful-ai-renderer":
+        problems.append(f"GitHub url wrong: {GITHUB_URL}")
+    print("--- preferences:", [l.strip() for l in prefs_log if "url_open" in l])
 
     bpy.ops.preferences.addon_disable(module="wondful_ai_renderer")
     print("PROBLEMS", len(problems))

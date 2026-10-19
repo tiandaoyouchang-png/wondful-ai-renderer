@@ -125,6 +125,77 @@ class WONDFUL_UL_reference_items(UIList):
         layout.label(text=(image.name if image else "无效图片"), icon="IMAGE_DATA" if image else "ERROR")
 
 
+class WONDFUL_UL_render_views(UIList):
+    """1.2.3 ⑥ 渲染视角: one row per 「相机 N」 (the 高级 › 多角度 list): ☑ + camera; the first checked row is 主视角."""
+    bl_idname = "WONDFUL_UL_render_views"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        scene = context.scene
+        master = _first_checked_row(data, scene)
+        cam = item.camera
+        row = layout.row(align=True)
+        row.prop(item, "enabled", text="")
+        if cam is None:
+            row.alert = True
+            row.prop(item, "camera", text="")
+            return
+        present = cam.name in scene.objects
+        row.alert = not present
+        row.label(text=cam.name if present else f"{cam.name}（不在场景里）", icon="OUTLINER_OB_CAMERA")
+        if index == master:
+            tag = row.row(align=True)
+            tag.alignment = "RIGHT"
+            tag.label(text="主视角", icon="SOLO_ON")
+
+
+def _first_checked_row(props, scene):
+    """Index of the 主视角 row (first checked camera present in the scene, repeats ignored), or -1."""
+    for i, item in enumerate(getattr(props, "mv_cameras", []) or []):
+        cam = item.camera
+        if item.enabled and cam is not None and getattr(cam, "type", "") == "CAMERA" and cam.name in scene.objects:
+            return i
+    return -1
+
+
+def _draw_render_views(layout, context, props, busy, cells):
+    """⑥ 渲染视角 (only once ④ built a 场景粗模): the shared camera list with ☑ per row, ↑ ↓ ✕, 拖入相机 /
+    拖入集合 fields (drag from the Outliner), 从当前视图新建相机. Returns the checked cameras (list order)."""
+    from .operators import generate_views
+    views = generate_views(context, props)
+    box = layout.box()
+    box.enabled = not busy
+    head = box.row(align=True)
+    head.label(text="渲染视角", icon="OUTLINER_OB_CAMERA")
+    count = head.row(align=True)
+    count.alignment = "RIGHT"
+    count.label(text=f"已选 {len(views)} 个" if views else "当前相机")
+    rows = len(props.mv_cameras)
+    if rows:
+        body = box.row()
+        body.template_list("WONDFUL_UL_render_views", "", props, "mv_cameras", props, "mv_camera_index",
+                           rows=min(max(rows, 2), 5))
+        side = body.column(align=True)
+        side.operator("wondful.mv_camera_move", text="", icon="TRIA_UP").direction = "UP"
+        side.operator("wondful.mv_camera_move", text="", icon="TRIA_DOWN").direction = "DOWN"
+        side.separator()
+        rm = side.operator("wondful.mv_camera_remove", text="", icon="X")
+        rm.index = int(props.mv_camera_index)
+    drop = box.column(align=True)
+    drop.prop(props, "mv_drop_camera", text="拖入相机", icon="OUTLINER_OB_CAMERA")
+    drop.prop(props, "mv_drop_collection", text="拖入集合", icon="OUTLINER_COLLECTION")
+    box.operator("wondful.mv_camera_from_view", text="从当前视图新建相机", icon="VIEW_CAMERA")
+    note = getattr(props, "mv_drop_note", "")
+    if note:
+        _note(box, note, cells, "info" if ("没有相机" in note or "已在列表" in note) else "ok", 1)
+    if not views:
+        _hint(box, "从大纲视图把相机拖进来并勾选；不选 = 用当前场景相机", cells)
+    elif len(views) == 1:
+        _hint(box, f"只渲染 {views[0].name}（和单视角一样）", cells)
+    else:
+        _hint(box, f"先渲染主视角 {views[0].name}，其余 {len(views) - 1} 个按场景粗模保持一致", cells)
+    return views
+
+
 def _draw_reference_card(layout, props, item, index, kind):
     card = layout.box()
     split = card.split(factor=0.36)
@@ -511,6 +582,29 @@ def _draw_task_progress(layout, props, cells):
     _draw_progress_bar(bar, props, f"估算 {pct}%")
 
 
+def _view_phase(index, total, name, master=False):
+    from .multiview import view_phase
+    return view_phase(index, total, name, master)
+
+
+def _draw_view_flip(layout, props):
+    """⑥ result card after a multi-view run: 〈 视角 i/N · 名称 〉."""
+    import json
+    try:
+        views = json.loads(getattr(props, "view_results", "") or "[]")
+    except ValueError:
+        views = []
+    if len(views) < 2:
+        return
+    i = max(0, min(int(props.view_result_index), len(views) - 1))
+    row = layout.row(align=True)
+    row.operator("wondful.view_result_step", text="", icon="TRIA_LEFT").step = -1
+    mid = row.row(align=True)
+    mid.alignment = "CENTER"
+    mid.label(text=_view_phase(i + 1, len(views), views[i].get("camera", ""), bool(views[i].get("master"))))
+    row.operator("wondful.view_result_step", text="", icon="TRIA_RIGHT").step = 1
+
+
 # ---------------------------------------------------------------------------
 # 高级 › 产品
 # ---------------------------------------------------------------------------
@@ -752,13 +846,8 @@ def _draw_massing_hull(box, props, busy):
 def _scene_blockout_exists(context):
     """④ is done once a 「从参考图生成场景粗模」 blockout is in the scene: its tagged collection
     (the same marker as the 「· 来自场景参考图」 block label) still holds objects."""
-    try:
-        for coll in context.scene.collection.children_recursive:
-            if coll.get("wondful_scene_blockout") and len(coll.all_objects):
-                return True
-    except Exception:
-        pass
-    return False
+    from .multiview import scene_blockout_exists
+    return scene_blockout_exists(context.scene)
 
 
 def _sb_first_reference_name(props):
@@ -1041,6 +1130,19 @@ def _draw_update_diag(adv, context, prefs):
         box.operator("wondful.update_open_page", text="GitHub 手动下载", icon="URL")
 
 
+GITHUB_URL = "https://github.com/tiandaoyouchang-png/wondful-ai-renderer"
+
+
+def draw_github_footer(layout):
+    """1.2.3: one small row at the very bottom (main panel + add-on preferences): the GitHub page, 欢迎点 Star."""
+    layout.separator()
+    row = layout.row(align=True)
+    row.scale_y = 0.9
+    row.alignment = "CENTER"
+    op = row.operator("wm.url_open", text="GitHub · 欢迎点 Star", icon="SOLO_ON", emboss=False)
+    op.url = GITHUB_URL
+
+
 class WONDFUL_PT_main(Panel):
     bl_label = "Wondful AI 渲染器 · 1.2"
     bl_idname = "WONDFUL_PT_main"
@@ -1049,6 +1151,10 @@ class WONDFUL_PT_main(Panel):
     bl_category = "Wondful AI"
 
     def draw(self, context):
+        WONDFUL_PT_main._draw_main(self, context)
+        draw_github_footer(self.layout)
+
+    def _draw_main(self, context):
         """Six step cards (连接 / 产品三视图（可选） / 环境参考图 / 场景粗模（可选） / 提示词 / 生成); the rest in 高级 (tabs, 1.2.3)."""
         from .operators import generate_needs_polish
         layout = self.layout
@@ -1218,6 +1324,11 @@ class WONDFUL_PT_main(Panel):
         if side_task:
             _draw_task_progress(step5, props, cells)
         elif generating:
+            from .operators import views_plan
+            plan = views_plan(props)
+            if plan:
+                _note(step5, _view_phase(1, int(plan.get("total") or len(plan["cameras"])), plan["cameras"][0], True),
+                      cells, "run", 1)
             current = _stage_index(props)
             stages = step5.column(align=True)
             stages.scale_y = 0.8
@@ -1233,10 +1344,15 @@ class WONDFUL_PT_main(Panel):
             bar.scale_y = 1.4
             _draw_progress_bar(bar, props, f"估算 {pct}%")
         else:
+            views = []
+            if _scene_blockout_exists(context):      # 1.2.3: ④ built a 场景粗模 → choose the views to render
+                views = _draw_render_views(step5, context, props, busy, cells)
             if props.two_step:
                 go_text = "生成提示词" if needs_polish else "渲染"
             else:
                 go_text = "生成"
+            if len(views) > 1 and not (props.two_step and needs_polish):
+                go_text += f" {len(views)} 个视角"
             # 1.2.2: images per generation, right above 生成.
             count_row = step5.row(align=True)
             count_row.enabled = not busy
@@ -1283,6 +1399,7 @@ class WONDFUL_PT_main(Panel):
                 score.alignment = "RIGHT"
                 _fit(score, 3.6)
                 score.label(text=f"对齐 {props.alignment_score:.0f}", icon="CHECKMARK" if ok else "INFO")
+            _draw_view_flip(result, props)
             _draw_thumbnail(result, props.result_image, _thumb_scale(context, 1.0, hi=18.0))
             exported_count = max(0, int(getattr(props, "variant_count", 0)))
             if props.status == "RENDERING" and props.last_export_path:

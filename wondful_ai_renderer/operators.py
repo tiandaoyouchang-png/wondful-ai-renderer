@@ -45,7 +45,7 @@ from .composition import image_dimensions, assess_canvas, assess_audit, repair_r
 from .image_manager import compute_target_size, enforce_aspect_ratio, image_filepath, load_image, prepare_reference_for_upload
 from .prompt_engine import BASE_SYSTEM_PROMPT, STYLE_ANALYSIS_SYSTEM_PROMPT, PRODUCT_ANALYSIS_SYSTEM_PROMPT, product_analysis_user_text, parse_product_analysis, build_polish_user_text, build_render_prompt, sanitize_appearance_prompt, sanitize_appearance_prompt_report, needs_reference_policy_refresh, REFERENCE_POLICY_VERSION, select_polish_source
 from .render_session import cleanup_old_sessions, copy_references, create_session, save_metadata
-from .output_manager import export_result, resolve_output_directory, preflight_output_directory
+from .output_manager import export_result, resolve_output_directory, preflight_output_directory, internal_dir, sidecar_path
 from .viewport_capture import capture_camera_reference, camera_output_dimensions
 from .structure_packet import build_structure_packet
 from .properties import MAX_REFERENCES_PER_KIND, MAX_PRODUCT_REFERENCES, reference_limit
@@ -791,7 +791,7 @@ def _redraw_all():
         pass
 
 
-def _schedule_operator(idname, scene=None, *, label="AI 渲染"):
+def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None):
     """Run a modal operator once the current one has released the task lock.
 
     1.2.2: robust chain (see op_chain): tries every 3D View / window context, retries
@@ -810,7 +810,7 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染"):
         _LAST_REPORT.pop(idname, None)
         try:
             with bpy.context.temp_override(**ctx):
-                return getattr(getattr(bpy.ops, module), name)("INVOKE_DEFAULT")
+                return getattr(getattr(bpy.ops, module), name)("INVOKE_DEFAULT", **(op_kwargs or {}))
         except RuntimeError as exc:
             # bpy.ops raises RuntimeError when the operator reports an ERROR.  Before
             # 1.2.2 that exception escaped the timer callback and was only printed to the
@@ -830,6 +830,7 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染"):
         print(f"[Wondful] {text}")
         if props is not None:
             props.pending_generate = False
+            props.views_plan = ""
             _status(props, "ERROR", text)
         _redraw_all()
 
@@ -875,6 +876,8 @@ class WONDFUL_OT_generate(Operator):
         prefs = _addon_prefs(context)
         props.model_notice = ""
         brief = (props.scene_brief or "").strip()
+        if not self._plan_views(context, props, prefs):
+            return {"CANCELLED"}
         if generate_needs_polish(props, prefs):
             if brief != (props.scene_brief_used or "").strip() or not (props.prompt or "").strip():
                 # A new brief replaces the old prompt as the polish source.
@@ -890,6 +893,7 @@ class WONDFUL_OT_generate(Operator):
                 _status(props, "ERROR", message)
             if "RUNNING_MODAL" not in result and "FINISHED" not in result:
                 props.pending_generate = False
+                props.views_plan = ""
                 if props.status != "ERROR":
                     _status(props, "ERROR", _LAST_REPORT.get("wondful.polish_prompt", "") or "没能开始写提示词，请重试。")
                 return {"CANCELLED"}
@@ -898,13 +902,99 @@ class WONDFUL_OT_generate(Operator):
         try:
             result = bpy.ops.wondful.ai_render("INVOKE_DEFAULT")
         except RuntimeError as exc:
+            props.views_plan = ""
             _status(props, "ERROR", str(exc).replace("Error: ", "").strip())
             return {"CANCELLED"}
         if "RUNNING_MODAL" in result or "FINISHED" in result:
             return {"FINISHED"}
+        props.views_plan = ""
         if props.status != "ERROR":
             _status(props, "ERROR", _LAST_REPORT.get("wondful.ai_render", "") or "生图前检查未通过")
         return {"CANCELLED"}
+
+
+    def _plan_views(self, context, props, prefs):
+        """1.2.3 ⑥ 渲染视角: with a 场景粗模 in the scene and checked rows, the first checked camera becomes the
+        scene camera (主视角); with 2+ checked, the rest follow via 多角度场景一致 after the main render.
+        No 粗模 / nothing checked = the active camera exactly as before."""
+        props.views_plan = ""
+        views = generate_views(context, props)
+        if not views:
+            return True
+        if len(views) > 1:
+            provider = _analysis_provider(props, prefs)
+            if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
+                msg = "渲染多个视角需要 Codex 图像编辑直连（高级 › 模型）；或在「渲染视角」里只勾选 1 个。"
+                _status(props, "ERROR", msg)
+                self.report({"ERROR"}, msg)
+                return False
+            if getattr(props, "product_collection", None) is None:
+                msg = "渲染多个视角需要先在 ② 选择产品集合。"
+                _status(props, "ERROR", msg)
+                self.report({"ERROR"}, msg)
+                return False
+        context.scene.camera = views[0]
+        if len(views) > 1:
+            props.views_plan = json.dumps({"cameras": [o.name for o in views], "total": len(views)}, ensure_ascii=False)
+        return True
+
+
+def generate_views(context, props):
+    """Cameras 「生成」 renders from the ⑥ 渲染视角 list: [] when there is no 场景粗模 or nothing is checked."""
+    from . import multiview as MV
+    scene = context.scene
+    if not MV.scene_blockout_exists(scene):
+        return []
+    slots = [(item.camera, bool(item.enabled)) for item in getattr(props, "mv_cameras", [])]
+    return MV.checked_views(slots, is_present=lambda o: o.name in scene.objects)
+
+
+def views_plan(props):
+    """The running 「生成 N 个视角」 plan ({"cameras", "total"}) or {}."""
+    try:
+        plan = json.loads(getattr(props, "views_plan", "") or "{}")
+        return plan if isinstance(plan, dict) and len(plan.get("cameras") or []) > 1 else {}
+    except ValueError:
+        return {}
+
+
+class WONDFUL_OT_mv_camera_move(Operator):
+    bl_idname = "wondful.mv_camera_move"
+    bl_label = "移动视角"
+    bl_description = "在渲染视角列表里上移 / 下移当前行（第一个勾选的是主视角，其余按顺序渲染）"
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: EnumProperty(items=(("UP", "上移", ""), ("DOWN", "下移", "")), default="UP", options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        from . import multiview as MV
+        props = context.scene.wondful_ai
+        cams = props.mv_cameras
+        to = MV.move_index(len(cams), int(props.mv_camera_index), 1 if self.direction == "DOWN" else -1)
+        if to is None:
+            return {"CANCELLED"}
+        cams.move(int(props.mv_camera_index), to)
+        props.mv_camera_index = to
+        return {"FINISHED"}
+
+
+class WONDFUL_OT_view_result_step(Operator):
+    bl_idname = "wondful.view_result_step"
+    bl_label = "切换视角"
+    bl_description = "在上次多视角生成的各视角结果之间切换"
+
+    step: IntProperty(default=1, options={"SKIP_SAVE"})
+
+    def execute(self, context):
+        props = context.scene.wondful_ai
+        try:
+            n = len(json.loads(props.view_results or "[]"))
+        except ValueError:
+            n = 0
+        if n < 2:
+            return {"CANCELLED"}
+        props.view_result_index = (int(props.view_result_index) + int(self.step)) % n
+        return {"FINISHED"}
 
 
 class WONDFUL_OT_refresh_models(_BaseAsyncOperator):
@@ -2244,6 +2334,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                     props.codex_account_state = "NOT_INSTALLED"
                     props.codex_account_message = str(exc)
                 props.pending_generate = False
+                props.views_plan = ""
                 _status(props, "ERROR", str(exc))
                 props.progress = 0.0
                 self.report({"ERROR"}, str(exc))
@@ -2257,6 +2348,8 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 _apply_product_autofill(props, self._autofill_key, *self._autofill_result)
             chain_render = bool(getattr(props, "pending_generate", False))
             props.pending_generate = False
+            if not chain_render:      # two-step: the plan is made again by the next 「渲染」 click
+                props.views_plan = ""
             polished, removed_fragments = sanitize_appearance_prompt_report(self._result or "")
             props.prompt_removed_notice = (
                 "已移除构图类描述（由 Blender 控制）：" + "；".join(removed_fragments)[:240]
@@ -2572,7 +2665,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     if cand and Path(cand).is_file() and str(Path(cand)) != str(Path(best_src)):
                         n += 1
                         shutil.copy2(cand, exported.with_name(f"{exported.stem}_候选{n}{Path(cand).suffix or '.png'}"))
-            exported.with_name(exported.stem + "_iou.json").write_text(
+            sidecar_path(exported, "_iou.json").write_text(
                 json.dumps(gate, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
         except Exception as exc:
             print(f"[Wondful] 轮廓验收结果保存失败：{exc}")
@@ -3401,7 +3494,44 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             return {"CANCELLED"}
         return {"RUNNING_MODAL"}
 
+    def _on_cancelled(self, props):
+        props.views_plan = ""
+
     def _modal(self, context, event):
+        result = self._modal_render(context, event)
+        if "FINISHED" in result or "CANCELLED" in result:
+            try:
+                self._after_main_view(self._origin_scene.wondful_ai, "FINISHED" in result)
+            except Exception as exc:
+                print(f"[Wondful] 渲染视角：后续视角没能开始：{exc}")
+        return result
+
+    def _after_main_view(self, props, ok):
+        """1.2.3 ⑥ 渲染视角: the main view is done; start the rest of a 「生成 N 个视角」 run (多角度场景一致,
+        list order) with this result as the 主视角图, or clear the plan when there is none / the render failed."""
+        plan = views_plan(props)
+        master_name = getattr(self, "_camera_name_at_start", "")
+        exported = (props.last_export_path or "").strip() if ok else ""
+        if not ok or not plan or plan["cameras"][0] != master_name or not exported:
+            props.views_plan = ""
+            if ok:
+                props.view_results = ""
+                props.view_result_index = 0
+            return
+        scene = self._origin_scene
+        master = scene.objects.get(master_name)
+        if master is None:
+            props.views_plan = ""
+            return
+        props.mv_master_camera = master
+        props.mv_master_image = exported
+        props.view_results = json.dumps([{"camera": master_name, "path": exported, "master": True}], ensure_ascii=False)
+        props.view_result_index = 0
+        total = int(plan.get("total") or len(plan["cameras"]))
+        props.task_phase = f"多角度场景一致 · 视角 2/{total}：准备"
+        _schedule_operator("wondful.multiview_render", scene, label="其余视角", op_kwargs={"from_plan": True})
+
+    def _modal_render(self, context, event):
         props = self._origin_scene.wondful_ai
         prefs = _addon_prefs(context)
         if event.type == "TIMER":
@@ -3992,6 +4122,8 @@ class WONDFUL_OT_mv_camera_remove(Operator):
         if not 0 <= self.index < len(cams):
             return {"CANCELLED"}
         cams.remove(self.index)
+        props = context.scene.wondful_ai
+        props.mv_camera_index = max(0, min(int(props.mv_camera_index), len(cams) - 1))
         return {"FINISHED"}
 
 
@@ -4052,6 +4184,13 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
     bl_description = ("按主视角渲染列表里启用的其他相机（列表为空时用视图里选中的相机）：离主视角最近的先渲染，已完成的视角投影到环境体块上作为底图，"
                       "光照方向在世界里固定；每个相机 1 次生图，产品超标时最多重试 1 次")
 
+    # 1.2.3: started by 「生成」 for the ⑥ 渲染视角 list: the checked rows after the 主视角, in list order
+    from_plan: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
+    def _on_cancelled(self, props):
+        if self.from_plan:
+            props.views_plan = ""
+
     def execute(self, context):
         import numpy as np
         from . import multiview as MV
@@ -4080,10 +4219,23 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         if coll is None:
             self.report({"ERROR"}, "多角度场景一致需要先在 ② 选择产品集合。")
             return {"CANCELLED"}
-        picked = mv_pick(context, props, master)
-        others = picked["cameras"]
+        plan = views_plan(props) if self.from_plan else {}
+        if self.from_plan and (not plan or plan["cameras"][0] != master.name):
+            props.views_plan = ""
+            self.report({"ERROR"}, "渲染视角计划已失效，请重新点「生成」。")
+            return {"CANCELLED"}
+        if plan:
+            others = [scene.objects[n] for n in plan["cameras"][1:] if n in scene.objects]
+            picked = {"cameras": others, "source": "list"}
+        else:
+            picked = mv_pick(context, props, master)
+            others = picked["cameras"]
         skipped = [o.name for o in others if getattr(o.data, "type", "PERSP") != "PERSP"]
         others = [o for o in others if o.name not in skipped]
+        if not others and plan:
+            props.views_plan = ""
+            self.report({"ERROR"}, "其余视角都不是透视相机，已只渲染主视角。")
+            return {"CANCELLED"}
         if not others:
             self.report({"ERROR"}, "请在「相机 1/2/3…」里选好并启用要渲染的其他相机（主视角以外，透视相机）。"
                         if picked["source"] == "list" else
@@ -4098,8 +4250,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             return {"CANCELLED"}
         W, H = camera_output_dimensions(context)
         ww, wh = MV.work_size(W, H)
-        pool = out_dir / "多角度场景一致" / f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}"
-        pool.mkdir(parents=True, exist_ok=True)
+        # 1.2.3: the pool (passes, prompts, pool.json, accepted views reused next time) is internal → hidden folder
+        pool = internal_dir(out_dir, "多角度场景一致", f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}")
         massing_coll = _find_massing(scene, props)
         made, wlog = [], {}
         old_cam = scene.camera
@@ -4151,7 +4303,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         b = MV.product_bounds(coll)
         if b is not None:
             centre = [(b[0].x + b[1].x) / 2, (b[0].y + b[1].y) / 2, (b[0].z + b[1].z) / 2]
-        order = MV.order_views(views[master.name]["cam"], [views[o.name]["cam"] for o in others], centre or [0, 0, 0])
+        if plan:      # ⑥ 渲染视角: the user's list order (each view still reuses every view accepted before it)
+            order = [views[o.name]["cam"] for o in others]
+        else:
+            order = MV.order_views(views[master.name]["cam"], [views[o.name]["cam"] for o in others], centre or [0, 0, 0])
+        plan_total = len(order) + 1 if plan else 0
         from .product_kind import is_vehicle as _is_vehicle
         try:
             vehicle = bool(_is_vehicle(props))
@@ -4182,13 +4338,14 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 from .cli_transport import is_cancellation_requested as _mv_cancel
                 from .detail_refine import make_edit_fn
                 detail_edit = make_edit_fn("codex", model=model, client_version=client_version,
-                                           log_dir=str(out_dir), cancel_check=_mv_cancel,
+                                           log_dir=str(pool), cancel_check=_mv_cancel,
                                            direct_edit=bool(getattr(prefs, "codex_direct_edit", True)))
             except Exception as exc:
                 print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
-                    "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name}
-        self._phase = "多角度场景一致：准备完成"
+                    "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name,
+                    "plan": plan}
+        self._phase = f"多角度场景一致 · 视角 2/{len(others) + 1}：准备完成" if plan else "多角度场景一致：准备完成"
         self._estimated_total = 15.0 + 80.0 * len(others)
         _status(props, "RENDERING")
         props.progress = 0.05
@@ -4246,7 +4403,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     continue
                 if cancelled():
                     raise RuntimeError("任务已取消")
-                self._phase = f"多角度场景一致：{rec['name']}（{i}/{len(order)}）"
+                self._phase = (f"多角度场景一致 · 视角 {i + 1}/{plan_total}：{rec['name']}" if plan_total
+                               else f"多角度场景一致：{rec['name']}（{i}/{len(order)}）")
                 pre = v["prefix"]
                 vk = {"name": rec["name"], "cam": rec, "pos": np.load(pre + "_pos.npy"), "nrm": np.load(pre + "_nrm.npy"),
                       "mask": np.load(pre + "_maskw.npy")}
@@ -4354,6 +4512,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         props.progress = 0.0
         props.eta_seconds = 0
         if self._error:
+            if (getattr(self, "_mv", None) or {}).get("plan"):
+                props.views_plan = ""
             _status(props, "ERROR", f"多角度场景一致失败：{self._error[0]}")
             props.last_mv_note = props.last_error
             self.report({"ERROR"}, props.last_error)
@@ -4386,6 +4546,28 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         if failed:
             notes.append("未完成：" + "；".join(failed)[:160])
         props.last_mv_note = " · ".join(n for n in notes if n)
+        if info.get("plan"):
+            # ⑥ 渲染视角: the 主视角 (already on the card) + every finished view, in list order; card stays on 主视角
+            props.views_plan = ""
+            try:
+                views = json.loads(props.view_results or "[]")
+            except ValueError:
+                views = []
+            done = {r["name"]: r.get("exported") for r in summary.get("results", []) if r.get("exported")}
+            for name in info["plan"]["cameras"][1:]:
+                if done.get(name):
+                    views.append({"camera": name, "path": done[name], "master": False})
+            props.view_results = json.dumps(views, ensure_ascii=False)
+            props.view_result_index = 0
+            _status(props, "SUCCESS" if exported else "ERROR", "" if exported else props.last_mv_note)
+            self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note[:200])
+            try:
+                (Path(info["pool"]) / "last_run.json").write_text(
+                    json.dumps(dict(summary, exported=exported, plan=info["plan"]), ensure_ascii=False, indent=1,
+                               default=str), encoding="utf-8")
+            except Exception:
+                pass
+            return {"FINISHED"} if exported else {"CANCELLED"}
         if exported:
             props.last_export_path = exported[-1]
             props.last_result_path = exported[-1]

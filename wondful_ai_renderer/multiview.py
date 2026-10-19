@@ -153,6 +153,90 @@ def pick_cameras(slots, selected, master, is_present=lambda obj: True):
     return out
 
 
+# --------------------------------------------------------------------------- 1.2.3 ⑥ 渲染视角 (shared 「相机 N」 list)
+
+def checked_views(slots, is_present=lambda obj: True):
+    """⑥ 渲染视角: the checked rows' cameras in list order (no bpy).  Rows without a camera, non-cameras,
+    cameras gone from the scene, unchecked rows and repeats (first row wins) are dropped.  The first one is
+    the 主视角; the rest are rendered by 多角度场景一致 against it."""
+    out, seen = [], set()
+    for cam, enabled in slots or []:
+        if not enabled or cam is None or getattr(cam, "type", "") != "CAMERA" or not is_present(cam):
+            continue
+        if cam.name in seen:
+            continue
+        seen.add(cam.name)
+        out.append(cam)
+    return out
+
+
+def cameras_to_append(existing_names, candidates):
+    """Cameras to add to the list for a drop: cameras only, not already listed, each once, in drop order."""
+    seen = set(n for n in existing_names or [] if n)
+    out = []
+    for obj in candidates or []:
+        if obj is None or getattr(obj, "type", "") != "CAMERA" or obj.name in seen:
+            continue
+        seen.add(obj.name)
+        out.append(obj)
+    return out
+
+
+def cameras_in_collection(coll):
+    """Every camera in ``coll`` and its child collections (depth first, collection order, each once).
+    Duck-typed: ``coll.objects`` and ``coll.children``; a collection reached twice is walked once."""
+    out, names, walked = [], set(), set()
+
+    def walk(c, depth):
+        if c is None or depth > 64 or id(c) in walked:
+            return
+        walked.add(id(c))
+        for o in list(getattr(c, "objects", []) or []):
+            if getattr(o, "type", "") == "CAMERA" and o.name not in names:
+                names.add(o.name)
+                out.append(o)
+        for child in list(getattr(c, "children", []) or []):
+            walk(child, depth + 1)
+    walk(coll, 0)
+    return out
+
+
+def drop_note(added, skipped, from_collection=""):
+    """One line for the 拖入 fields: what a drop did."""
+    if not added and not skipped:
+        return f"集合「{from_collection}」里没有相机" if from_collection else ""
+    parts = []
+    if added:
+        parts.append(f"已加入 {len(added)} 个相机" if len(added) > 1 else f"已加入 {added[0]}")
+    if skipped:
+        parts.append(f"跳过已在列表的 {len(skipped)} 个" if len(skipped) > 1 else f"{skipped[0]} 已在列表")
+    return " · ".join(parts)
+
+
+def move_index(n, index, direction):
+    """New index after moving row ``index`` up (-1) or down (+1) in a list of ``n`` rows, or None if it can't move."""
+    if not 0 <= index < n:
+        return None
+    to = index + (1 if direction > 0 else -1)
+    return to if 0 <= to < n else None
+
+
+def scene_blockout_exists(scene):
+    """④ ran: a 「从参考图生成场景粗模」 blockout (tagged collection) with objects is in the scene."""
+    try:
+        for coll in scene.collection.children_recursive:
+            if coll.get("wondful_scene_blockout") and len(coll.all_objects):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def view_phase(index, total, name, master=False):
+    """Progress text of one view in a ⑥ multi-view run: 「视角 i/N · 名称（主视角）」."""
+    return f"视角 {index}/{total} · {name}" + ("（主视角）" if master else "")
+
+
 def next_view_name(existing, prefix="Wondful 视角"):
     """「Wondful 视角 N」 with the smallest N ≥ 1 not in ``existing``."""
     names = set(existing)

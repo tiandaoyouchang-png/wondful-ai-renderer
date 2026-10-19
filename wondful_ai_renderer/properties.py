@@ -315,6 +315,9 @@ class WONDFUL_AddonPreferences(AddonPreferences):
         antigravity.prop(self, "antigravity_cli_path")
         antigravity.prop(self, "antigravity_model")
 
+        from .ui import draw_github_footer
+        draw_github_footer(layout)
+
         update = layout.box()
         update.label(text="更新", icon="FILE_REFRESH")
         row = update.row(align=True)
@@ -386,6 +389,60 @@ class WONDFUL_ModelItem(PropertyGroup):
     label: StringProperty(default="")
     description: StringProperty(default="")
     is_default: BoolProperty(default=False)
+
+
+def mv_append_cameras(props, cams, from_collection=""):
+    """⑥ 渲染视角 / 高级 › 多角度 (one list): append ``cams`` as checked rows, skipping cameras already
+    listed; the last added row becomes active.  Returns (added names, skipped names)."""
+    from . import multiview as MV
+    existing = [item.camera.name for item in props.mv_cameras if item.camera is not None]
+    add = MV.cameras_to_append(existing, cams)
+    skipped = [o.name for o in cams or [] if getattr(o, "type", "") == "CAMERA" and o not in add]
+    for cam in add:
+        item = props.mv_cameras.add()
+        item.camera = cam
+        item.enabled = True
+    if add:
+        props.mv_camera_index = len(props.mv_cameras) - 1
+    props.mv_drop_note = MV.drop_note([o.name for o in add], skipped, from_collection)
+    return [o.name for o in add], skipped
+
+
+def _mv_drop_camera_update(self, context):
+    """A camera dropped (or picked) on 「拖入相机」: add it to the list, then empty the field again."""
+    cam = self.mv_drop_camera
+    if cam is None:
+        return
+    mv_append_cameras(self, [cam])
+    self.mv_drop_camera = None
+
+
+def _mv_drop_collection_update(self, context):
+    """A collection dropped on 「拖入集合」: add every camera inside it (child collections too), then empty the field."""
+    coll = self.mv_drop_collection
+    if coll is None:
+        return
+    from . import multiview as MV
+    mv_append_cameras(self, MV.cameras_in_collection(coll), from_collection=coll.name)
+    self.mv_drop_collection = None
+
+
+def _view_result_update(self, context):
+    """⑥ result card: show the chosen view of the last multi-view run."""
+    try:
+        import json
+        from pathlib import Path
+        views = json.loads(self.view_results or "[]")
+        if not views:
+            return
+        i = max(0, min(int(self.view_result_index), len(views) - 1))
+        path = views[i].get("path", "")
+        if path and Path(path).is_file():
+            from .image_manager import load_image
+            self.result_image = load_image(path, "Wondful_Result")
+            self.last_result_path = path
+    except Exception as exc:
+        print(f"[Wondful] 切换视角结果失败：{exc}")
 
 
 class WONDFUL_MVCameraItem(PropertyGroup):
@@ -834,6 +891,29 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
     )
     mv_cameras: CollectionProperty(type=WONDFUL_MVCameraItem, name="其他相机")
+    # 1.2.3 ⑥ 渲染视角: the same list; first checked row = 主视角, the rest via 多角度场景一致
+    mv_camera_index: IntProperty(name="当前视角行", default=0, min=0, options={"HIDDEN"})
+    mv_drop_camera: PointerProperty(
+        name="拖入相机",
+        description="从大纲视图把相机拖到这里（或点开选择），就加入渲染视角列表；已在列表的会跳过",
+        type=bpy.types.Object,
+        poll=lambda self, obj: getattr(obj, "type", "") == "CAMERA",
+        update=_mv_drop_camera_update,
+        options={"SKIP_SAVE"},
+    )
+    mv_drop_collection: PointerProperty(
+        name="拖入集合",
+        description="从大纲视图把一个集合拖到这里：其中（含子集合）所有相机都加入渲染视角列表",
+        type=bpy.types.Collection,
+        update=_mv_drop_collection_update,
+        options={"SKIP_SAVE"},
+    )
+    mv_drop_note: StringProperty(name="拖入结果", default="", options={"SKIP_SAVE"})
+    # a running 「生成 N 个视角」: {"cameras": [names in list order], "total": N}; empty = single view
+    views_plan: StringProperty(name="渲染视角计划", default="", options={"SKIP_SAVE", "HIDDEN"})
+    # last multi-view result: [{"camera", "path", "master"}]; the result card flips between them
+    view_results: StringProperty(name="各视角结果", default="", options={"HIDDEN"})
+    view_result_index: IntProperty(name="显示视角", default=0, min=0, options={"HIDDEN"}, update=_view_result_update)
     mv_widen: BoolProperty(
         name="加宽体块",
         description="临时补齐主视角以外的环境：室内补上看不到的墙，建筑场景在外圈补朴素的普通楼；渲染完自动删除",

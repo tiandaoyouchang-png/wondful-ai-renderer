@@ -1,7 +1,7 @@
 {
   "version": "1.2.3",
   "zip": "Wondful-AI-Renderer-Blender-1.2.3.zip",
-  "sha256": "f1b9a8b6d4c64afcf0ea2483623c83e602607d565ad009fc20a4ce21a7203679",
-  "size": 453769,
+  "sha256": "d151fac22f3217eb31334403e773e1934ad38bd1d888eb49d53a2ccf13c56836",
+  "size": 460830,
   "notes": "固定坐标轮廓验收 · 有界重生成 · 额度 / 登录立即停止"
 }

@@ -263,7 +263,7 @@ class FileTest(unittest.TestCase):
             self.assertFalse(Path(f"{d}/out.png").exists())
             self.assertTrue(rep["discarded"])
             self.assertIn("细节回贴：已放弃", DP.summarize(rep))
-        self.assertEqual(DP.raw_path("/x/Wondful_S_C_1.png"), "/x/Wondful_S_C_1_raw.png")
+        self.assertEqual(DP.raw_path("/x/Wondful_S_C_1.png"), "/x/.wondful/sidecars/Wondful_S_C_1_raw.png")   # 1.2.3: hidden
 
 
 class WiringTest(unittest.TestCase):

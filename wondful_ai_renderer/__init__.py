@@ -53,6 +53,8 @@ from .operators import (
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,
     WONDFUL_OT_mv_camera_from_view,
+    WONDFUL_OT_mv_camera_move,
+    WONDFUL_OT_view_result_step,
     WONDFUL_OT_multiview_render,
     WONDFUL_OT_mark_keep_exact,
     WONDFUL_OT_load_reference,
@@ -75,7 +77,7 @@ from .operators import (
     reset_stale_task_status,
 )
 from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, WONDFUL_MVCameraItem, sync_prompt_editor
-from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items
+from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items, WONDFUL_UL_render_views
 from . import update_ops
 
 
@@ -88,6 +90,7 @@ CLASSES = (
     WONDFUL_AISettings,
     WONDFUL_UL_prompt_lines,
     WONDFUL_UL_reference_items,
+    WONDFUL_UL_render_views,
     WONDFUL_OT_codex_check,
     WONDFUL_OT_codex_login,
     WONDFUL_OT_codex_logout,
@@ -110,6 +113,8 @@ CLASSES = (
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,
     WONDFUL_OT_mv_camera_from_view,
+    WONDFUL_OT_mv_camera_move,
+    WONDFUL_OT_view_result_step,
     WONDFUL_OT_multiview_render,
     WONDFUL_OT_mark_keep_exact,
     WONDFUL_OT_polish_prompt,

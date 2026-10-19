@@ -1000,9 +1000,16 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
 # --------------------------------------------------------------------------- file driver
 
 def raw_path(path) -> str:
+    """The un-fixed AI image of an exported result (kept for A/B in 诊断): in the output folder's hidden
+    ``.wondful/sidecars`` (1.2.3: the visible folder holds only the final images)."""
     from pathlib import Path
     p = Path(path)
-    return str(p.with_name(p.stem + "_raw" + (p.suffix or ".png")))
+    target = p.parent / ".wondful" / "sidecars" / (p.stem + "_raw" + (p.suffix or ".png"))   # = output_manager.sidecar_path
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(target)
 
 
 def load_matid(matid_path, w: int, h: int):
