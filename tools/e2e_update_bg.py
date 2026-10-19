@@ -134,8 +134,10 @@ def main():
     pkg = OUT / "pkg999" / "wondful_ai_renderer"
     shutil.copytree(ROOT / "wondful_ai_renderer", pkg, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     init = (pkg / "__init__.py").read_text(encoding="utf-8")
-    check('"version": (1, 2, 3)' in init, "source bl_info pattern found")
-    (pkg / "__init__.py").write_text(init.replace('"version": (1, 2, 3)', '"version": (9, 9, 9)'), encoding="utf-8")
+    import re as _re
+    ver_pat = _re.compile(r'"version": \(\d+, \d+, \d+\)')
+    check(bool(ver_pat.search(init)), "source bl_info pattern found")   # was pinned to 1.2.3 (broke at 1.2.4)
+    (pkg / "__init__.py").write_text(ver_pat.sub('"version": (9, 9, 9)', init, count=1), encoding="utf-8")
     (pkg / "UPDATED_MARKER.txt").write_text("9.9.9", encoding="utf-8")
     for root in ("good", "bad"):
         (OUT / "server" / root / "releases").mkdir(parents=True, exist_ok=True)

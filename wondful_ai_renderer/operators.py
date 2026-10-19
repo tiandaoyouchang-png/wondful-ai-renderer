@@ -46,6 +46,7 @@ from .image_manager import compute_target_size, enforce_aspect_ratio, image_file
 from .prompt_engine import BASE_SYSTEM_PROMPT, STYLE_ANALYSIS_SYSTEM_PROMPT, PRODUCT_ANALYSIS_SYSTEM_PROMPT, product_analysis_user_text, parse_product_analysis, build_polish_user_text, build_render_prompt, sanitize_appearance_prompt, sanitize_appearance_prompt_report, needs_reference_policy_refresh, REFERENCE_POLICY_VERSION, select_polish_source
 from .render_session import cleanup_old_sessions, copy_references, create_session, save_metadata
 from .output_manager import export_result, resolve_output_directory, preflight_output_directory, internal_dir, sidecar_path
+from .photo_finish import CLEAN_SUFFIX
 from .viewport_capture import capture_camera_reference, camera_output_dimensions
 from .structure_packet import build_structure_packet
 from .properties import MAX_REFERENCES_PER_KIND, MAX_PRODUCT_REFERENCES, reference_limit
@@ -509,7 +510,7 @@ def _gate_summary(attempts, exhausted) -> dict:
     best = max(tries, key=gate_rank) if tries else None
     passed = bool(best and best.get("passed"))
     return {"tries": [{k: t.get(k) for k in ("iou", "iou_lo", "iou_hi", "verdict", "weak_frac", "out_of_band",
-                                             "candidate", "seconds", "error")} for t in tries],
+                                             "candidate", "seconds", "error", "image_quality")} for t in tries],
             "best": best, "passed": passed, "exhausted": bool(exhausted and not passed),
             "candidates": [str(a.get("path")) for a in attempts]}
 
@@ -2743,6 +2744,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             restored_path,
                         ))
                     variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
+                    from .result_worker import photo_finish_step
+                    processed = photo_finish_step(
+                        str(variant_final), self._session.directory / f"output_variant_{variant_index:02d}_finish.png",
+                        getattr(self, "_finish", None)) or None
+                    if processed and processed.get("final"):
+                        variant_final = Path(processed["final"])
+                finish_rep = (processed or {}).get("finish_report") or {}
+                if finish_rep:
+                    from .photo_finish import note as _finish_note
+                    props.last_finish_note = _finish_note(finish_rep)
                 exported = export_result(
                     variant_final,
                     self._output_dir_at_start,
@@ -2759,6 +2770,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         shutil.copy2(variant_raw, raw_path(exported))
                     except Exception as exc:
                         print(f"[Wondful] 原始结果另存失败：{exc}")
+                if (processed or {}).get("clean"):
+                    # 1.2.4: the image before 照片质感 (hidden sidecar): 多角度 projects this one, not the grain
+                    try:
+                        shutil.copy2(processed["clean"], sidecar_path(exported, CLEAN_SUFFIX))
+                    except Exception as exc:
+                        print(f"[Wondful] 成片前图像另存失败：{exc}")
                 self._exported_by_variant[variant_index] = Path(exported)
                 self._exported_variant_records[variant_index] = variant
                 self._submit_layers(props, Path(exported))
@@ -3128,6 +3145,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         else:
             gate_max = 1
         self._gate_mask = gate_mask
+        # 1.2.4 照片质感 (高级 › 成片): last step on the final canvas; the product mask protects saturation
+        self._finish = {"level": str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE"),
+                        "mask": gate_mask or (self._detail or {}).get("mask", "") or (self._layers or {}).get("mask", "")}
         # numpy result processing runs on the worker; the old main-thread path stays for the
         # opt-in identity hard restore (it needs Blender's image loader)
         worker_post = not (identity_hard_restore and identity_possible)
@@ -3243,6 +3263,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 variant_best_canvas = None
                 variant_best_rank = (False, -1)
                 correction = ""
+                low_retry_used = False      # 1.2.4: one retry when the backend reports quality "low"
                 for attempt_index in range(1, planned_attempts + 1):
                     candidate = self._session.directory / f"output_candidate_v{variant_index:02d}_a{attempt_index:02d}.png"
                     attempt_prompt = effective_render_prompt + (
@@ -3326,7 +3347,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                 try:
                                     partial["processed"] = result_worker.finish_variant(
                                         str(variant_best_path), variant_index, self._detail, camera_w, camera_h,
-                                        session_dir)
+                                        session_dir, finish=self._finish)
                                 except Exception as exc:
                                     print(f"[Wondful] 结果处理失败（改在主线程处理）：{exc}")
                             self._completed_variants.put(partial)
@@ -3373,6 +3394,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             detail_path=(self._detail or {}).get("detail", ""))
                         print(f"[Wondful] 轮廓验收 v{variant_index} a{attempt_index}: IoU {gate_rep.get('iou')} "
                               f"{gate_rep.get('verdict')}")
+                    tier = str((generation or {}).get("image_quality", "") or "") if isinstance(generation, dict) else ""
+                    if tier:
+                        print(f"[Wondful] 画质档 v{variant_index} a{attempt_index}: {tier}")
+                    if gate_rep is not None:
+                        gate_rep["image_quality"] = tier
 
                     record = {
                         "iou_gate": gate_rep,
@@ -3388,6 +3414,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         "generation": generation,
                         "generation_seconds": generation_seconds,
                         "audit_seconds": (audit_seconds if auto_alignment_retry and audit is not None else 0.0),
+                        "image_quality": tier,
                     }
                     attempts.append(record)
                     variant_attempts.append(record)
@@ -3408,6 +3435,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         if gate_rep is None or gate_rep.get("iou") is None:
                             break       # cannot judge this file: never burn quota blindly
                         if gate_rep.get("passed"):
+                            if result_worker.low_tier_retry(tier, attempt_index, planned_attempts, low_retry_used):
+                                # 1.2.4: passed but the backend gave the "low" tier (smeared / worm texture):
+                                # one fresh generation inside the same budget; the better tier wins if it passes too
+                                low_retry_used = True
+                                print(f"[Wondful] 画质档 low：第 {variant_index} 张重新生成 1 次（不超过最多生成次数）")
+                                continue
                             break       # the first generation that passes stops
                         continue        # fresh regeneration from the original base, never a repair
                     if not auto_alignment_retry:
@@ -3433,6 +3466,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 }
                 if gate_mask:
                     variant["iou_gate"] = _gate_summary(variant_attempts, len(variant_attempts) >= planned_attempts)
+                    variant["iou_gate"]["low_tier_retry"] = low_retry_used
                 if worker_post:
                     self._phase = f"处理第 {variant_index}/{variant_count} 张（细节检查 / 还原度）"
 
@@ -3441,7 +3475,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     try:
                         variant["processed"] = result_worker.finish_variant(
                             str(variant_best_path), variant_index, self._detail, camera_w, camera_h, session_dir,
-                            cancel_check=is_cancellation_requested, on_status=_detail_status)
+                            cancel_check=is_cancellation_requested, on_status=_detail_status, finish=self._finish)
                     except result_worker.Cancelled:
                         raise RuntimeError("任务已取消")
                     except Exception as exc:
@@ -4332,6 +4366,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         strength = float(getattr(props, "detail_paste_strength", 0.8))
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
         env_check = bool(getattr(props, "mv_env_check", True))
+        grade_on = bool(getattr(props, "mv_colour_match", True))      # 1.2.4 统一调色
+        finish_level = str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE")   # 1.2.4 照片质感
         detail_edit = None
         if paste:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
             try:
@@ -4360,7 +4396,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             t0 = time.time()
             mv = views[master_name]
             master_png = pool / "master.png"
-            if not RW.fit_to_canvas(master_img, master_png, W, H):
+            from .photo_finish import clean_source
+            # 1.2.4: the 主视角 before 照片质感 (its grain must not be projected / stretched into other views)
+            if not RW.fit_to_canvas(clean_source(master_img), master_png, W, H):
                 raise RuntimeError("主视角图无法读取（请用 PNG）")
             entry_m = {"name": master_name, "cam": mv["cam"], "pos": Path(mv["prefix"] + "_pos.npy").name,
                        "nrm": Path(mv["prefix"] + "_nrm.npy").name, "mask": Path(mv["prefix"] + "_maskw.npy").name,
@@ -4462,9 +4500,13 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                          "iou": gate.get("iou"), "iou_verdict": gate.get("verdict"),
                          "reproj": rp, "product_violations": MV.product_violations(rep, gate.get("verdict")),
                          "env_violations": MV.env_violations(rp, env_check), "seconds": r.get("seconds"),
-                         "image_model": r.get("image_model", "")}
+                         "image_model": r.get("image_model", ""), "image_quality": r.get("image_quality", "")}
                     tries.append(t)
+                    if t["image_quality"]:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 第 {n} 次 画质档 {t['image_quality']}")
                     if not t["product_violations"] and not t["env_violations"]:
+                        if n < MV.MAX_CALLS and RW.low_tier_retry(t["image_quality"], n, MV.MAX_CALLS, False):
+                            continue        # 1.2.4: passed but "low" tier → the one retry this camera has
                         break
                 if not tries:
                     continue
@@ -4472,16 +4514,41 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 res.update({"tries": tries, "chosen": Path(best["file"]).name, "identity": best["identity"],
                             "reproj": best["reproj"], "product_violations": best["product_violations"],
                             "env_violations": best["env_violations"],
-                            "retry_reason": (tries[0]["product_violations"] + tries[0]["env_violations"]) if len(tries) > 1 else []})
+                            "image_quality": best.get("image_quality", ""),
+                            "retry_reason": ((tries[0]["product_violations"] + tries[0]["env_violations"])
+                                             or (["画质档 low"] if RW.is_low_tier(tries[0].get("image_quality")) else []))
+                            if len(tries) > 1 else []})
                 final = best["file"]
                 if paste:
                     out = RW.paste_and_score(best["file"], 1, spec, cancelled)
                     final = out.get("final") or final
                     res["detail_note"] = out.get("detail_note", "")
                     res["score_note"] = out.get("score_note", "")
+                res["grade"] = {"applied": False}
+                if grade_on:     # 1.2.4 统一调色: co-visible environment pixels vs the 主视角, environment only
+                    try:
+                        img_full = read_png(final).astype(np.float32)[..., :3]
+                        g = MV.fit_grade(master_view, vk, resize(img_full, ww, wh))
+                        if g:
+                            graded = MV.apply_grade(img_full, g, mfull)
+                            gp = pre + "_graded.png"
+                            write_png(gp, np.rint(graded).astype(np.uint8))
+                            final = gp
+                            res["grade"] = dict(g, applied=True,
+                                                reproj=MV.reproj_de(master_view, vk, resize(graded, ww, wh)))
+                        else:
+                            res["grade"] = {"applied": False, "reason": "共视区太少或拟合无改善"}
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：统一调色失败：{exc}")
+                        res["grade"] = {"applied": False, "reason": str(exc)[:80]}
                 img_name = MV.safe_name(rec["name"]) + "_accepted.png"
-                shutil.copy2(final, pool / img_name)
+                shutil.copy2(final, pool / img_name)     # the pool keeps the clean (pre-照片质感) image
                 res["final"] = str(pool / img_name)
+                fin = RW.photo_finish_step(final, pre + "_finish.png", {"level": finish_level, "mask": v["files"]["mask"]})
+                if fin.get("final"):
+                    res["export"] = fin["final"]
+                    res["clean"] = res["final"]
+                res["finish"] = fin.get("finish_report") or {}
                 res["raw"] = best["file"]
                 res["ok"] = True
                 entry = {"name": rec["name"], "cam": rec, "pos": Path(pre + "_pos.npy").name, "nrm": Path(pre + "_nrm.npy").name,
@@ -4525,12 +4592,14 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             if not r.get("ok"):
                 continue
             try:
-                p = export_result(r["final"], info["out_dir"], info["scene"], r["name"], "多角度场景一致")
+                p = export_result(r.get("export") or r["final"], info["out_dir"], info["scene"], r["name"], "多角度场景一致")
                 r["exported"] = str(p)
                 exported.append(str(p))
                 if r.get("raw"):
                     from .detail_paste import raw_path
                     shutil.copy2(r["raw"], raw_path(p))
+                if r.get("clean"):
+                    shutil.copy2(r["clean"], sidecar_path(p, CLEAN_SUFFIX))
             except Exception as exc:
                 r["export_error"] = str(exc)
         notes = [MV.summary_line(summary.get("results", []))]

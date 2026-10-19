@@ -118,6 +118,43 @@ def resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
     return top * (1 - fy) + bot * fy
 
 
+def _lanczos_taps(n_src: int, n_dst: int, a: int = 3):
+    """Lanczos-a taps for enlarging: (2a, n_dst) source indices (edge-clamped) and normalised weights."""
+    x = (np.arange(n_dst, dtype=np.float64) + 0.5) * n_src / n_dst - 0.5
+    base = np.floor(x).astype(int)
+    offs = np.arange(-a + 1, a + 1)[:, None]
+    idx = base[None, :] + offs
+    d = x[None, :] - idx
+    k = np.sinc(d) * np.sinc(d / a)
+    k[np.abs(d) >= a] = 0.0
+    k /= np.maximum(k.sum(0, keepdims=True), 1e-12)
+    return np.clip(idx, 0, n_src - 1), k.astype(np.float32)
+
+
+def upscale(img: np.ndarray, w: int, h: int) -> np.ndarray:
+    """1.2.4 (AI 感): Lanczos-3 when the image is enlarged (the model returns at most ~1672 px wide,
+    the camera canvas is often 2560); shrinking keeps ``resize``. No sharpening is added: an unsharp
+    mask would also amplify the AI's smeared texture. Values are clipped to the input range."""
+    a = img.astype(np.float32)
+    sh, sw = a.shape[:2]
+    if (sw, sh) == (w, h):
+        return a
+    if w < sw or h < sh:
+        return resize(a, w, h)
+    lo, hi = float(a.min()), float(a.max())
+    ix, kx = _lanczos_taps(sw, w)
+    tmp = np.zeros((sh, w) + a.shape[2:], np.float32)
+    for t in range(ix.shape[0]):
+        wt = kx[t].reshape((1, w) + (1,) * (a.ndim - 2))
+        tmp += a[:, ix[t]] * wt
+    iy, ky = _lanczos_taps(sh, h)
+    out = np.zeros((h, w) + a.shape[2:], np.float32)
+    for t in range(iy.shape[0]):
+        wt = ky[t].reshape((h, 1) + (1,) * (a.ndim - 2))
+        out += tmp[iy[t]] * wt
+    return np.clip(out, lo, hi)
+
+
 def luminance(rgb: np.ndarray) -> np.ndarray:
     return rgb[..., :3] @ LUMA
 

@@ -18,7 +18,7 @@ ZIP = argv[0]
 UI = bpy.types.UILayout.bl_rna
 ICONS = set(UI.functions["prop"].parameters["icon"].enum_items.keys())
 problems = []
-ADV_TABS = ("MODEL", "OUTPUT", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
+ADV_TABS = ("MODEL", "OUTPUT", "FINISH", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
 
 
 def _check_kwargs(fn, kwargs):
@@ -795,6 +795,24 @@ def main():
     props.status = "IDLE"
     props.task_phase = ""
     props.progress = 0.0
+
+    # 4d. 1.2.4 高级 › 成片 › 照片质感 (关 / 细微 / 标准 + last note) and 多角度 › 统一调色
+    props.ui_show_advanced = True
+    props.ui_adv_tab = "FINISH"
+    for level in ("OFF", "SUBTLE", "STANDARD"):
+        props.photo_finish = level
+        text = "\n".join(draw("finish_" + level.lower()))
+        if "photo_finish" not in text:
+            problems.append(f"成片: photo_finish selector missing ({level})")
+    props.last_finish_note = "照片质感：细微"
+    draw("finish_note")
+    props.last_finish_note = "照片质感失败（已保留原图）：测试"
+    draw("finish_note_fail")
+    props.last_finish_note = ""
+    props.photo_finish = "SUBTLE"
+    props.ui_adv_tab = "MULTIVIEW"
+    if "mv_colour_match" not in "\n".join(draw("multiview_colour_match")):
+        problems.append("多角度: 统一调色 toggle missing")
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"

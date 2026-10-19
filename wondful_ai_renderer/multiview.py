@@ -10,7 +10,8 @@ image), the per-view block positions (環境体块 placement for this camera), a
 projected base. The reference photo never reaches the image model: it is read as text only,
 like in the main flow.
 
-Retry policy (user, 2026-10-17): one image call per camera, at most one retry, and only when
+Retry policy (user, 2026-10-17; 1.2.4 adds the low tier): one image call per camera, at most one retry,
+and only when the backend reported the ``low`` quality tier (2026-10-20), or when
 - the product is out of spec: detail edge > 6 px, product colour ΔE > 15, offset > 4 px or
   scale > 1.5 % (产品还原度 of the raw AI image); or
 - the environment grossly disagrees with the master on geometry pixels only (sky excluded):
@@ -434,6 +435,87 @@ def reproj_de(master, vk, img_k):
             "covis": round(float(co.sum()) / n_env, 3)}
 
 
+# --------------------------------------------------------------------------- 1.2.4 统一调色
+
+GRADE_STRENGTH = 0.75      # share of the fitted transform that is applied (research: 0.75)
+GRADE_MIN_PIXELS = 400     # co-visible environment pixels needed to fit at all
+GRADE_MAX_SHIFT = 12.0     # ΔE: a fit that would move the environment mean further is not trusted
+
+
+def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH):
+    """Colour transform of view k onto the 主视角, fitted on CO-VISIBLE ENVIRONMENT pixels only.
+
+    Not a whole-image statistics match (that made v4 worse in the research: each view sees different
+    content): ``correspond`` says which pixel of view k shows the same world point (geometry, depth
+    tested) or the same sky direction as a master pixel; both images are blurred, converted to Lab,
+    and a 4×3 affine Lab transform is least-squares fitted, refitted without the worst 20 %, and
+    blended with the identity (``strength``). ``img_k``: view k at working size (H, W, 3, 0..255).
+    Returns {"A": 4×3 list, "pixels", "dE_before", "dE_after", "shift"} or None (too little overlap,
+    no improvement or an implausible shift)."""
+    H, W = vk["pos"].shape[:2]
+    B1 = lab(blur(np.asarray(master["img"], np.float32)[..., :3], 2))
+    Bk = lab(blur(np.asarray(img_k, np.float32)[..., :3], 2))
+    U, V, vis, sky, hit, sky_in = correspond(vk, master)
+    ui = np.clip(np.round(U).astype(int), 0, W - 1)
+    vi = np.clip(np.round(V).astype(int), 0, H - 1)
+    msky = master.get("sky")
+    sky_ok = sky_in & (msky[vi, ui] if msky is not None else False)
+    env = ~dilate(np.asarray(vk["mask"]) > 0.5, 3)
+    cov = (vis | sky_ok) & env
+    n = int(cov.sum())
+    if n < GRADE_MIN_PIXELS:
+        return None
+    ref = bilinear(B1, U, V)
+    X = Bk[cov].astype(np.float64)
+    Y = ref[cov].astype(np.float64)
+    if n > 60000:      # deterministic subsample
+        sel = np.linspace(0, n - 1, 60000).astype(int)
+        X, Y = X[sel], Y[sel]
+    Xa = np.c_[X, np.ones(len(X))]
+    try:
+        A = np.linalg.lstsq(Xa, Y, rcond=None)[0]
+        e = np.linalg.norm(Xa @ A - Y, axis=1)
+        keep = e < np.percentile(e, 80)
+        A = np.linalg.lstsq(Xa[keep], Y[keep], rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return None
+    ident = np.vstack([np.eye(3), np.zeros((1, 3))])
+    A = strength * A + (1 - strength) * ident
+    before = float(np.linalg.norm(X - Y, axis=1).mean())
+    after = float(np.linalg.norm(Xa @ A - Y, axis=1).mean())
+    shift = float(np.linalg.norm((Xa @ A).mean(0) - X.mean(0)))
+    if not np.all(np.isfinite(A)) or after >= before or shift > GRADE_MAX_SHIFT:
+        return None
+    return {"A": A.tolist(), "pixels": n, "dE_before": round(before, 2), "dE_after": round(after, 2),
+            "shift": round(shift, 2)}
+
+
+def apply_grade(img, grade, mask):
+    """Apply a ``fit_grade`` transform to the ENVIRONMENT of a full-size image (H, W, 3, 0..255).
+    ``mask``: product mask 0..1 at the same size; the product (grown 2 px, feathered) is untouched."""
+    from .material_color import lab_to_srgb
+    img = np.asarray(img, np.float32)[..., :3]
+    if not grade:
+        return img.copy()
+    A = np.asarray(grade["A"], np.float32)
+    L = lab(img)
+    Lt = L.reshape(-1, 3) @ A[:3] + A[3]
+    out = lab_to_srgb(Lt.reshape(L.shape)) * 255.0
+    m = np.asarray(mask, np.float32)
+    if m.shape[:2] != img.shape[:2]:
+        m = resize(m, img.shape[1], img.shape[0])
+    prot = np.where(m > 0.5, 1.0, np.clip(np.maximum(blur(dilate(m > 0.5, 2).astype(np.float32), 1), m), 0, 1))[..., None]
+    return np.clip(out * (1 - prot) + img * prot, 0, 255)
+
+
+def grade_note(results) -> str:
+    graded = [r for r in results if (r.get("grade") or {}).get("applied")]
+    if not graded:
+        return ""
+    return "统一调色 " + "、".join(f"{r['name']}（ΔE {r['grade']['dE_before']:.1f}→{r['grade']['dE_after']:.1f}）"
+                               for r in graded)
+
+
 # --------------------------------------------------------------------------- policy
 
 def product_violations(rep, iou_verdict=None) -> list:
@@ -471,11 +553,13 @@ def env_violations(rp, enabled=True) -> list:
 
 
 def choose(tries):
-    """Fewest product violations, then fewest environment violations, then the lower edge."""
+    """Fewest product violations, then fewest environment violations, then (1.2.4) not the ``low``
+    quality tier, then the lower edge."""
     def key(t):
         rep = t.get("identity") or {}
         edge = rep.get("edge_px_detail", rep.get("edge_px"))
-        return (len(t.get("product_violations") or []), len(t.get("env_violations") or []),
+        low = str(t.get("image_quality") or "").strip().lower() == "low"
+        return (len(t.get("product_violations") or []), len(t.get("env_violations") or []), int(low),
                 99.0 if edge is None else float(edge))
     return min(tries, key=key)
 
@@ -652,6 +736,9 @@ def summary_line(results) -> str:
     bad = [r["name"] for r in done if r.get("product_violations")]
     if bad:
         line += " · 产品仍超标：" + "、".join(bad)
+    g = grade_note(done)
+    if g:
+        line += " · " + g
     return line
 
 

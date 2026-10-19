@@ -806,6 +806,23 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.4 照片质感 (高级 › 成片): deterministic camera-like finish, last step on the final image
+    photo_finish: EnumProperty(
+        name="照片质感",
+        description="成片最后一步（在最终尺寸上，按材质校色之后）：高光柔和滚降、只压环境的过高饱和度、轻微暗角、"
+                    "轻微色差和随亮度变化的传感器颗粒，去掉 AI 图「零噪点」的塑料感。产品轮廓和颜色不变，_raw 原图不加",
+        items=[
+            ("OFF", "关", "不加后期，输出与以前相同"),
+            ("SUBTLE", "细微", "接近真实全画幅相机缩到 2560 宽的颗粒（推荐）"),
+            ("STANDARD", "标准", "颗粒和暗角更明显一些，偏胶片感"),
+        ],
+        default="SUBTLE",
+    )
+    last_finish_note: StringProperty(
+        name="照片质感状态",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     # 1.2.0 细节回贴 → 1.2.3 细节修复 (property id kept): check plates / badges / lamps / rims
     # against the Blender model, regenerate only the parts that came out wrong
     detail_paste: BoolProperty(
@@ -925,6 +942,13 @@ class WONDFUL_AISettings(PropertyGroup):
                     "产品超标（细节边缘 > 6px、颜色 ΔE > 15、偏移 > 4px、缩放 > 1.5%）总是重试 1 次",
         default=True,
     )
+    # 1.2.4 统一调色: colour transform fitted on co-visible environment pixels vs the 主视角 (environment only)
+    mv_colour_match: BoolProperty(
+        name="统一调色",
+        description="每个视角生成后，用和主视角共同可见的环境像素（按场景几何对应，不是整图统计）拟合一个颜色变换，"
+                    "只作用于环境，让各视角的色调和主视角一致；产品颜色不动",
+        default=True,
+    )
     last_mv_note: StringProperty(
         name="多角度场景一致",
         default="",
@@ -1032,6 +1056,7 @@ class WONDFUL_AISettings(PropertyGroup):
         items=[
             ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
             ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
+            ("FINISH", "成片", "照片质感：成片最后一步的相机感后期"),
             ("PRODUCT", "产品", "轮廓验收、细节修复与产品外观锁定"),
             ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在主流程 ④）"),
             ("MULTIVIEW", "多角度", "多角度场景一致"),
