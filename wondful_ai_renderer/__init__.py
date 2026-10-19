@@ -76,6 +76,7 @@ from .operators import (
 )
 from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, WONDFUL_MVCameraItem, sync_prompt_editor
 from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items
+from . import update_ops
 
 
 CLASSES = (
@@ -137,6 +138,7 @@ CLASSES = (
     WONDFUL_OT_compare_set_factor,
     WONDFUL_OT_compare_modal,
     WONDFUL_PT_compare_workspace,
+    *update_ops.CLASSES,
     WONDFUL_PT_main,
 )
 
@@ -229,9 +231,11 @@ def register():
     _initialize_prompt_editors()
     _recover_stale_task_states()
     bpy.types.TEXT_HT_header.append(draw_prompt_editor_header)
+    update_ops.schedule_startup_check()
 
 
 def unregister():
+    update_ops.unregister_timers()
     from .operators import cancel_auth_session
     cancel_auth_session(detach=True, context=bpy.context)
     if hasattr(bpy.types.WindowManager, "wondful_auth_code"):

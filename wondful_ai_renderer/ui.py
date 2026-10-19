@@ -981,6 +981,66 @@ def _draw_mv_block_name(box, context, props, busy):
             _note(box, "留空：生图时按尺寸和位置自动命名", _cols(context, 2), "plain", 1)
 
 
+# ---------------------------------------------------------------------------
+# 更新 (1.2.3): compact banner on top of the main panel + 高级 › 诊断 › 更新
+# ---------------------------------------------------------------------------
+
+def _draw_update_banner(layout, context):
+    """「发现新版本 X.Y.Z」 [更新] [忽略此版本]; while installing the stage + bar; then the result."""
+    from . import update_ops as UO
+    manifest = UO.banner_manifest()
+    if not manifest:
+        return
+    phase = UO.STATE["phase"]
+    cells = _cols(context, 2)
+    box = layout.box()
+    if phase in ("DOWNLOADING", "VERIFYING", "INSTALLING"):
+        _note(box, f"更新到 {manifest['version']}{SEP}{UO.STATE['message']}", cells, "run", 1)
+        bar = box.column()
+        bar.progress(factor=float(UO.STATE["progress"]), type="BAR", text=UO.STATE["message"])
+        return
+    if phase == "DONE":
+        _note(box, UO.STATE["message"], cells, "ok", 2)
+        for line in UO.STATE.get("notes") or ():
+            _note(box, line, cells, "plain", 2)
+        return
+    if phase == "FAILED":
+        _note(box, UO.STATE["message"], cells, "fail", 4)
+        row = box.row(align=True)
+        row.operator("wondful.update_install", text="重试", icon="FILE_REFRESH")
+        row.operator("wondful.update_open_page", text="GitHub 下载", icon="URL")
+        return
+    box.label(text=f"发现新版本 {manifest['version']}", icon="INFO")
+    if manifest.get("notes"):
+        _note(box, manifest["notes"], cells, "plain", 2)
+    row = box.row(align=True)
+    row.operator("wondful.update_install", text="更新", icon="IMPORT")
+    row.operator("wondful.update_ignore", text="忽略此版本", icon="X").version = manifest["version"]
+
+
+def _draw_update_diag(adv, context, prefs):
+    """高级 › 诊断 › 更新: version, 自动检查更新, 检查更新, last check result."""
+    from . import update_ops as UO
+    acells = _cols(context, 2)
+    box, _head, _on = _section(adv, "更新", "FILE_REFRESH")
+    _note(box, f"当前版本 {UO.local_version()}", acells, "plain", 1)
+    row = box.row(align=True)
+    row.prop(prefs, "auto_check_updates")
+    check = row.row(align=True)
+    check.enabled = not UO.busy()
+    check.operator("wondful.update_check", text="检查更新", icon="FILE_REFRESH")
+    phase, message = UO.STATE["phase"], UO.STATE["message"]
+    if not message:
+        return
+    state = {"CHECKING": "run", "DOWNLOADING": "run", "VERIFYING": "run", "INSTALLING": "run",
+             "CHECK_FAILED": "fail", "FAILED": "fail", "AVAILABLE": "info"}.get(phase, "ok")
+    _note(box, message, acells, state, 4)
+    if phase == "AVAILABLE" and UO.STATE.get("manifest"):
+        box.operator("wondful.update_install", text=f"更新到 {UO.STATE['manifest']['version']}", icon="IMPORT")
+    elif phase in ("CHECK_FAILED", "FAILED"):
+        box.operator("wondful.update_open_page", text="GitHub 手动下载", icon="URL")
+
+
 class WONDFUL_PT_main(Panel):
     bl_label = "Wondful AI 渲染器 · 1.2"
     bl_idname = "WONDFUL_PT_main"
@@ -1015,6 +1075,8 @@ class WONDFUL_PT_main(Panel):
         has_style = len(props.style_images) > 0
         prompt_ready = bool((props.prompt or "").strip()) and not needs_polish
         can_generate = bool(not busy and connected and camera and structure_ready and imagegen_enabled)
+
+        _draw_update_banner(layout, context)
 
         # ---- ① 连接 -------------------------------------------------------------
         step1, tools = _step_card(layout, 1, "连接", done=connected)
@@ -1384,6 +1446,8 @@ class WONDFUL_PT_main(Panel):
                                 f"{SEP}验收 {props.last_audit_seconds:.0f} 秒", acells, "plain", 2)
                 if getattr(props, "active_conversation_id", ""):
                     info.operator("wondful.copy_conversation_id", text="复制远程会话恢复命令", icon="COPYDOWN")
+
+            _draw_update_diag(adv, context, prefs)
 
             box, _head, _on = _section(adv, "工具", "CONSOLE")
             tools = box.row(align=True)

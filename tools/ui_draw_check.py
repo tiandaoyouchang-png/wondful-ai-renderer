@@ -664,6 +664,45 @@ def main():
         props.ui_adv_tab = tab
         draw("antigravity_tab_" + tab.lower())
 
+    # 6. 1.2.3 更新: banner on top of ① (发现新版本 / 下载中 / 完成 / 失败) + 高级 › 诊断 › 更新
+    from wondful_ai_renderer import update_ops as UO
+    props.analysis_provider = "CODEX"
+    props.ui_show_advanced = True
+    props.ui_adv_tab = "DIAG"
+    fake = {"version": "9.9.9", "zip": "Wondful-AI-Renderer-Blender-9.9.9.zip", "sha256": "0" * 64,
+            "size": 1000, "notes": "细节修复更稳；新增一键更新"}
+    os.environ["WONDFUL_UPDATE_STATE_DIR"] = tempfile.mkdtemp()
+    UO.STATE.update(phase="IDLE", manifest=None, message="", progress=0.0, notes=[])
+    log = draw("update_none")
+    if any("发现新版本" in l for l in log) or "op wondful.update_check" not in "\n".join(log):
+        problems.append("update none: banner shown without an update, or 检查更新 missing in 诊断")
+    expect = {
+        "AVAILABLE": ("INFO 发现新版本 9.9.9", "op wondful.update_install IMPORT 更新", "op wondful.update_ignore X 忽略此版本"),
+        "DOWNLOADING": ("更新到 9.9.9 · 下载中 42%", "progress 下载中 42%"),
+        "DONE": ("CHECKMARK 已更新到 9.9.9，请重启 Blender",),
+        "FAILED": ("ERROR 校验失败", "op wondful.update_open_page"),
+    }
+    msgs = {"AVAILABLE": "发现新版本 9.9.9", "DOWNLOADING": "下载中 42%", "DONE": "已更新到 9.9.9，请重启 Blender",
+            "FAILED": "校验失败：sha256 不一致（abc…，应为 000…）。当前版本未改动；可到 GitHub 手动下载安装包"}
+    for phase, wants in expect.items():
+        UO.STATE.update(phase=phase, manifest=fake, message=msgs[phase], progress=0.42,
+                        notes=["已删除旧版本副本 1 个"] if phase == "DONE" else [])
+        for tab in ("DIAG", "CLOSED"):
+            props.ui_show_advanced = tab != "CLOSED"
+            log = draw(f"update_{phase.lower()}_{tab.lower()}")
+            top = "\n".join(log[:next((i for i, l in enumerate(log) if "连接" in l), len(log))])
+            for want in wants:
+                if want not in top:
+                    problems.append(f"update {phase} ({tab}): banner above ① lacks {want!r}")
+            check_six_steps(f"update_{phase.lower()}_{tab.lower()}", log)
+    UO.STATE.update(phase="CHECK_FAILED", manifest=None, message="检查失败：无法连接更新服务器（已尝试 3 个地址）。可稍后再试，或到 GitHub 手动下载")
+    props.ui_show_advanced = True
+    text = "\n".join(draw("update_check_failed_diag"))
+    if "ERROR 检查失败" not in text or "发现新版本" in text:
+        problems.append("update check failed: 诊断 should show the error, no banner")
+    UO.STATE.update(phase="IDLE", manifest=None, message="", progress=0.0, notes=[])
+    props.ui_adv_tab = "SCENE"
+
     bpy.ops.preferences.addon_disable(module="wondful_ai_renderer")
     print("PROBLEMS", len(problems))
     for p in problems:

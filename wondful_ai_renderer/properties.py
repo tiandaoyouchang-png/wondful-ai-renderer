@@ -285,6 +285,11 @@ class WONDFUL_AddonPreferences(AddonPreferences):
         min=60,
         max=100,
     )
+    auto_check_updates: BoolProperty(
+        name="自动检查更新",
+        description="启动 Blender 时检查是否有新版本（每 24 小时最多一次，后台进行，不影响使用）；有新版本时在面板顶部提示",
+        default=True,
+    )
     alignment_max_attempts: IntProperty(
         name="最多生成次数",
         description="包含第一次生成。建议 2，避免无意中过多消耗当前 Provider 的生图额度",
@@ -309,6 +314,18 @@ class WONDFUL_AddonPreferences(AddonPreferences):
         antigravity.label(text="Antigravity", icon="WORLD")
         antigravity.prop(self, "antigravity_cli_path")
         antigravity.prop(self, "antigravity_model")
+
+        update = layout.box()
+        update.label(text="更新", icon="FILE_REFRESH")
+        row = update.row(align=True)
+        row.prop(self, "auto_check_updates")
+        row.operator("wondful.update_check", text="检查更新", icon="FILE_REFRESH")
+        try:
+            from . import update_ops
+            if update_ops.STATE.get("message"):
+                update.label(text=update_ops.STATE["message"][:90])
+        except Exception:
+            pass
 
         output = layout.box()
         output.label(text="输出", icon="FILE_FOLDER")
