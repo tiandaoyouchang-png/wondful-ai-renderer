@@ -732,20 +732,21 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
-    # 1.2.0 细节回贴: paste the product's real Blender details back onto the AI result
+    # 1.2.0 细节回贴 → 1.2.3 细节修复 (property id kept): check plates / badges / lamps / rims
+    # against the Blender model, regenerate only the parts that came out wrong
     detail_paste: BoolProperty(
-        name="细节回贴",
-        description="默认关闭。只把车牌、标识、灯组、轮毂等小区域按 AI 光照贴回，逐块与原图对比，不如原图就自动放弃",
-        default=False,
+        name="细节修复",
+        description="生成后检查车牌、标识、灯组、轮毂等小细节；不合格的只放大该处重新生成再贴回，合格的不动",
+        default=True,
     )
     detail_paste_strength: FloatProperty(
         name="细节强度",
-        description="细节回贴的强度：0 = 完全保留 AI 画的细节，1 = 细节全部来自 Blender（光照始终保留 AI 的）",
+        description="无法调用生图修复时（未登录 / 服务不支持编辑）改用 Blender 回贴的强度：0 = 保留 AI 画的细节，1 = 全部来自 Blender",
         default=0.8, min=0.0, max=1.0, subtype="FACTOR",
     )
     detail_colour_fix: BoolProperty(
         name="按材质校色",
-        description="细节回贴时按材质把颜色拉回模型：每种材质（木头、面料、车漆……）的色相和饱和度向 Blender 模型靠拢，"
+        description="Blender 回贴（无法调用生图修复时）后按材质把颜色拉回模型：每种材质（木头、面料、车漆……）的色相和饱和度向 Blender 模型靠拢，"
                     "AI 的光影、阴影和反射保留；玻璃、自发光和镜面材质不动，车漆与金属只轻微校正",
         default=True,
     )
@@ -774,12 +775,12 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     last_score_note: StringProperty(
         name="产品还原度",
-        description="AI 原图对比 Blender 模型（按输出尺寸的像素）：偏移、缩放、轮廓误差、细节边缘误差、颜色 ΔE；括号里是细节回贴后的数值",
+        description="AI 原图对比 Blender 模型（按输出尺寸的像素）：偏移、缩放、轮廓误差、细节边缘误差、颜色 ΔE；括号里是细节修复后的数值",
         default="",
         options={"SKIP_SAVE"},
     )
     last_detail_note: StringProperty(
-        name="细节回贴状态",
+        name="细节修复状态",
         default="",
         options={"SKIP_SAVE"},
     )
@@ -934,7 +935,7 @@ class WONDFUL_AISettings(PropertyGroup):
         items=[
             ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
             ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
-            ("PRODUCT", "产品", "轮廓验收、细节回贴与产品外观锁定"),
+            ("PRODUCT", "产品", "轮廓验收、细节修复与产品外观锁定"),
             ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在主流程 ④）"),
             ("MULTIVIEW", "多角度", "多角度场景一致"),
             ("DIAG", "诊断", "上次渲染、产品还原度、诊断信息与偏好设置"),

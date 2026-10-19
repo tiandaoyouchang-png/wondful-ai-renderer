@@ -2,7 +2,7 @@
 
 Runs on the render worker thread (never on Blender's main thread) and never imports or touches
 ``bpy``: fit to the camera canvas, the fixed-coordinate IoU acceptance (``contour_iou``), the
-细节回贴 paste and the 产品还原度 scores. It only reads and writes files in the session
+细节修复 (check / crop fix / paste) and the 产品还原度 scores. It only reads and writes files in the session
 directory and returns plain dicts; the main thread copies the finished file to the output
 folder and writes the panel notes (``apply`` in operators).
 
@@ -105,7 +105,7 @@ def gate_note(gate: dict) -> str:
             "其余候选已保存）" if gate.get("exhausted") else f"轮廓 IoU {iou:.3f} · 未通过")
 
 
-# --------------------------------------------------------------------------- 细节回贴 + 产品还原度
+# --------------------------------------------------------------------------- 细节修复 + 产品还原度
 
 def identity_scores(image, spec, matid, raw=None):
     """(report, panel note) — raw AI image (raw=None) or the pasted one (raw given)."""
@@ -119,26 +119,36 @@ def identity_scores(image, spec, matid, raw=None):
     return rep, (summarize(raw, rep) if raw and not raw.get("error") else "")
 
 
-def paste_and_score(variant_final, variant_index, spec, cancel_check=None) -> dict:
-    """细节回贴 + 产品还原度 for one canvas-sized result. Returns dict(final, raw, detail_note,
-    score_note, reports). Never raises except ``Cancelled``."""
+def paste_and_score(variant_final, variant_index, spec, cancel_check=None, on_status=None) -> dict:
+    """细节修复 (1.2.3: 细节检查 → crop regeneration of failed parts → gate; Blender paste when no
+    image edit is possible) + 产品还原度 for one canvas-sized result. Returns dict(final, raw,
+    detail_note, score_note, reports). Never raises except ``Cancelled``."""
     out = {"final": str(variant_final), "raw": None, "detail_note": "", "score_note": ""}
     if not spec or not Path(spec["detail"]).is_file() or not Path(spec["mask"]).is_file():
         return out
     try:
-        from .detail_paste import mirrored_note, paste_file, summarize
+        from .detail_paste import mirrored_note
+        from . import detail_refine as DR
         _check(cancel_check)
         target = Path(spec["work_dir"]) / f"output_variant_{variant_index:02d}_detail.png"
         matid = spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else ""
         raw_rep, note = identity_scores(variant_final, spec, matid)
         out["score_note"] = note
         _check(cancel_check)
-        rep = paste_file(str(variant_final), spec["detail"], spec["mask"], str(target),
-                         keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
-                         strength=spec["strength"], matid_path=matid,
-                         colour_strength=float(spec.get("colour_strength", 0.0) or 0.0))
-        out["detail_note"] = summarize(rep) + mirrored_note(spec.get("mirrored"))
-        out["paste_report"] = {k: v for k, v in rep.items() if k not in ("image", "weight", "keep_mask", "occluder")}
+        try:
+            rep = DR.refine_file(str(variant_final), spec["detail"], spec["mask"], str(target),
+                                 keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
+                                 strength=spec["strength"], matid_path=matid,
+                                 colour_strength=float(spec.get("colour_strength", 0.0) or 0.0),
+                                 edit_fn=spec.get("edit_fn"), work_dir=spec["work_dir"],
+                                 tag=f"v{variant_index:02d}", vehicle=bool(spec.get("vehicle", True)),
+                                 on_status=on_status, cancel_check=cancel_check)
+        except DR.Cancelled as exc:
+            raise Cancelled(str(exc)) from exc
+        out["detail_note"] = DR.summarize(rep) + mirrored_note(spec.get("mirrored"))
+        out["paste_report"] = rep
+        if isinstance(spec.get("reports"), list):
+            spec["reports"].append(rep)
         if rep.get("skipped"):
             return out
         _check(cancel_check)
@@ -151,18 +161,19 @@ def paste_and_score(variant_final, variant_index, spec, cancel_check=None) -> di
     except Cancelled:
         raise
     except Exception as exc:
-        print(f"[Wondful] 细节回贴失败：{exc}")
-        out["detail_note"] = f"细节回贴失败（已保留原图）：{str(exc)[:80]}"
+        print(f"[Wondful] 细节修复失败：{exc}")
+        out["detail_note"] = f"细节修复失败（已保留原图）：{str(exc)[:80]}"
     return out
 
 
-def finish_variant(source, variant_index, spec, width, height, session_dir, cancel_check=None) -> dict | None:
+def finish_variant(source, variant_index, spec, width, height, session_dir, cancel_check=None,
+                   on_status=None) -> dict | None:
     """Whole numpy result path of one variant: canvas fit + paste + scores. None when the file
     cannot be read here (the main thread then runs the Blender-based path)."""
     _check(cancel_check)
     variant_final = Path(session_dir) / f"output_variant_{variant_index:02d}.png"
     if not fit_to_canvas(source, variant_final, width, height):
         return None
-    res = paste_and_score(variant_final, variant_index, spec, cancel_check)
+    res = paste_and_score(variant_final, variant_index, spec, cancel_check, on_status=on_status)
     res["canvas"] = str(variant_final)
     return res

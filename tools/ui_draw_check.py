@@ -288,6 +288,13 @@ def main():
     props.task_phase = "生成第 1/2 张 · 尝试 1/3"
     props.progress = 0.7
     draw("generating_render")
+    # 1.2.3 细节修复 stages in ⑥ (worker phase text)
+    for phase in ("处理第 1/2 张 · 细节检查", "处理第 1/2 张 · 细节修复 1/2", "处理第 2/2 张 · 细节修复 2/2"):
+        props.task_phase = phase
+        log = draw("generating_detail_" + str(len(phase)))
+        if not any(phase in line for line in log):
+            problems.append(f"detail stage text not drawn: {phase}")
+    props.task_phase = "生成第 1/2 张 · 尝试 1/3"
 
     # 4. result
     props.status = "SUCCESS"
@@ -303,6 +310,22 @@ def main():
     prefs.codex_direct_edit = False
     draw("result_direct_off")
     prefs.codex_direct_edit = True
+    # 1.2.3 细节修复 report: result card + 高级 › 诊断 › 上次渲染 + 高级 › 产品 › 细节修复
+    for note in ("细节：5 处合格 · 修复 2 处 · 放弃 0 · 生图 2 次 · 84 秒", "细节：全部合格（6 处）",
+                 "细节：4 处合格 · Blender 回贴 1 处 · 放弃 1（无可用生图编辑） · 3 秒",
+                 "细节检查已跳过：对齐不可靠（细节底图与成片不匹配），保留 AI 原图"):
+        props.last_detail_note = note
+        log = draw("result_detail")
+        short = note[:12]
+        if not any(short in line for line in main_part(log)):
+            problems.append(f"detail note not on result card: {note}")
+        for tab in ("DIAG", "PRODUCT"):
+            props.ui_adv_tab = tab
+            log = draw("result_detail_" + tab.lower())
+            if not any(short in line for line in log):
+                problems.append(f"detail note not in 高级 {tab}: {note}")
+    props.last_detail_note = ""
+    props.ui_adv_tab = "SCENE"
     # 1.2.1 识别分 (高级 › 上次渲染)
     props.last_score_note = "1672×941 · 偏移 18px · 缩放 +8.0% · 轮廓 3.6px · 细节边缘 2.7px（回贴后 2.1px） · 颜色 ΔE 7（回贴后 6） · 待查：Black_Mat 4.8px"
     draw("result_identity_score")

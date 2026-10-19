@@ -787,24 +787,16 @@ def _prepare(I, D, Da, product_mask, keep_rgba, fit, labels):
             "labels": labels, "fitted": fitted}
 
 
-def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
-                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
-                  matid=None, colour_strength: float = 0.0) -> dict:
-    """1.2.3 细节回贴: paste only small detail regions, each matched to the AI's lighting and
-    each checked against the AI-only image; if nothing survives the AI image is kept as it is.
+def detail_candidates(ai_rgb, detail_rgba, product_mask, keep_rgba=None, fit=None, matid=None, canvas_alpha=None):
+    """1.2.3: the small detail regions of one result (shared by 细节回贴 and 细节修复).
 
-    Candidates: keep-exact parts (plates, badges, logos: keep render) and, with the material-ID
-    pass (``matid`` = (labels, materials)), small detail materials (lamps, rims / spokes, calipers,
-    discs, grille, badges — ``region_class``). Tyres, glass, body paint, mirrors and interior are
-    never pasted. Each 8-connected piece is one region: at most ``MAX_REGION_FRAC`` of the product
-    (rims ``MAX_WHEEL_FRAC``), at least ``EDGE_MARGIN`` × long edge inside the silhouette, feathered
-    inwards only (no pixel outside the region changes → no halo on the tyre / background), lit by
-    ``match_region`` and kept only if ``gate_region`` passes. ``strength`` scales the opacity of
-    non-keep detail parts (keep-exact parts go in fully). ``colour_strength`` > 0 runs 按材质校色
-    afterwards, only when at least one region was kept, and never on body paint / tyres / glass /
-    mirrors / interior.
-
-    Returns dict(image, regions, kept, dropped, discarded, skipped?, fit, keep, colour, timings …)."""
+    Fits / verifies / warps the Blender passes (``_prepare``) and splits the candidate parts
+    (keep-exact plates / badges, lamps, rims, calipers, grille …) into 8-connected regions,
+    largest first. Each region dict carries its report fields (kind, material, px, frac, bbox),
+    ``decision="drop"`` + ``reason`` for size caps, and private crop data (``_sl`` slice pair,
+    ``_R`` region mask, ``_ring`` surrounding ring, ``_keep``) that ``strip_private`` removes.
+    Returns dict(regions, D, Da, keep, labels, materials, hard, excl_mat, prep, fit, align,
+    timings) or dict(skipped, fit, align, timings)."""
     t0 = time.time()
     h, w = ai_rgb.shape[:2]
     L = max(h, w)
@@ -814,13 +806,10 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     labels = materials = None
     if matid is not None:
         labels, materials = matid
-    base = {"image": I.copy(), "regions": [], "kept": 0, "dropped": 0, "keep": {}, "colour": {}, "blend": {},
-            "changed_px": 0, "weight": np.zeros((h, w), np.float32), "keep_mask": None, "occluder": None}
     prep = _prepare(I, D, Da, product_mask, keep_rgba, fit, labels)
     timings = {"fit": round(time.time() - t0, 2)}
     if "skipped" in prep:
-        return dict(base, skipped=prep["skipped"], discarded=True, fit=prep["fit"], align=prep["align"],
-                    timings=dict(timings, total=round(time.time() - t0, 2)))
+        return {"skipped": prep["skipped"], "fit": prep["fit"], "align": prep["align"], "timings": timings}
     D, Da, keep, glass, labels, fitted = (prep[k] for k in ("D", "Da", "keep", "glass", "labels", "fitted"))
     D = denoise_detail(D, L)
     hard = fitted > 0.5
@@ -850,13 +839,8 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     from .layered_output import label_components
     comp, areas = label_components(cand)
     prod_px = float(hard.sum())
-    f = max(1, int(round(L / 900)))
     g = max(3, int(round(RING * L)))
-    out = I.copy()
-    weight = np.zeros((h, w), np.float32)
     regions = []
-    seam_a = seam_c = 0.0
-    timings["prepare"] = round(time.time() - t0, 2)
     for lab_id, area in sorted(areas.items(), key=lambda kv: -kv[1]):
         ys, xs = np.nonzero(comp == lab_id)
         y0, y1 = max(0, ys.min() - g - 3), min(h, ys.max() + g + 4)
@@ -882,22 +866,107 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
         if frac > cap:
             rec.update(decision="drop", reason="区域过大")
             continue
-        ring = dilate(R, g) & ~R & hard[sl]
-        Ac, Dc = I[sl], D[sl]
-        P = match_region(Dc, Ac, R | ring, keep=is_keep, region=R)
-        wr = np.clip((blur(R.astype(np.float32), f, 1) - 0.5) * 2.0, 0, 1) * R
-        wr = wr * (1.0 if is_keep else float(np.clip(strength, 0, 1)))
-        C = Ac * (1 - wr[..., None]) + P * wr[..., None]
-        gate = gate_region(Ac, C, Dc, R, ring, keep=is_keep)
+        rec.update(_sl=sl, _R=R, _ring=dilate(R, g) & ~R & hard[sl], _keep=is_keep)
+    timings["prepare"] = round(time.time() - t0, 2)
+    return {"regions": regions, "D": D, "Da": Da, "keep": keep, "labels": labels, "materials": materials,
+            "hard": hard, "excl_mat": excl_mat, "prep": prep,
+            "fit": {k: v for k, v in prep["fit"].items() if k != "mask"}, "align": prep["align"],
+            "timings": timings}
+
+
+def strip_private(regions):
+    """Drop the crop data ``detail_candidates`` attached (``_sl`` …) so a report is JSON-able."""
+    for rec in regions:
+        for k in [k for k in rec if k.startswith("_")]:
+            del rec[k]
+    return regions
+
+
+def blender_paste_region(I, D, rec, strength, L):
+    """a7055cd small-region Blender paste of one candidate: (pasted crop, weight, gate)."""
+    sl, R, ring, is_keep = rec["_sl"], rec["_R"], rec["_ring"], rec["_keep"]
+    f = max(1, int(round(L / 900)))
+    Ac, Dc = I[sl], D[sl]
+    P = match_region(Dc, Ac, R | ring, keep=is_keep, region=R)
+    wr = np.clip((blur(R.astype(np.float32), f, 1) - 0.5) * 2.0, 0, 1) * R
+    wr = wr * (1.0 if is_keep else float(np.clip(strength, 0, 1)))
+    C = Ac * (1 - wr[..., None]) + P * wr[..., None]
+    return C, wr, gate_region(Ac, C, Dc, R, ring, keep=is_keep)
+
+
+def colour_fix_regions(out, I, D, Da, hard, labels, materials, weight, excl_mat, colour_strength,
+                       canvas_alpha=None):
+    """按材质校色 after a region paste: (image, occluder, report). Never recolours body paint,
+    tyres, glass, mirrors or interior (``excl_mat``) or the pasted regions (``weight``)."""
+    from .material_color import correct_colours
+    L = max(I.shape[:2])
+    r_e = max(2, int(round(0.003 * L)))
+    cw = np.clip(blur(erode(hard, r_e + 1).astype(np.float32), 2, 1), 0, 1) * erode(hard, r_e)
+    cw = cw * np.clip((Da - 0.5) * 2.0, 0, 1)
+    if canvas_alpha is not None:
+        cw = cw * (canvas_alpha > 0.5)
+    occ = occluder_mask(I, D, ((hard) & (Da > 0.5)).astype(np.float32), L, labels=labels)
+    cw = cw * (1.0 - occ)
+    # 1.2.3: never recolour body paint, tyres, glass, mirrors or interior (broad areas whose
+    # look must stay the AI's); trim, plastics, wood, fabric … are still pulled to the model
+    protect = np.maximum(weight, excl_mat.astype(np.float32))
+    cres = correct_colours(np.clip(out, 0, 1), D, labels, materials, cw.astype(np.float32), colour_strength,
+                           model_alpha=Da, protect=protect, occluder=occ)
+    return cres["image"], occ, {"cast": cres["cast"], "regions": cres["regions"], "changed_px": cres["changed_px"],
+                                "strength": round(float(colour_strength), 3)}
+
+
+def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.ndarray,
+                  keep_rgba=None, strength: float = DEFAULT_STRENGTH, canvas_alpha=None, fit=None,
+                  matid=None, colour_strength: float = 0.0) -> dict:
+    """1.2.3 细节回贴: paste only small detail regions, each matched to the AI's lighting and
+    each checked against the AI-only image; if nothing survives the AI image is kept as it is.
+
+    Candidates: keep-exact parts (plates, badges, logos: keep render) and, with the material-ID
+    pass (``matid`` = (labels, materials)), small detail materials (lamps, rims / spokes, calipers,
+    discs, grille, badges — ``region_class``). Tyres, glass, body paint, mirrors and interior are
+    never pasted. Each 8-connected piece is one region: at most ``MAX_REGION_FRAC`` of the product
+    (rims ``MAX_WHEEL_FRAC``), at least ``EDGE_MARGIN`` × long edge inside the silhouette, feathered
+    inwards only (no pixel outside the region changes → no halo on the tyre / background), lit by
+    ``match_region`` and kept only if ``gate_region`` passes. ``strength`` scales the opacity of
+    non-keep detail parts (keep-exact parts go in fully). ``colour_strength`` > 0 runs 按材质校色
+    afterwards, only when at least one region was kept, and never on body paint / tyres / glass /
+    mirrors / interior.
+
+    Returns dict(image, regions, kept, dropped, discarded, skipped?, fit, keep, colour, timings …)."""
+    t0 = time.time()
+    h, w = ai_rgb.shape[:2]
+    I = ai_rgb[..., :3].astype(np.float32)
+    base = {"image": I.copy(), "regions": [], "kept": 0, "dropped": 0, "keep": {}, "colour": {}, "blend": {},
+            "changed_px": 0, "weight": np.zeros((h, w), np.float32), "keep_mask": None, "occluder": None}
+    ctx = detail_candidates(ai_rgb, detail_rgba, product_mask, keep_rgba, fit, matid, canvas_alpha)
+    timings = {"fit": ctx["timings"]["fit"]}
+    if "skipped" in ctx:
+        return dict(base, skipped=ctx["skipped"], discarded=True, fit=ctx["fit"], align=ctx["align"],
+                    timings=dict(timings, total=round(time.time() - t0, 2)))
+    prep, D, Da, keep, labels, materials, hard, excl_mat = (
+        ctx[k] for k in ("prep", "D", "Da", "keep", "labels", "materials", "hard", "excl_mat"))
+    L = max(h, w)
+    out = I.copy()
+    weight = np.zeros((h, w), np.float32)
+    regions = ctx["regions"]
+    seam_a = seam_c = 0.0
+    timings["prepare"] = round(time.time() - t0, 2)
+    for rec in regions:
+        if rec.get("decision") == "drop":
+            continue
+        C, wr, gate = blender_paste_region(I, D, rec, strength, L)
         rec["metrics"] = gate["metrics"]
         if not gate["ok"]:
             rec.update(decision="drop", reason=gate["reason"])
             continue
         rec["decision"] = "keep"
+        sl, R = rec["_sl"], rec["_R"]
         out[sl] = C * R[..., None] + out[sl] * ~R[..., None]
         weight[sl] = np.maximum(weight[sl], wr)
-        seam_a += gate["metrics"]["seam_ai"] * area
-        seam_c += gate["metrics"]["seam_paste"] * area
+        seam_a += gate["metrics"]["seam_ai"] * rec["px"]
+        seam_c += gate["metrics"]["seam_paste"] * rec["px"]
+    strip_private(regions)
     timings["regions"] = round(time.time() - t0 - timings["prepare"], 2)
     kept = [r for r in regions if r.get("decision") == "keep"]
     dropped = [r for r in regions if r.get("decision") == "drop" and r.get("reason") != "太小"]
@@ -916,23 +985,9 @@ def paste_details(ai_rgb: np.ndarray, detail_rgba: np.ndarray, product_mask: np.
     res["keep"]["pasted_px"] = int((weight > 0.5).sum())
     if labels is not None and colour_strength > 0:
         t = time.time()
-        from .material_color import correct_colours
-        r_e = max(2, int(round(0.003 * L)))
-        cw = np.clip(blur(erode(hard, r_e + 1).astype(np.float32), 2, 1), 0, 1) * erode(hard, r_e)
-        cw = cw * np.clip((Da - 0.5) * 2.0, 0, 1)
-        if canvas_alpha is not None:
-            cw = cw * (canvas_alpha > 0.5)
-        occ = occluder_mask(I, D, ((hard) & (Da > 0.5)).astype(np.float32), L, labels=labels)
-        cw = cw * (1.0 - occ)
-        # 1.2.3: never recolour body paint, tyres, glass, mirrors or interior (broad areas whose
-        # look must stay the AI's); trim, plastics, wood, fabric … are still pulled to the model
-        protect = np.maximum(weight, excl_mat.astype(np.float32))
-        cres = correct_colours(np.clip(out, 0, 1), D, labels, materials, cw.astype(np.float32), colour_strength,
-                               model_alpha=Da, protect=protect, occluder=occ)
-        out = cres["image"]
+        out, occ, res["colour"] = colour_fix_regions(out, I, D, Da, hard, labels, materials, weight, excl_mat,
+                                                     colour_strength, canvas_alpha)
         res["occluder"] = occ
-        res["colour"] = {"cast": cres["cast"], "regions": cres["regions"], "changed_px": cres["changed_px"],
-                         "strength": round(float(colour_strength), 3)}
         timings["colour"] = round(time.time() - t, 2)
     out = np.clip(out, 0, 1)
     res["image"] = out

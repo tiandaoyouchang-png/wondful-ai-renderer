@@ -1,4 +1,4 @@
-"""1.2.3 细节回贴 rework: default OFF, only small detail regions, lighting matched per region,
+"""1.2.3 细节回贴 rework (now the Blender-paste fallback of 细节修复, default ON again): only small detail regions, lighting matched per region,
 per-region A/B gate against the AI-only image, whole paste discarded when nothing survives."""
 import re
 import sys
@@ -45,23 +45,23 @@ def _scene(ai_plate, ai_ring, det_plate, det_ring, blur_ai=True):
     return ai.astype(np.float32), det, keep
 
 
-class DefaultOff(unittest.TestCase):
-    def test_property_default_off_and_tooltip_one_line(self):
+class DefaultOn(unittest.TestCase):
+    """1.2.3 细节修复 (user 2026-10-19: 「不要默认关闭」): default on, property id kept."""
+    def test_property_default_on_and_tooltip_one_line(self):
         props = (PKG / "properties.py").read_text("utf-8")
         m = re.search(r"detail_paste: BoolProperty\((.*?)\n    \)", props, re.S)
         self.assertIsNotNone(m)
-        self.assertIn("default=False", m.group(1))
+        self.assertIn("default=True", m.group(1))
+        self.assertIn('name="细节修复"', m.group(1))
         desc = re.search(r'description="([^"]*)"', m.group(1))
         self.assertIsNotNone(desc)
-        self.assertNotIn('"\n', m.group(1).split("description=")[1].split("default")[0].rstrip().rstrip(","))
         self.assertLess(len(desc.group(1)), 70)
-        # 按材质校色 keeps its own default (on), it only acts inside 细节回贴
         self.assertRegex(props, r"detail_colour_fix: BoolProperty\([^)]*default=True")
 
-    def test_operator_fallbacks_are_off(self):
+    def test_operator_fallbacks_are_on(self):
         ops = (PKG / "operators.py").read_text("utf-8")
-        self.assertNotIn('getattr(props, "detail_paste", True)', ops)
-        self.assertIn('getattr(props, "detail_paste", False)', ops)
+        self.assertNotIn('getattr(props, "detail_paste", False)', ops)
+        self.assertEqual(ops.count('getattr(props, "detail_paste", True)'), 2)   # main run + 多角度
 
     def test_colour_fix_does_nothing_when_paste_off(self):
         src = (PKG / "operators.py").read_text("utf-8")
@@ -75,9 +75,6 @@ class DefaultOff(unittest.TestCase):
                                       detail_colour_fix=True, detail_colour_strength=0.7)
         self.assertIsNone(host._detail_spec(None, props))     # no spec -> no paste, no colour fix, no _raw
         self.assertEqual(props.last_detail_note, "")
-        # an unset property (fresh / old .blend) reads as off
-        bare = types.SimpleNamespace(last_detail_note="", product_collection=object())
-        self.assertIsNone(host._detail_spec(None, bare))
 
 
 class RegionFilter(unittest.TestCase):
@@ -215,7 +212,7 @@ class Wiring(unittest.TestCase):
         diag = ui[ui.index('_section(adv, "上次渲染"'):]
         diag = diag[:diag.index('_section(adv, "工具"')]
         self.assertIn("last_detail_note", diag)
-        self.assertIn('detail_note.startswith("细节回贴：")', ui)
+        self.assertIn('detail_note.startswith("细节")', ui)
 
     def test_matid_always_requested_when_paste_on(self):
         ops = (PKG / "operators.py").read_text("utf-8")

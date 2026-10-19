@@ -2428,15 +2428,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             return None
 
     def _detail_spec(self, context, props):
-        """1.2.0 细节回贴 settings for this run, or None. Never raises."""
+        """1.2.3 细节修复 settings for this run (default on), or None. Never raises. The image-edit
+        function (``edit_fn``) is attached once the provider is known (``_attach_detail_edit``)."""
         try:
             props.last_detail_note = ""
             props.last_score_note = ""
-            if not bool(getattr(props, "detail_paste", False)):
+            if not bool(getattr(props, "detail_paste", True)):
                 return None
             coll = getattr(props, "product_collection", None)
             if coll is None:
-                props.last_detail_note = "细节回贴需要先在 ② 选择产品集合，本次已跳过"
+                props.last_detail_note = "细节修复需要先在 ② 选择产品集合，本次已跳过"
                 return None
             work = Path(self._session.viewport_reference).parent
             from .viewport_capture import keep_exact_slots, keep_exact_texts, mirrored_keep_parts
@@ -2462,26 +2463,60 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 "mirrored": mirrored,
                 "work_dir": str(self._session.directory),
                 "reports": [],
+                "edit_fn": None,
+                "vehicle": self._detail_vehicle(props),
             }
         except Exception as exc:
             print(f"[Wondful] 细节回贴设置失败：{exc}")
             return None
 
+    @staticmethod
+    def _detail_vehicle(props):
+        try:
+            from .product_kind import is_vehicle
+            return bool(is_vehicle(props))
+        except Exception:
+            return False
+
+    def _attach_detail_edit(self, props, prefs, provider):
+        """1.2.3 细节修复: crop regeneration on the same provider path as the main render
+        (Codex 直连 edit_image / Antigravity generate_image); None → Blender paste fallback."""
+        spec = getattr(self, "_detail", None)
+        if not spec:
+            return
+        try:
+            from .cli_transport import is_cancellation_requested
+            from .detail_refine import make_edit_fn
+            spec["edit_fn"] = make_edit_fn(
+                provider["id"], model=str(provider.get("model", "") or ""),
+                client_version=str(getattr(props, "codex_cli_version", "") or ""),
+                cli_path=str(provider.get("cli_path", "") or ""),
+                timeout=max(60, min(600, int(provider.get("render_timeout", 300) or 300))),
+                log_dir=str(self._session.directory), cancel_check=is_cancellation_requested,
+                direct_edit=bool(getattr(prefs, "codex_direct_edit", True)),
+                imagegen_enabled=bool(provider.get("imagegen_enabled", True)))
+        except Exception as exc:
+            print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
+            spec["edit_fn"] = None
+
     def _apply_detail_paste(self, props, variant_final, variant_index):
-        """Paste the detail pass onto one finished variant; returns (path to use, raw path or None)."""
+        """Main-thread fallback (the worker could not read the file): 细节检查 + Blender paste of
+        failed parts only — no image-model call on Blender's main thread. Returns (path, raw or None)."""
         spec = getattr(self, "_detail", None)
         if not spec or not Path(spec["detail"]).is_file() or not Path(spec["mask"]).is_file():
             return variant_final, None
         try:
-            from .detail_paste import mirrored_note, paste_file, summarize
+            from .detail_paste import mirrored_note
+            from .detail_refine import refine_file, summarize
             out = self._session.directory / f"output_variant_{variant_index:02d}_detail.png"
             matid = spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else ""
             raw_score = self._identity_score(props, variant_final, spec, matid)
-            rep = paste_file(str(variant_final), spec["detail"], spec["mask"], str(out),
-                             keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
-                             strength=spec["strength"],
-                             matid_path=spec.get("matid", "") if spec.get("matid") and Path(spec["matid"]).is_file() else "",
-                             colour_strength=float(spec.get("colour_strength", 0.0) or 0.0))
+            rep = refine_file(str(variant_final), spec["detail"], spec["mask"], str(out),
+                              keep_path=spec["keep"] if Path(spec["keep"]).is_file() else "",
+                              strength=spec["strength"], matid_path=matid,
+                              colour_strength=float(spec.get("colour_strength", 0.0) or 0.0),
+                              edit_fn=None, work_dir=str(self._session.directory), tag=f"v{variant_index:02d}",
+                              vehicle=bool(spec.get("vehicle", False)))
             spec["reports"].append(rep)
             props.last_detail_note = summarize(rep) + mirrored_note(spec.get("mirrored"))
             if rep.get("skipped"):
@@ -2489,8 +2524,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             self._identity_score(props, out, spec, matid, raw=raw_score, variant_index=variant_index)
             return out, Path(variant_final)
         except Exception as exc:
-            print(f"[Wondful] 细节回贴失败：{exc}")
-            props.last_detail_note = f"细节回贴失败（已保留原图）：{str(exc)[:80]}"
+            print(f"[Wondful] 细节修复失败：{exc}")
+            props.last_detail_note = f"细节修复失败（已保留原图）：{str(exc)[:80]}"
             return variant_final, None
 
     def _identity_score(self, props, image, spec, matid, raw=None, variant_index=None):
@@ -2869,6 +2904,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         props.last_engine_note = ""
         self._layers = self._layers_spec(context, props, prefs, provider)
         self._detail = self._detail_spec(context, props)
+        self._attach_detail_edit(props, prefs, provider)
         product_mask_path = (self._layers or {}).get("mask", "") or (self._detail or {}).get("mask", "")
         if provider["id"] == "codex" and bool(getattr(prefs, "codex_direct_edit", True)):
             from . import codex_direct
@@ -2959,8 +2995,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         context, self._detail["mask"], coll, massing=mcoll):
                     raise RuntimeError("产品遮罩未生成")
             except Exception as exc:
-                print(f"[Wondful] 细节回贴：细节底图渲染失败：{exc}")
-                props.last_detail_note = f"细节回贴已跳过：细节底图渲染失败（{exc}）"
+                print(f"[Wondful] 细节修复：细节底图渲染失败：{exc}")
+                props.last_detail_note = f"细节修复已跳过：细节底图渲染失败（{exc}）"
                 self._detail = None
         if self._layers and not Path(self._layers["mask"]).is_file():
             try:
@@ -3305,11 +3341,14 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 if gate_mask:
                     variant["iou_gate"] = _gate_summary(variant_attempts, len(variant_attempts) >= planned_attempts)
                 if worker_post:
-                    self._phase = f"处理第 {variant_index}/{variant_count} 张（细节回贴 / 还原度）"
+                    self._phase = f"处理第 {variant_index}/{variant_count} 张（细节检查 / 还原度）"
+
+                    def _detail_status(text, _i=variant_index, _n=variant_count):
+                        self._phase = f"处理第 {_i}/{_n} 张 · {text}"
                     try:
                         variant["processed"] = result_worker.finish_variant(
                             str(variant_best_path), variant_index, self._detail, camera_w, camera_h, session_dir,
-                            cancel_check=is_cancellation_requested)
+                            cancel_check=is_cancellation_requested, on_status=_detail_status)
                     except result_worker.Cancelled:
                         raise RuntimeError("任务已取消")
                     except Exception as exc:
@@ -4132,11 +4171,21 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         size = CD.choose_edit_size(W, H, int(getattr(prefs, "long_edge", 2048) or 2048))
-        paste = bool(getattr(props, "detail_paste", False))
+        paste = bool(getattr(props, "detail_paste", True))
         colour_fix = bool(getattr(props, "detail_colour_fix", True))
         strength = float(getattr(props, "detail_paste_strength", 0.8))
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
         env_check = bool(getattr(props, "mv_env_check", True))
+        detail_edit = None
+        if paste:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
+            try:
+                from .cli_transport import is_cancellation_requested as _mv_cancel
+                from .detail_refine import make_edit_fn
+                detail_edit = make_edit_fn("codex", model=model, client_version=client_version,
+                                           log_dir=str(out_dir), cancel_check=_mv_cancel,
+                                           direct_edit=bool(getattr(prefs, "codex_direct_edit", True)))
+            except Exception as exc:
+                print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
                     "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name}
         self._phase = "多角度场景一致：准备完成"
@@ -4214,7 +4263,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 work.mkdir(exist_ok=True)
                 spec = {"detail": v["files"]["detail"], "mask": v["files"]["mask"], "keep": v["files"]["keep"],
                         "matid": v["files"]["matid"], "strength": strength,
-                        "colour_strength": colour_strength, "work_dir": str(work), "mirrored": []}
+                        "colour_strength": colour_strength, "work_dir": str(work), "mirrored": [],
+                        "edit_fn": detail_edit, "vehicle": vehicle}
                 matid = spec["matid"] if spec["matid"] and Path(spec["matid"]).is_file() else ""
                 tries = []
                 for n in range(1, MV.MAX_CALLS + 1):

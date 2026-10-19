@@ -274,7 +274,7 @@ class WiringTest(unittest.TestCase):
         init = (PKG / "__init__.py").read_text("utf-8")
         vc = (PKG / "viewport_capture.py").read_text("utf-8")
         self.assertIn("detail_paste: BoolProperty", props)
-        self.assertRegex(props, r"detail_paste: BoolProperty\([^)]*default=False")
+        self.assertRegex(props, r"detail_paste: BoolProperty\([^)]*default=True")   # 1.2.3 细节修复: on again
         self.assertIn("detail_paste_strength: FloatProperty", props)
         self.assertIn("default=0.8", props)
         adv = ui.index("# ---- 高级")
