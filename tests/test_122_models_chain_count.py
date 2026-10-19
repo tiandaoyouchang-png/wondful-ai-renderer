@@ -61,7 +61,7 @@ class MergeTests(unittest.TestCase):
     def test_codex_refresh_uses_merged(self):
         src = (PKG / "model_catalog.py").read_text()
         self.assertIn("return discover_codex_models_merged(cli, cwd=str(cwd))", src)
-        self.assertIn('"version": "1.2.3"', src)
+        self.assertIn('"version": "1.2.4"', src)
 
 
 FAKE_CODEX = textwrap.dedent(r'''

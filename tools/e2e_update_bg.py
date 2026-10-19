@@ -110,7 +110,7 @@ def main():
     target = UO.ADDON_DIR
     print("loaded from", target, "version", UO.local_version())
     check(str(target).startswith(str(OUT)), f"add-on installed inside the sandbox dir ({target})")
-    check(UO.local_version() == "1.2.3", "running version is 1.2.3")
+    check(UO.local_version() == "1.2.4", "running version is 1.2.4")
 
     # duplicates: an older manually-unzipped copy beside it + one in the extensions user repo
     dup1 = target.parent / "Wondful-AI-Renderer-Blender-1.2.2"
