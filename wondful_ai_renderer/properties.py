@@ -940,6 +940,11 @@ class WONDFUL_AISettings(PropertyGroup):
                                             "不勾选时不动任何相机，体块朝向跟随当前场景相机")
     sb_correct: BoolProperty(name="自动校正一轮", default=False,
                              description="搭好后从参考机位渲染粗模、和照片比对吻合度，再让 AI 修正一轮；吻合度变高才采用（多 1–2 分钟）")
+    # 1.2.5 精确模式: measure camera + depth locally (MoGe-2, CPU) and pin the blocks to it; off = unchanged flow
+    sb_precise: BoolProperty(name="精确模式", default=False,
+                             description="在本机用深度模型测量参考图：相机（高度、俯仰、视角）用实测值，每个体块的距离和"
+                                         "宽高按实测深度对齐。第一次使用会下载约 155 MB（深度模型 + 运行库），参考图不上传；"
+                                         "装不上时自动改用普通模式")
     last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
     # live stage progress of one run (see sb_progress); elapsed seconds are written by the modal timer
     sb_stage: StringProperty(name="场景粗模阶段", default="", options={"SKIP_SAVE"})

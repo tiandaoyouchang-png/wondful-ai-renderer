@@ -1276,6 +1276,45 @@ def _sb_prepare_png(src, dst, long_edge):
     return str(dst), (w, h)
 
 
+PRECISE_CORRECTION = ("PRECISE MODE: the camera above was MEASURED by a depth model; keep camera height_m, pitch_deg, roll_deg, "
+                      "hfov_deg and horizon_y_frac exactly. After your answer the add-on re-pins every block's distance and "
+                      "size to the measured depth, so spend the correction on shapes, extents, missing elements and the skyline.")
+
+
+def _sb_precise_prepare(sb, rgb, frame, geo_path, need_install, cancelled):
+    """Worker thread, 精确模式: install on first use, then measure the photo. Sets ``sb['geo']`` (or
+    ``sb['precise_error']`` → normal mode). ``sb['stage_req']`` asks the modal timer to show a stage.
+    A cancel during the download raises (the operator's cancel path ends the run)."""
+    from . import precise_setup as PS
+    from . import precise_depth as PD
+    from . import sb_progress as SP
+    try:
+        if geo_path:
+            sb["stage_req"] = SP.DEPTH
+            sb["geo"] = PD.load_geo(bpy.path.abspath(geo_path) if bpy else geo_path, frame)
+            return
+        if need_install:
+            sb["stage_req"] = SP.INSTALL
+
+            def prog(frac, text):
+                sb["install_frac"] = frac
+                sb["install_text"] = text
+            PS.ensure_installed(progress=prog, cancel=cancelled)
+        sb["stage_req"] = SP.DEPTH
+        ort = PS.import_onnxruntime()
+        sb["geo"] = PD.infer(rgb, PS.model_path(), ort=ort, cancel=cancelled)
+    except PS.PreciseInstallError as exc:
+        if exc.cancelled or cancelled():
+            raise RuntimeError("已取消") from exc
+        sb["precise_error"] = str(exc)
+        print("[Wondful] 精确模式不可用，改用普通模式：", exc, *getattr(exc, "details", []))
+    except Exception as exc:
+        if cancelled():
+            raise
+        sb["precise_error"] = f"深度测量失败：{str(exc)[:100]}"
+        print("[Wondful] 精确模式深度测量失败，改用普通模式：\n" + traceback.format_exc())
+
+
 class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     """1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
     bl_idname = "wondful.scene_blockout_build"
@@ -1287,6 +1326,8 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
 
     analysis_json: StringProperty(name="分析结果", description="（测试 / 离线）直接用这个 JSON 文件，不调用 AI",
                                   default="", options={"HIDDEN", "SKIP_SAVE"})
+    precise_geo: StringProperty(name="深度测量结果", description="（测试 / 离线）精确模式直接用这个已记录的深度测量（.npz），不运行深度模型",
+                                default="", options={"HIDDEN", "SKIP_SAVE"})
 
     def execute(self, context):
         from . import scene_blockout as SB
@@ -1313,10 +1354,16 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                 self.report({"ERROR"}, msg)
                 return {"CANCELLED"}
         correct = bool(props.sb_correct) and not cached
-        ids = SP.stages(correct, bool(props.sb_set_camera))
+        precise = bool(getattr(props, "sb_precise", False))
+        geo_path = (self.precise_geo or "").strip()
+        need_install = False
+        if precise and not geo_path:
+            from . import precise_setup as PS
+            need_install = not PS.status()["ready"]
+        ids = SP.stages(correct, bool(props.sb_set_camera), precise=precise, install=need_install)
         t0 = time.time()
         self._sb = {"t0": t0, "ids": ids, "stage_id": SP.READ, "stage_t0": t0, "cached": bool(cached),
-                    "pending": None, "drawn": -1}
+                    "pending": None, "drawn": -1, "precise": precise, "geo": None, "precise_rounds": []}
         props.sb_stage_ids = SP.encode(ids)
         props.sb_stage = SP.READ
         session = create_session()
@@ -1346,14 +1393,27 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
         self._sb["content"] = content
         self._estimated_total = 8.0 if cached else 240.0
+        rgb = None
+        if precise and not geo_path:
+            from .png_io import read_png
+            rgb = read_png(upload)[..., :3]
         _status(props, "BLOCKOUT")
-        self._set_stage(props, SP.ANALYZE)
+        self._set_stage(props, (SP.INSTALL if need_install else SP.DEPTH) if precise else SP.ANALYZE)
+        sb = self._sb
 
         def job():
             from .cli_transport import is_cancellation_requested as cancelled
+            full = content
+            if precise:
+                _sb_precise_prepare(sb, rgb, frame, geo_path, need_install, cancelled)
+                if sb.get("geo") is not None:
+                    from . import precise_depth as PD
+                    full = list(content) + [{"type": "input_text", "text": PD.depth_block(sb["geo"], frame)}]
+                    sb["content"] = full
+                sb["stage_req"] = SP.ANALYZE
             if cached:
                 return json.loads(Path(bpy.path.abspath(cached)).read_text(encoding="utf-8"))
-            return SB.call_analysis(content, effort=SB.EFFORT_FIRST, model=model, client_version=client_version,
+            return SB.call_analysis(full, effort=SB.EFFORT_FIRST, model=model, client_version=client_version,
                                     cancel_check=cancelled)
 
         if not self._start_thread(context, job):
@@ -1376,11 +1436,19 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import sb_progress as SP
         sb = self._sb
         now = time.time()
+        req = sb.pop("stage_req", None)
+        if req and req != sb["stage_id"] and req in sb["ids"]:   # the 精确模式 worker moved on (安装 → 测量 → 分析)
+            sb["stage_id"], sb["stage_t0"] = req, now
+            props.sb_stage = req
+            force = True
         elapsed = int(now - sb["t0"])
         props.sb_elapsed = elapsed
-        props.progress = SP.fraction(sb["ids"], sb["stage_id"], now - sb["stage_t0"], cached=sb["cached"])
+        inner = sb.get("install_frac") if sb["stage_id"] == SP.INSTALL else None
+        props.progress = SP.fraction(sb["ids"], sb["stage_id"], now - sb["stage_t0"], cached=sb["cached"], inner=inner)
         props.eta_seconds = 0
         props.task_phase = "场景粗模：" + SP.status_text(sb["stage_id"], elapsed)
+        if sb["stage_id"] == SP.INSTALL and sb.get("install_text"):
+            props.task_phase += " · " + sb["install_text"]
         if force or elapsed != sb.get("drawn"):
             sb["drawn"] = elapsed
             _redraw_all()
@@ -1464,6 +1532,12 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
         render = read_png(str(path)).astype("float32")
         sc = SB.fit_score(photo, render)
+        pr = self._sb.get("precise_rounds") or []
+        k = 1 if tag == "r2" else 0
+        if len(pr) > k and pr[k].get("err_after_pct") is not None:
+            sc["dist3d_err_pct"] = pr[k]["err_after_pct"]      # 3D: median distance error vs the measured depth
+        print(f"[Wondful] 场景粗模 {tag}：2D 吻合度 {sc['score']:.3f}（skyIoU {sc.get('sky_iou', '-')} · edgeF "
+              f"{sc.get('edge_f')}）" + (f" · 3D 距离误差 {sc['dist3d_err_pct']}%" if "dist3d_err_pct" in sc else ""))
         import numpy as np
         flat = render[..., :3] * (render[..., 3:4] / 255.0) + 255.0 * (1.0 - render[..., 3:4] / 255.0)
         write_png(str(d / f"scene_preview_{tag}_flat.png"), flat.clip(0, 255).astype(np.uint8))
@@ -1477,7 +1551,16 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         info["scores"] = self._sb["scores"]
         info["round"] = round_no
         info["cached"] = self._sb["cached"]
+        pr = self._sb.get("precise_rounds") or []
+        if pr:
+            info["precise"] = dict(pr[min(len(pr), max(1, round_no)) - 1])
+            info["precise"].pop("items", None)
+            if info["precise"].get("warning"):
+                info.setdefault("notes", []).append(info["precise"]["warning"])
+        elif self._sb.get("precise"):
+            info["precise_fallback"] = self._sb.get("precise_error") or "深度测量没有完成"
         props.last_sb_note = SB.summary(info)
+        print("[Wondful] " + props.last_sb_note)
         try:
             Path(self._sb["session"], "scene_blockout_info.json").write_text(
                 json.dumps(info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -1523,6 +1606,19 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                         json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception:
                     pass
+                if sb.get("geo") is not None:
+                    # 精确模式: measured camera replaces the LLM camera; blocks pinned to the measured depth
+                    from . import precise_depth as PD
+                    data, pinfo = PD.precise_pass(data, sb["geo"], sb["frame"])
+                    sb["precise_rounds"].append(pinfo)
+                    print(f"[Wondful] 精确模式 r{sb['stage']}：相机 {pinfo['camera']} · 对齐 {pinfo['snapped']} 个体块 · "
+                          f"3D 距离误差 {pinfo['err_before_pct']}% → {pinfo['err_after_pct']}%")
+                    try:
+                        Path(sb["session"], f"scene_precise_r{sb['stage']}.json").write_text(
+                            json.dumps({"info": pinfo, "geo_camera": sb["geo"]["cam"]}, ensure_ascii=False, indent=1,
+                                       default=str), encoding="utf-8")
+                    except Exception:
+                        pass
                 sb["data"] = data
                 self._then(props, SP.BUILD if sb["stage"] == 1 else SP.REBUILD, self._step_build)
                 return {"RUNNING_MODAL"}
@@ -1599,6 +1695,8 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         data = sb["rounds"][0]
         content = SB.correction_content(sb["content"], data, {k: v for k, v in sc.items() if k != "hints"},
                                         sc.get("hints", []), CD.data_url(flat)[0], CD.data_url(ov)[0])
+        if sb.get("geo") is not None:
+            content.append({"type": "input_text", "text": PRECISE_CORRECTION})
         model, cv = sb["model"], sb["client_version"]
 
         def job():

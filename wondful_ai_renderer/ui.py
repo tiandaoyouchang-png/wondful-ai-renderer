@@ -887,6 +887,12 @@ def _draw_blockout_step(layout, context, props, busy, connected, is_antigravity,
     row = col.row(align=True)
     row.prop(props, "sb_set_camera", text="同时设置相机")
     row.prop(props, "sb_correct", text="自动校正一轮")
+    # 1.2.5 精确模式 (default off): local depth model measures camera + distances
+    col.prop(props, "sb_precise", text="精确模式（本机测深度）")
+    if getattr(props, "sb_precise", False) and not running:
+        from . import precise_setup as PS
+        if not PS.cached_status()["ready"]:
+            _hint(col, f"首次使用下载约 {PS.APPROX_MB} MB；参考图不上传", cells, 1)
     failed = (getattr(props, "sb_failed_stage", "") or "") if not running else ""
     if running or failed:
         _draw_sb_progress(card, props, running, failed, SP)

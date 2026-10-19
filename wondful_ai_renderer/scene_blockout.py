@@ -680,8 +680,21 @@ def summary(info) -> str:
         bits.append(f"吻合度 {sc[0]:.3f}")
     if info.get("cached"):
         bits.append("用已保存的分析")
+    pr = info.get("precise")
+    if pr:
+        c = pr.get("camera") or {}
+        txt = "精确模式"
+        if c.get("hfov_deg") is not None:
+            txt += f"（实测视角 {float(c['hfov_deg']):.0f}°）"
+        if pr.get("err_after_pct") is not None:
+            txt += f" · 3D 距离误差 {pr['err_after_pct']}%"
+            if pr.get("err_before_pct") is not None:
+                txt += f"（对齐前 {pr['err_before_pct']}%）"
+        bits.append(txt)
     note = " · ".join(bits)
     warn = [w for w in info.get("notes", []) if w]
+    if info.get("precise_fallback"):
+        warn.insert(0, "精确模式不可用，已用普通模式（" + str(info["precise_fallback"])[:60] + "）")
     if warn:
         note += " · 注意：" + "；".join(warn[:2])
     return note

@@ -595,6 +595,30 @@ def main():
     props.sb_image_path = ref_png
     props.last_sb_note = ""
     check_six_steps("scene_blockout_ready", draw("scene_blockout_ready"))
+    # 1.2.5 精确模式: a small checkbox in ④ (default off); on + not installed → one download hint
+    if "prop sb_precise" not in "\n".join(step4(draw("scene_blockout_precise_off"))) or props.sb_precise:
+        problems.append("sb precise: ④ has no 精确模式 checkbox, or it is on by default")
+    from wondful_ai_renderer import precise_setup as _PS
+    os.environ["WONDFUL_PRECISE_DIR"] = os.path.join(tmp, "precise_empty")
+    _PS._CACHE["v"] = None
+    props.sb_precise = True
+    text4 = "\n".join(step4(draw("scene_blockout_precise_on")))
+    if not _PS.status()["ready"] and "首次使用下载约" not in text4:
+        problems.append("sb precise on (not installed): ④ should show the first-use download hint")
+    from wondful_ai_renderer import sb_progress as _SP
+    for stage in (_SP.INSTALL, _SP.DEPTH):
+        ids = _SP.stages(True, True, precise=True, install=True)
+        props.sb_stage_ids = _SP.encode(ids)
+        props.status, props.sb_stage, props.sb_elapsed = "BLOCKOUT", stage, 12
+        props.progress = _SP.fraction(ids, stage, 12, inner=0.4)
+        props.task_phase = "场景粗模：" + _SP.status_text(stage, 12)
+        text4 = "\n".join(step4(draw("scene_blockout_precise_" + stage.lower())))
+        if _SP.label(stage) not in text4 or "op wondful.cancel_task" not in text4:
+            problems.append(f"sb precise running {stage}: stage label or 取消 missing in ④")
+    props.status, props.sb_stage, props.sb_stage_ids, props.progress, props.task_phase = "IDLE", "", "", 0.0, ""
+    props.sb_precise = False
+    os.environ.pop("WONDFUL_PRECISE_DIR", None)
+    _PS._CACHE["v"] = None
     import json as _json
     from pathlib import Path as _P
     fixture = _P(__file__).resolve().parents[1] / "tests" / "fixtures" / "scene_blockout" / "desert_v3.json"
