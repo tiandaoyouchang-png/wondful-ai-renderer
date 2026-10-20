@@ -1027,6 +1027,13 @@ def _draw_multiview(adv, context, props, busy):
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "mv_colour_match", text="统一调色")
+    # 1.2.5 细节粗模 (needs ④ 精确模式)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "sb_detail_carrier", text="细节粗模投影")
+    sub = row.row(align=True)
+    sub.enabled = not busy and bool(getattr(props, "sb_detail_carrier", True))
+    sub.prop(props, "sb_detail_clay", text="白模也用")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:

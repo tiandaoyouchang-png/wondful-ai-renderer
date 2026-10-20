@@ -1081,7 +1081,10 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
             "camera": bool(cam_obj), "camera_name": cam_obj.name if cam_obj else "", "lens": round(b.lens, 3),
             "cam_world": [list(r) for r in cam_world], "yaw_deg": round(math.degrees(yaw), 2), "frame": list(frame),
             "labels": [lab for lab, _o in b.groups], "notes": notes, "scene_note": note,
-            "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot)}
+            "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot),
+            # 1.2.5 细节粗模: analysis → world matrix, camera height in the local frame, product spot + pad
+            "world": [list(r) for r in world], "cam_local_z": float(b.CAMPOS.z), "spot_local": [sx, sy, zs],
+            "pad_radius": float(pad[2]) if pad else 2.5}
 
 
 # ------------------------------------------------------------------------------------------- preview render

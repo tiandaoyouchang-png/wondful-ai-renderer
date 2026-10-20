@@ -1560,7 +1560,22 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                 info.setdefault("notes", []).append(info["precise"]["warning"])
         elif self._sb.get("precise"):
             info["precise_fallback"] = self._sb.get("precise_error") or "深度测量没有完成"
-        props.last_sb_note = SB.summary(info)
+        detail_line = ""
+        if self._sb.get("geo") is not None and info.get("world") and bool(getattr(props, "sb_detail_carrier", True)):
+            # 1.2.5 细节粗模: measured near / mid-ground carrier for 多角度场景一致 (hidden; far field stays LLM)
+            from . import detail_blockout as DB
+            try:
+                try:
+                    from . import precise_depth as PD
+                    PD.save_geo(str(Path(self._sb["session"], "precise_geo.npz")), self._sb["geo"])
+                except Exception:
+                    pass
+                info["detail"] = DB.build_in_blender(context, info, self._sb["geo"], scene_kind=info.get("kind", "outdoor"))
+            except Exception as exc:
+                print("[Wondful] 细节粗模失败：\n" + traceback.format_exc())
+                info["detail"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
+            detail_line = DB.summary_text(info["detail"])
+        props.last_sb_note = SB.summary(info) + (f" · {detail_line}" if detail_line else "")
         print("[Wondful] " + props.last_sb_note)
         try:
             Path(self._sb["session"], "scene_blockout_info.json").write_text(
@@ -4385,6 +4400,12 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         # 1.2.3: the pool (passes, prompts, pool.json, accepted views reused next time) is internal → hidden folder
         pool = internal_dir(out_dir, "多角度场景一致", f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}")
         massing_coll = _find_massing(scene, props)
+        # 1.2.5 细节粗模: project onto the measured detail blockout (when ④ 精确模式 built one)
+        detail_mode = ""
+        if bool(getattr(props, "sb_detail_carrier", True)):
+            from .detail_blockout import find_carrier as _find_carrier
+            if _find_carrier() is not None:
+                detail_mode = "clay" if bool(getattr(props, "sb_detail_clay", False)) else "carrier"
         made, wlog = [], {}
         old_cam = scene.camera
         views = {}
@@ -4404,7 +4425,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                                       crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
                                       terrain=settings_from_props(props), mask_path=files["mask"], massing=massing_coll,
                                       detail_path=files["detail"], keep_path=files["keep"], matid_path=files["matid"],
-                                      geometry_prefix=str(pre), geometry_size=(ww, wh))
+                                      geometry_prefix=str(pre), geometry_size=(ww, wh), detail=detail_mode)
                 if not ok or not LAST_CLAY_INFO.get("geometry") or not Path(files["mask"]).is_file():
                     raise RuntimeError(f"相机 {cam.name} 的白模 / 几何通道渲染失败")
                 m = read_png(files["mask"]).astype(np.float32)
@@ -4417,7 +4438,10 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                         blocked, hidden = MV.obstacle(context, cam, coll)
                     except Exception as exc:
                         print(f"[Wondful] 多角度场景一致：遮挡检查失败：{exc}")
+                if detail_mode and LAST_CLAY_INFO.get("detail_blockout") != "carrier":
+                    print(f"[Wondful] 多角度场景一致：{cam.name} 没用上细节粗模（{LAST_CLAY_INFO.get('detail_blockout') or '无'}）")
                 views[cam.name] = {"name": cam.name, "cam": rec, "files": files, "prefix": str(pre),
+                                   "geometry": "detail" if LAST_CLAY_INFO.get("detail_blockout") == "carrier" else "llm",
                                    "massing_text": str(LAST_CLAY_INFO.get("massing_text", "") or ""),
                                    "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
         except Exception as exc:
@@ -4431,6 +4455,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 context.view_layer.update()
             except Exception:
                 pass
+        geo_kind = views[master.name].get("geometry", "llm")      # 1.2.5: "detail" = projected onto the 细节粗模
+        if geo_kind == "detail":
+            print("[Wondful] 多角度场景一致：投影承载面 = 细节粗模" + ("（白模也用细节粗模）" if detail_mode == "clay" else ""))
         centre = None
         b = MV.product_bounds(coll)
         if b is not None:
@@ -4500,10 +4527,12 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 raise RuntimeError("主视角图无法读取（请用 PNG）")
             entry_m = {"name": master_name, "cam": mv["cam"], "pos": Path(mv["prefix"] + "_pos.npy").name,
                        "nrm": Path(mv["prefix"] + "_nrm.npy").name, "mask": Path(mv["prefix"] + "_maskw.npy").name,
-                       "image": master_png.name, "master": True}
+                       "image": master_png.name, "master": True, "geometry": geo_kind}
             data = MV.read_pool(pool)
+            # 1.2.5: an earlier view is reused only when its passes came from the same geometry (细节粗模 or not)
             reused = [e for e in data.get("views", []) if not e.get("master") and e["name"] not in views
-                      and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()]
+                      and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()
+                      and e.get("geometry", "llm") == geo_kind]
             light, light_note = None, ""
             lp = pool / MV.LIGHT_FILE
             key = MV.file_md5(master_png)
@@ -4650,7 +4679,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 res["raw"] = best["file"]
                 res["ok"] = True
                 entry = {"name": rec["name"], "cam": rec, "pos": Path(pre + "_pos.npy").name, "nrm": Path(pre + "_nrm.npy").name,
-                         "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False}
+                         "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False,
+                         "geometry": geo_kind}
                 accepted.append(entry)
                 sources.append(MV.load_view(pool, entry))
                 MV.write_pool(pool, {"master": master_name, "views": accepted})

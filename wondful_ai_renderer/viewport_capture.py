@@ -1516,7 +1516,7 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
                      keep_path: str = "", matid_path: str = "", geometry_prefix: str = "",
-                     geometry_size=None) -> bool:
+                     geometry_size=None, detail: str = "") -> bool:
     """Render the Scene Camera with a temporary floor, sun and light-gray world.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
@@ -1528,6 +1528,10 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     matte grey-blue material (their own materials come back afterwards), cast shadows, rest on a
     sculpted floor, and never count as product; ``LAST_CLAY_INFO["massing_text"]`` describes
     where each one sits in the frame for the prompt.
+
+    ``detail`` (1.2.5 细节粗模, needs a carrier built by ④ 精确模式): ``"carrier"`` renders the geometry passes
+    (多角度 projection) with the measured detail blockout instead of the near / mid LLM blocks and the clay floor;
+    ``"clay"`` also renders the clay still with it. Ignored without a carrier or with a crest / custom ground.
     """
     scene = context.scene
     require_scene_camera(context)
@@ -1698,14 +1702,31 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             render.image_settings.color_mode = "RGB"
         except Exception:
             pass
-        _render_still(scene)
+        detail = (detail or "").lower()
+        if detail and (ground_mode in {"CREST", "CUSTOM"} or massing is None):
+            LAST_CLAY_INFO["detail_blockout"] = "skipped: crest / custom ground" if massing is not None else ""
+            detail = ""
+        from .detail_blockout import detail_pass
+        floor_objs = [blk for kind, blk in created if kind == "obj" and blk.type == "MESH"]
+        with detail_pass(massing if detail == "clay" else None, extra_hide=floor_objs) as dp:
+            if dp.active:
+                context.view_layer.update()
+            _render_still(scene)
+        if dp.active:
+            context.view_layer.update()
+            LAST_CLAY_INFO["detail_clay"] = True
         ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
         if ok and geometry_prefix:
             # 1.2.3 多角度场景一致: world position + normal passes with the same floor / pose / blocks
             try:
                 from .multiview import render_geometry_now
                 gw, gh = geometry_size or (width, height)
-                LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
+                with detail_pass(massing if detail else None, extra_hide=floor_objs) as dp:
+                    if dp.active:
+                        context.view_layer.update()
+                    LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
+                    LAST_CLAY_INFO["detail_blockout"] = "carrier" if dp.active else LAST_CLAY_INFO.get("detail_blockout", "")
+                context.view_layer.update()
             except Exception as exc:
                 LAST_CLAY_INFO["geometry"] = False
                 print(f"[Wondful] 多角度场景一致：几何通道失败：{exc}")

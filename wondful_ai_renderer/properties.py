@@ -969,6 +969,13 @@ class WONDFUL_AISettings(PropertyGroup):
                              description="在本机用深度模型测量参考图：相机（高度、俯仰、视角）用实测值，每个体块的距离和"
                                          "宽高按实测深度对齐。第一次使用会下载约 155 MB（深度模型 + 运行库），参考图不上传；"
                                          "装不上时自动改用普通模式")
+    # 1.2.5 细节粗模 (V3 phase 1, 高级 › 多角度): measured near / mid-ground geometry, built only with 精确模式
+    sb_detail_carrier: BoolProperty(name="细节粗模投影", default=True,
+                                    description="精确模式下，④ 额外按实测深度搭一份近中景细节粗模（地面高度场、建筑表皮 + 体积、"
+                                                "车辆、树冠；远山仍用 AI 远景带），隐藏不显示。多角度场景一致把主视角图投影到它上面，"
+                                                "换角度时照片贴得更准；没有精确模式时不起作用")
+    sb_detail_clay: BoolProperty(name="白模也用细节粗模", default=False,
+                                 description="多角度场景一致发给生图模型的白模也换成细节粗模（默认只用于投影，白模保持普通粗模）")
     last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
     # live stage progress of one run (see sb_progress); elapsed seconds are written by the modal timer
     sb_stage: StringProperty(name="场景粗模阶段", default="", options={"SKIP_SAVE"})

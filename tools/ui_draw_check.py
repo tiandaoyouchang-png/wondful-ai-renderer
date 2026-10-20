@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模 as main-flow step ④（可选）, six step cards).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模 as main-flow step ④（可选）, six step cards; 1.2.5 细节粗模 toggles).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -837,6 +837,15 @@ def main():
     props.ui_adv_tab = "MULTIVIEW"
     if "mv_colour_match" not in "\n".join(draw("multiview_colour_match")):
         problems.append("多角度: 统一调色 toggle missing")
+    # 1.2.5 细节粗模: 细节粗模投影 (default on) + 白模也用 (default off, greyed when 投影 is off)
+    rec = "\n".join(draw("multiview_detail_on"))
+    if "sb_detail_carrier" not in rec or "sb_detail_clay" not in rec:
+        problems.append("多角度: 细节粗模 toggles missing")
+    if not props.sb_detail_carrier or props.sb_detail_clay:
+        problems.append("多角度: 细节粗模 defaults wrong (投影 on, 白模 off)")
+    props.sb_detail_carrier = False
+    draw("multiview_detail_off")
+    props.sb_detail_carrier = True
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"
