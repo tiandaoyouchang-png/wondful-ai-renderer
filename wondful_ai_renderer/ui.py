@@ -1044,6 +1044,12 @@ def _draw_multiview(adv, context, props, busy):
     sub.enabled = not busy and bool(getattr(props, "sb_detail_carrier", True))
     sub.prop(props, "sb_detail_clay", text="白模也用")
     sub.prop(props, "sb_detail_skyline", text="远山剪影")
+    # 1.2.5 场景补全 refinements (default on; 空间三态 / 近密远疏 take effect at the next ④ build)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "sb_free_space", text="空间三态")
+    row.prop(props, "sb_lod_bands", text="近密远疏")
+    row.prop(props, "sb_seam_blend", text="接缝过渡")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:

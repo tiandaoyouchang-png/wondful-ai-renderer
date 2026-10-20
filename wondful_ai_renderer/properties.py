@@ -975,6 +975,19 @@ class WONDFUL_AISettings(PropertyGroup):
                               description="搭场景粗模时按参考图里看到的街道推测看不到的部分并补上体块：道路按实测方向和宽度继续、"
                                           "路沿，两侧房屋按实测的退线、高度、进深和间距延续（只有一侧时按对侧推测），树篱 / 树 / 电杆"
                                           "按看到的节奏延续；只放在参考相机看不到、也不挡产品周围的位置。换角度渲染时背面不再是空地 / 白墙")
+    # 1.2.5 场景补全 · Building Rome ideas (arXiv 2610.08790, idea only): default on, each can be switched back off
+    # 空间三态 default OFF (2026-10-21 orbit test: free-space area −48 %, 216° geometry 5 %→17 %, but the 216°
+    # 错位 ΔE vs the master 8.3 → 25.6 — the carved hedge exposes ground only an AI view has seen)
+    sb_free_space: BoolProperty(name="空间三态", default=False,
+                                description="（试验，默认关）精确模式下按实测深度把空间分成「空 / 可见 / 被挡住」：相机视线穿过的空地上"
+                                            "不放任何推测体块，实测建筑 / 车辆 / 墙按规则补的进深伸进空地时截短（少长出乱墙、树篱）；"
+                                            "街景环绕测试里部分角度与主视角色差变大，所以默认关")
+    sb_lod_bands: BoolProperty(name="近密远疏", default=True,
+                               description="细节粗模和场景补全按到产品的距离分带：近处实测表皮更细、窗户优先给近处；"
+                                           "远处房屋合并成大块、不加窗和门前树篱、路沿分段更长（远山不变）")
+    sb_seam_blend: BoolProperty(name="接缝过渡", default=True,
+                                description="多角度投影时，补全填色和主视角投影之间留重叠带：填色按相邻照片调色并交叉过渡；"
+                                            "紧挨实测房屋的推测房屋沿用它的檐口高度和退线再渐变到街道节奏")
     # 1.2.5 细节粗模 (V3 phase 1, 高级 › 多角度): measured near / mid-ground geometry, built only with 精确模式
     sb_detail_carrier: BoolProperty(name="细节粗模投影", default=True,
                                     description="精确模式下，④ 额外按实测深度搭一份近中景细节粗模（地面高度场、建筑表皮 + 体积、"

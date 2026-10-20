@@ -1170,10 +1170,94 @@ def style_fill(vk, cls, style, patches, layout):
     return out, have
 
 
-def apply_fill(env, cover, fill, have, alpha=FILL_ALPHA):
-    """Uncovered pixels take the style fill: returns (env', cover', filled share mask)."""
+SEAM_BAND_PX = 8           # 重叠衔接: overlap band on each side of the projected / filled boundary (work pixels)
+SEAM_GAIN = (0.75, 1.33)   # per-class colour gain range that pulls the fill toward the projected photo
+SEAM_FAR_KEEP = 0.5        # share of that gain kept far from the boundary (full at the seam)
+
+
+def _grow(mask, steps):
+    """Integer 4-neighbour distance (0 inside ``mask``) up to ``steps``; beyond = steps + 1."""
+    d = np.where(mask, 0, steps + 1).astype(np.int16)
+    cur = mask.copy()
+    for k in range(1, steps + 1):
+        nb = cur.copy()
+        nb[1:] |= cur[:-1]
+        nb[:-1] |= cur[1:]
+        nb[:, 1:] |= cur[:, :-1]
+        nb[:, :-1] |= cur[:, 1:]
+        new = nb & ~cur
+        if not new.any():
+            break
+        d[new] = k
+        cur = nb
+    return d
+
+
+def _extend(img, mask, steps):
+    """Push ``img`` outward from ``mask`` by ``steps`` pixels (mean of the already-reached 4-neighbours)."""
+    out = img.copy()
+    cur = mask.copy()
+    for _k in range(steps):
+        acc = np.zeros_like(out)
+        cnt = np.zeros(cur.shape, np.float32)
+        for sl_dst, sl_src in (((slice(1, None),), (slice(None, -1),)), ((slice(None, -1),), (slice(1, None),)),
+                               ((slice(None), slice(1, None)), (slice(None), slice(None, -1))),
+                               ((slice(None), slice(None, -1)), (slice(None), slice(1, None)))):
+            m = cur[sl_src].astype(np.float32)
+            acc[sl_dst] += out[sl_src] * m[..., None]
+            cnt[sl_dst] += m
+        new = (cnt > 0) & ~cur
+        if not new.any():
+            break
+        out[new] = acc[new] / cnt[new][:, None]
+        cur = cur | new
+    return out
+
+
+def apply_fill(env, cover, fill, have, alpha=FILL_ALPHA, cls=None, seam=False, band=SEAM_BAND_PX):
+    """Uncovered pixels take the style fill: returns (env', cover', filled share mask).
+
+    ``seam`` (重叠衔接, idea from Building Rome arXiv 2610.08790): instead of butting the fill against the projected
+    photo, (1) the fill of each surface class is colour-matched to the photo on the projected side of the boundary
+    (gain fading to SEAM_FAR_KEEP away from it), and (2) an overlap band of ``band`` px on both sides cross-fades:
+    the photo's edge colour is extended outward and blended into the fill, and the fill reaches into the photo's
+    edge (where re-projection streaks sit)."""
+    have = np.asarray(have, bool)
     need = np.clip(1.0 - cover, 0.0, 1.0) * have.astype(np.float32) * float(alpha)
-    env2 = env * (1.0 - need[..., None]) + fill * need[..., None]
+    if not seam:
+        env2 = env * (1.0 - need[..., None]) + fill * need[..., None]
+        cover2 = np.clip(cover + need, 0.0, 1.0)
+        return env2, cover2, need > 0.25
+    fill = np.asarray(fill, np.float32).copy()
+    covered = cover > 0.5
+    open_ = have & ~covered
+    if not covered.any() or not open_.any():
+        env2 = env * (1.0 - need[..., None]) + fill * need[..., None]
+        return env2, np.clip(cover + need, 0.0, 1.0), need > 0.25
+    far = 4 * band
+    d_out = _grow(covered, far)            # uncovered pixel → distance to the photo
+    d_in = _grow(open_, 3 * band)          # covered pixel → distance to the fill
+    w_far = SEAM_FAR_KEEP + (1.0 - SEAM_FAR_KEEP) * np.clip(1.0 - d_out / float(far), 0.0, 1.0)
+    keys = np.unique(cls[have]) if cls is not None else [None]
+    for k in keys:
+        cm = (cls == k) if k is not None else np.ones(have.shape, bool)
+        ring = covered & have & cm & (d_in <= 3 * band)
+        if int(ring.sum()) < 40:
+            continue
+        g = np.clip(env[ring].mean(0) / np.maximum(fill[ring].mean(0), 1.0), SEAM_GAIN[0], SEAM_GAIN[1])
+        sel = have & cm
+        fill[sel] *= (1.0 + (g[None] - 1.0) * w_far[sel][:, None])
+    ext = _extend(np.asarray(env, np.float32), covered, band)
+    # uncovered side: photo edge (extended) → fill over the band
+    t_out = np.clip(d_out / float(band), 0.0, 1.0)
+    t_out = 0.5 + 0.5 * t_out * t_out * (3 - 2 * t_out)
+    reach = open_ & (d_out <= band)
+    src = np.where(reach[..., None], ext * (1 - t_out[..., None]) + fill * t_out[..., None], fill)
+    env2 = env * (1.0 - need[..., None]) + src * need[..., None]
+    # covered side: the fill reaches into the photo edge (half at the boundary → none at ``band``)
+    t_in = np.clip(d_in / float(band), 0.0, 1.0)
+    w_in = 0.5 * (1.0 - t_in * t_in * (3 - 2 * t_in)) * (covered & have & (d_in <= band))
+    env2 = env2 * (1.0 - w_in[..., None]) + fill * w_in[..., None]
     cover2 = np.clip(cover + need, 0.0, 1.0)
     return env2, cover2, need > 0.25
 

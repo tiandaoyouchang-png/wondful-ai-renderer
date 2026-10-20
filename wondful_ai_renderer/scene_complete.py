@@ -43,6 +43,13 @@ CONF_MIRROR = 0.35         # copied from the opposite side
 CONF_CURB = 0.5
 WINDOW_LIMIT = 260         # procedural windows on inferred facades (triangle budget)
 LOT_DEFAULT = 7.5          # lot width when the analysis gives none (m)
+# 近密远疏 / 重叠衔接 (ideas from Building Rome, arXiv 2610.08790)
+BAND_NEAR = 25.0           # m from the product (along the street): full detail
+BAND_MID = 55.0            # beyond: lots merged ×FAR_LOT_SCALE, no windows / front hedges, long curb pieces
+FAR_LOT_SCALE = 1.8
+CURB_LEN = (8.0, 16.0, 24.0)   # curb piece length near / mid / far
+SEAM_LEN = 14.0            # an inferred lot within this distance (along the street) of a measured prism blends into it
+SEAM_TOP_MAX = 6.0         # … only when the eaves step is plausible for neighbours (else the rhythm stays)
 
 
 # ============================================================================== helpers
@@ -108,6 +115,74 @@ class MasterView:
         return inside & (rng < best * 0.97 + 0.3)
 
 
+# ------------------------------------------------------------------------------ 空 / 可见 / 被挡住 (three states)
+# Idea borrowed from Building Rome (arXiv 2610.08790; idea only, no code / weights): every point of space the
+# reference camera looks at is one of free (a camera ray passed through it before hitting the measured surface),
+# visible (on the measured surface, within a tolerance) or hidden (behind it). Outside the photo it is unknown.
+# Inferred parts may only go to hidden / unknown space, and measured volumes whose rule depth (a building prism's
+# 6–18 m, a car seen end-on's 4.5 m) pokes into free space are cut back — no walls / hedges growing where the photo
+# shows open ground.
+
+S_UNKNOWN, S_FREE, S_VISIBLE, S_HIDDEN = 0, 1, 2, 3
+FREE_REL = 0.05            # a point is free when it is nearer than the measured surface by this share …
+FREE_ABS = 0.3             # … plus this (m): MoGe noise / edge bleeding never counts as free
+CARVE_STEP = 0.5           # depth sampling step behind a measured front (m)
+CARVE_MIN_D = 0.8          # a carved prism keeps at least this depth (closed, still reads as a volume)
+CARVE_Q = 25               # percentile over the prism's sample columns where free space begins
+
+
+class Occupancy(MasterView):
+    """Three-state test against the 精确模式 measurement. Sky pixels count as free (the ray went to the sky)."""
+
+    def __init__(self, geo, z_offset=0.0):
+        super().__init__(geo, z_offset)
+        R = self.range
+        Rn, Rx = R.copy(), np.where(np.isfinite(R), R, -np.inf)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                sh = np.roll(np.roll(R, dy, 0), dx, 1)
+                Rn = np.minimum(Rn, sh)
+                Rx = np.maximum(Rx, np.where(np.isfinite(sh), sh, -np.inf))
+        self.r_min = Rn                    # nearest measured range in the 3×3 neighbourhood (inf = all sky)
+        self.r_max = np.where(np.isfinite(Rx), Rx, np.inf)
+
+    def state(self, Q):
+        """S_* per point (n,)."""
+        u, v, zc, rng = self.pixel(Q)
+        inside = (zc > 0.05) & (u >= 0) & (u <= self.W - 1) & (v >= 0) & (v <= self.H - 1)
+        ui = np.clip(np.round(u).astype(int), 0, self.W - 1)
+        vi = np.clip(np.round(v).astype(int), 0, self.H - 1)
+        rn, rx = self.r_min[vi, ui], self.r_max[vi, ui]
+        out = np.full(len(rng), S_UNKNOWN, np.int8)
+        free = inside & (rng < rn * (1 - FREE_REL) - FREE_ABS)
+        hidden = inside & ~free & np.isfinite(rx) & (rng > rx * (1 + FREE_REL) + FREE_ABS)
+        out[inside] = S_VISIBLE
+        out[free] = S_FREE
+        out[hidden] = S_HIDDEN
+        return out
+
+    def free(self, Q):
+        return self.state(Q) == S_FREE
+
+    def clip_depth(self, c, u, n, W, D, z0, z1, d_min=CARVE_MIN_D):
+        """Largest depth ≤ D (behind the front face at ``c``, along −n) that stays out of free space."""
+        if D <= d_min:
+            return float(D)
+        c = np.asarray(c, np.float64)
+        u = np.asarray(u, np.float64)
+        n = np.asarray(n, np.float64)
+        bs = np.arange(CARVE_STEP, D + 1e-6, CARVE_STEP)
+        A = np.linspace(-0.45, 0.45, 5) * W
+        Z = np.linspace(z0 + min(0.35, (z1 - z0) / 3), z1 - 0.05, 4)
+        AA, ZZ, BB = np.meshgrid(A, Z, bs, indexing="ij")
+        xy = c[None] + u[None] * AA.reshape(-1, 1) - n[None] * BB.reshape(-1, 1)
+        Q = np.c_[xy, ZZ.reshape(-1)]
+        fr = self.free(Q).reshape(len(A) * len(Z), len(bs))
+        first = np.where(fr.any(1), bs[np.argmax(fr, 1)] - CARVE_STEP, D)
+        d = float(np.percentile(first, CARVE_Q))
+        return float(np.clip(d, d_min, D))
+
+
 def _box_samples(c, u, n, W, D, z0, z1):
     """Corners, edge midpoints and face centres of a box (front centre c, along u, depth along −n)."""
     pts = []
@@ -117,6 +192,16 @@ def _box_samples(c, u, n, W, D, z0, z1):
                 p = np.asarray(c) + np.asarray(u) * a * W + np.asarray(n) * b * D
                 pts.append((p[0], p[1], z))
     return np.array(pts)
+
+
+def _dense_samples(c, u, n, W, D, z0, z1, k=5, kz=4):
+    """k×k×kz grid through the whole box volume (the three-state test: no part may touch free space)."""
+    a = np.linspace(-0.5, 0.5, k)
+    b = np.linspace(0.0, -1.0, k)
+    z = np.linspace(min(z0 + 0.3, (z0 + z1) / 2), z1, kz)
+    A, B, Z = np.meshgrid(a, b, z, indexing="ij")
+    xy = np.asarray(c)[None] + np.asarray(u)[None] * (A.reshape(-1, 1) * W) + np.asarray(n)[None] * (B.reshape(-1, 1) * D)
+    return np.c_[xy, Z.reshape(-1)]
 
 
 def _footprint_pts(c, u, n, W, D, k=4):
@@ -266,14 +351,19 @@ def _summ(st):
 # ============================================================================== completion
 
 def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budget_left=10 ** 9, windows=True,
-             obstacles=()):
+             obstacles=(), occupancy=None, bands=False, seam=False):
     """Add inferred closed parts to ``M`` (a ``prims.Mesh``); returns (stats, layout) — layout in the analysis
     frame, JSON-safe. ``ground(x, y)`` → ground height; ``visible(points (n,3))`` → bool per point (the reference
     camera sees it: ``MasterView.visible`` with a measurement, a frustum test without); ``obstacles`` = extra
     footprints (c, u, n, W, D) nothing may overlap (the LLM blocks). Never raises for a scene it cannot
-    complete: stats["ok"] False + reason."""
+    complete: stats["ok"] False + reason.
+    ``occupancy`` (``Occupancy``): a part is refused when any of its dense samples is free or on the measured
+    surface (only hidden / unknown space is filled). ``bands``: 近密远疏 (merged far lots, windows near-first, no
+    far windows / front hedges, longer far curbs). ``seam``: 重叠衔接 — the lots next to a measured prism take
+    its eaves height and setback and blend into the street rhythm over ``SEAM_LEN``."""
     stats = {"ok": False, "reason": "", "buildings": 0, "hedges": 0, "trees": 0, "poles": 0, "curbs": 0,
-             "windows": 0, "tris": 0, "mirrored": [], "rejected_seen": 0, "rejected_overlap": 0}
+             "windows": 0, "tris": 0, "mirrored": [], "rejected_seen": 0, "rejected_overlap": 0, "rejected_free": 0,
+             "seam_blended": 0}
     layout = {"frame": "analysis", "boxes": [], "facades": [], "veg_refs": [], "street": None}
     builds = [p for p in parts if p.get("kind") == "building" and p.get("xy") is not None]
     # facade references (measured, seen by the master): grouped prism fronts → texture patches later
@@ -361,6 +451,11 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
         if np.asarray(visible(_box_samples(c, u, n, W, D, z0, z1))).any():
             stats["rejected_seen"] += 1
             return False
+        if occupancy is not None:
+            stt = occupancy.state(_dense_samples(c, u, n, W, D, z0, z1))
+            if (stt == S_FREE).any() or (stt == S_VISIBLE).any():
+                stats["rejected_free"] += 1
+                return False
         if budget_left - (M.tris() - tri0) < 60:
             return False
         info = {"kind": "inferred " + kind, "inferred": True, "conf": cf,
@@ -379,9 +474,33 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
 
     hedge_any = any(sides[sd]["hedges"] for sd in (1, -1))
     tree_r = [r for sd in (1, -1) for r in sides[sd]["trees"] if r >= 1.0]
+    s_prod = float((prod - a0) @ t)
+    deferred = []                         # (distance, c, u, n, W, D, z0, z1): windows added near-first afterwards
+    # measured fronts per side (s along the street, setback, eaves above ground, width) for the seam blend
+    meas = {1: [], -1: []}
+    for p in builds:
+        xy = np.asarray(p["xy"], np.float64)
+        off = float((xy - a0) @ nperp)
+        meas[1 if off >= 0 else -1].append((float((xy - a0) @ t), abs(off),
+                                             float(p["top"]) - float(p.get("g0", 0.0)), float(p["W"])))
+
+    def seam_blend(sd, smid, ww, top, setback):
+        """(top, setback, weight) of a lot next to a measured prism: its eaves / front, fading over SEAM_LEN."""
+        best = None
+        for s_m, off_m, top_m, w_m in meas[sd]:
+            gap = abs(s_m - smid) - (w_m + ww) / 2
+            if gap < SEAM_LEN and abs(off_m - setback) < 8.0 and abs(top_m - top) < SEAM_TOP_MAX \
+                    and (best is None or gap < best[0]):
+                best = (max(gap, 0.0), top_m, off_m)
+        if best is None:
+            return top, setback, 0.0
+        x = float(np.clip(best[0] / SEAM_LEN, 0.0, 1.0))
+        wgt = 1.0 - x * x * (3 - 2 * x)
+        return top + (best[1] - top) * wgt, setback + (best[2] - setback) * wgt, wgt
+
     for sd, cf in conf.items():
         sm = summ[sd]
-        setback = max(sm["setback"], hw + 1.5)
+        setback0 = max(sm["setback"], hw + 1.5)
         n_in = -sd * nperp                    # facade normal → toward the street
         lot = sm["lot"]
         hed = sides[sd]["hedges"] or sides[-sd]["hedges"]
@@ -389,12 +508,21 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
         s = -S_BACK
         while s < S_BACK:
             r = _hash01(sd, k)
+            far_lot = bands and abs(s - s_prod) > BAND_MID
             w = float(np.clip(lot * (0.8 + 0.45 * r), 4.0, 16.0))
+            if far_lot:
+                w = float(np.clip(w * FAR_LOT_SCALE, 4.0, 28.0))
+            setback = setback0
             gap = 0.6 + 1.4 * _hash01(sd, k, 2)
             alley = (k % 4 == 3) and (hed or tree_r)
             if alley:
                 gap += 3.5
             top = sm["tops"][int(_hash01(sd, k, 3) * 4) % 4] * (0.92 + 0.16 * _hash01(sd, k, 4))
+            if seam:
+                top, setback, wgt = seam_blend(sd, s + w / 2, w, top, setback)
+                setback = max(setback, hw + 1.0)
+                if wgt > 0.05:
+                    stats["seam_blended"] += 1
             # lots may be shortened from either end to stay out of the photo / measured prisms
             placed = False
             for trim in (0.0, 0.35, 0.6):
@@ -408,6 +536,12 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
 
                     def build_prism(info, c=c, ww=ww, D=D, g0=g0, top=top):
                         nonlocal win_left
+                        if bands:
+                            # 近密远疏: the box now, its windows later nearest-first (none beyond BAND_MID)
+                            M.add(*prims.box(c, t, n_in, ww, D, g0 - 0.5, g0 + top), C_INF_BUILDING, info)
+                            deferred.append((float(np.hypot(c[0] - px, c[1] - py)), c, t.copy(), n_in.copy(), ww, D,
+                                             g0 - 0.5, g0 + top))
+                            return
                         room = max(0, (budget_left - (M.tris() - tri0) - 12) // 12)     # a window frame = 12 tris
                         lim = int(min(win_left, room))
                         made = prims.prism_with_windows(
@@ -447,8 +581,8 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
                     if place_box("hedge", C_INF_VEG, hc, t, n_in, hwid, 1.0, g0 - 0.1, g0 + 1.25, cf * 0.9,
                                  builder=build_hedge):
                         stats["hedges"] += 1
-            # hedges in front of some lots (front gardens) at the measured rhythm
-            if hed and placed and _hash01(sd, k, 7) < 0.4:
+            # hedges in front of some lots (front gardens) at the measured rhythm (near / mid band only)
+            if hed and placed and not far_lot and _hash01(sd, k, 7) < 0.4:
                 hc = a0 + t * (s + w / 2) + sd * nperp * (setback - 1.6)
                 g0 = float(ground(float(hc[0]), float(hc[1])))
                 hwid = w * 0.7
@@ -478,16 +612,39 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
                              builder=build_pole):
                     stats["poles"] += 1
                 s += sp
+    # windows of the inferred rows, nearest first, within the remaining triangle budget (近密远疏)
+    for dist, c, uu, nn, ww, D, z0, z1 in sorted(deferred, key=lambda e: e[0]):
+        if not windows or win_left <= 0 or dist > BAND_MID:
+            break
+        room = max(0, (budget_left - (M.tris() - tri0) - 12) // 12)
+        lim = int(min(win_left, room))
+        if lim <= 0:
+            break
+        made = prims.add_windows(M, c, uu, nn, ww, D, z0, z1, np.asarray(c) - nn * 1e4, win_limit=lim,
+                                 win_cls=C_INF_WINDOW)
+        stats["windows"] += made
+        win_left -= made
     # curbs on both road edges (outside plazas / junctions)
     for sd in (1, -1):
         s = -S_BACK
         while s < S_BACK:
-            L = 8.0
-            c = a0 + t * (s + L / 2) + sd * nperp * (hw + 0.15)
-            if not in_plaza(c):
-                g0 = float(ground(float(c[0]), float(c[1])))
-                if place_box("curb", C_INF_CURB, c, t, -sd * nperp, L, 0.3, g0 - 0.1, g0 + 0.15, CONF_CURB):
-                    stats["curbs"] += 1
+            ds = abs(s + 4.0 - s_prod)
+            L = 8.0 if not bands or ds < BAND_NEAR else (CURB_LEN[1] if ds < BAND_MID else CURB_LEN[2])
+            # a long far piece that cannot be placed whole falls back to 8 m pieces (no curb gaps from merging)
+            for L_try in ((L,) if L <= CURB_LEN[0] else (L, CURB_LEN[0])):
+                ok_any = False
+                for s1 in np.arange(s, s + L - 1e-6, L_try):
+                    c = a0 + t * (s1 + L_try / 2) + sd * nperp * (hw + 0.15)
+                    if in_plaza(c):
+                        continue
+                    g0 = float(ground(float(c[0]), float(c[1])))
+                    if place_box("curb", C_INF_CURB, c, t, -sd * nperp, L_try, 0.3, g0 - 0.1, g0 + 0.15, CONF_CURB):
+                        stats["curbs"] += 1
+                        ok_any = True
+                    elif L_try > CURB_LEN[0]:
+                        break
+                if ok_any or L_try == CURB_LEN[0]:
+                    break
             s += L
     stats["tris"] = M.tris() - tri0
     stats["ok"] = stats["buildings"] + stats["curbs"] + stats["hedges"] + stats["trees"] > 0

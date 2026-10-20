@@ -1576,7 +1576,10 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                 except Exception:
                     pass
                 info["detail"] = DB.build_in_blender(context, info, self._sb["geo"], scene_kind=info.get("kind", "outdoor"),
-                                                     analysis=self._sb.get("analysis"), complete=complete)
+                                                     analysis=self._sb.get("analysis"), complete=complete,
+                                                     free_space=bool(getattr(props, "sb_free_space", False)),
+                                                     bands=bool(getattr(props, "sb_lod_bands", True)),
+                                                     seam=bool(getattr(props, "sb_seam_blend", True)))
             except Exception as exc:
                 print("[Wondful] 细节粗模失败：\n" + traceback.format_exc())
                 info["detail"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
@@ -1585,7 +1588,9 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         if complete and not detail_done and info.get("world") and info.get("kind", "outdoor") != "interior":
             # 场景补全 without a measurement: rows / curbs / greenery inferred from the LLM blocks
             try:
-                info["complete"] = DB.complete_llm_in_blender(context, info, self._sb.get("analysis"))
+                info["complete"] = DB.complete_llm_in_blender(context, info, self._sb.get("analysis"),
+                                                              bands=bool(getattr(props, "sb_lod_bands", True)),
+                                                              seam=bool(getattr(props, "sb_seam_blend", True)))
             except Exception as exc:
                 print("[Wondful] 场景补全失败：\n" + traceback.format_exc())
                 info["complete"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
@@ -4530,6 +4535,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
         env_check = bool(getattr(props, "mv_env_check", True))
         grade_on = bool(getattr(props, "mv_colour_match", True))      # 1.2.4 统一调色
+        seam_on = bool(getattr(props, "sb_seam_blend", True))         # 1.2.5 重叠衔接 (补全填色与投影的接缝)
         finish_level = str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE")   # 1.2.4 照片质感
         detail_edit = None
         from .result_worker import crop_regen_allowed as _crop_ok
@@ -4641,7 +4647,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     try:
                         cmap, sty = MV.class_map(vk, completion)
                         fimg, have = MV.style_fill(vk, cmap, sty, patches, completion)
-                        env, cover, filled = MV.apply_fill(env, cover, fimg, have)
+                        env, cover, filled = MV.apply_fill(env, cover, fimg, have, cls=cmap,
+                                                           seam=seam_on)
                         envm = np.asarray(vk["mask"]) < 0.5
                         st["fill"] = round(float((filled & envm).sum()) / max(1, int(envm.sum())), 3)
                         fill_line = MV.fill_note(cmap, filled & envm, fill_words)

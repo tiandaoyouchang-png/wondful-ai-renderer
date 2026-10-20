@@ -37,6 +37,14 @@ SKIN_BUDGET = 40000
 TERRAIN_AZ_IN = 1.0        # azimuth step inside the photo (deg); outside 6°
 TERRAIN_AZ_OUT = 6.0
 SKIN_T = 1.0               # skin thickness cap (m)
+# 近密远疏 (distance bands, idea from Building Rome arXiv 2610.08790): near field small / detailed, far field coarse
+BAND_NEAR = 25.0           # m from the product: full detail (windows, front hedges, fine skin)
+BAND_MID = 55.0            # beyond this from the product: merged lots, no procedural windows / front hedges
+SKIN_NEAR_R = 30.0         # m from the camera: measured skin at the fine stride; beyond it at twice the stride
+SKIN_OVERLAP = 1.5         # the coarse skin starts this much nearer (overlap band, no crack between strides)
+SKIN_BUDGET_BANDS = 52000  # with bands the near skin may use what the coarse far skin saves …
+SKIN_RESERVE = 6000        # … but this much of the total budget stays for 场景补全
+CARVE_MIN_D = 0.8          # 空/可见/被挡住: a carved prism keeps at least this depth
 CARRIER_TAG = "wondful_detail_carrier"
 FAR_TAG = "wondful_sb_far"
 COLLECTION_NAME = "Wondful 细节粗模（投影）"
@@ -271,7 +279,14 @@ def prism_with_windows(M, c, u, n, W, D, z0, z1, cam_xy, info, windows=True, win
     """Closed prism (``box``) + window frames only on its vertical faces the reference camera cannot see."""
     V, F = box(c, u, n, W, D, z0, z1)
     M.add(V, F, cls, info)
-    if not windows or z1 - z0 < 4.0:
+    if not windows:
+        return 0
+    return add_windows(M, c, u, n, W, D, z0, z1, cam_xy, win_limit=win_limit, win_cls=win_cls)
+
+
+def add_windows(M, c, u, n, W, D, z0, z1, cam_xy, win_limit=10 ** 9, win_cls=C_WINDOW):
+    """Window frames on the vertical faces of box(c, u, n, W, D, z0, z1) the reference camera cannot see."""
+    if z1 - z0 < 4.0 or win_limit <= 0:
         return 0
     c = np.asarray(c, float); u = np.asarray(u, float); n = np.asarray(n, float)
     up = np.array([0.0, 0.0, 1.0]); u3 = np.r_[u, 0.0]; n3 = np.r_[n, 0.0]
@@ -599,10 +614,24 @@ def _skin_tris(pieces):
 # ============================================================================== volumes (V1 rules)
 
 def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, windows=True, win_limit=400,
-                  r_split=R_SPLIT, avoid=None):
-    """Closed proxies per measured component. ``avoid`` = (x, y, radius) product spot: nothing is built there."""
+                  r_split=R_SPLIT, avoid=None, occ=None, bands=False):
+    """Closed proxies per measured component. ``avoid`` = (x, y, radius) product spot: nothing is built there.
+    ``occ`` (``scene_complete.Occupancy``): rule depths are cut back where they would reach free space.
+    ``bands`` (近密远疏): components are processed nearest-to-the-product first (the window budget goes to the
+    near field) and prisms beyond ``BAND_MID`` m from the product get no procedural windows."""
     cam_xy = np.zeros(2)
-    stats = {"buildings": 0, "props": 0, "walls": 0, "slabs": 0, "poles": 0, "trees": 0, "windows": 0, "thin": 0}
+    stats = {"buildings": 0, "props": 0, "walls": 0, "slabs": 0, "poles": 0, "trees": 0, "windows": 0, "thin": 0,
+             "carved": 0, "carved_m": 0.0}
+    ref_xy = np.zeros(2) if avoid is None else np.array([float(avoid[0]), float(avoid[1])])
+
+    def carve(c0, u, n, W, D, z0, z1, d_min=CARVE_MIN_D):
+        if occ is None:
+            return D
+        d = occ.clip_depth(c0, u, n, W, D, z0, z1, d_min=min(d_min, D))
+        if d < D - 0.25:
+            stats["carved"] += 1
+            stats["carved_m"] = round(stats["carved_m"] + (D - d), 1)
+        return d
 
     def blocked(xy, rad=0.0):
         return avoid is not None and math.hypot(xy[0] - avoid[0], xy[1] - avoid[1]) < avoid[2] + rad
@@ -614,6 +643,8 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
         return float(np.min(np.hypot(pts_xy[:, 0] - avoid[0], pts_xy[:, 1] - avoid[1]))) < avoid[2]
 
     comps, Q = components(P, mask, cls, [STRUCT], st, N=N, r_split=r_split)
+    if bands:
+        comps.sort(key=lambda c: float(np.linalg.norm(np.median(c["pts"][:, :2], 0) - ref_xy)) if len(c["pts"]) else 1e9)
     thin = []
     for c in comps:
         pts = c["pts"]
@@ -692,19 +723,21 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                     continue
                 D = float(np.clip(max(Dm, 0.7 * W), 6.0, 18.0)) if top - g0 > 4 else float(np.clip(max(Dm, 0.5 * Ws), 2.0, 10.0))
                 c0 = u * (a0 + a1) / 2 + n * front - n * 0.35
+                D = carve(c0, u, n, Ws * shrink + 0.05, D, g0, top)
+                far = bands and float(np.linalg.norm(c0 - ref_xy)) > BAND_MID
                 stats["windows"] += prism_with_windows(
                     M, c0, u, n, Ws * shrink + 0.05, D, g0 - 0.5, top, cam_xy,
                     {"kind": "building", "dist": round(dist, 1), "W": round(Ws, 2), "D": round(D, 1), "top": round(top, 2),
                      "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)], "u": [round(float(u[0]), 4), round(float(u[1]), 4)],
                      "n": [round(float(n[0]), 4), round(float(n[1]), 4)], "g0": round(g0, 2)},
-                    windows=windows, win_limit=max(0, win_limit - stats["windows"]))
+                    windows=windows and not far, win_limit=max(0, win_limit - stats["windows"]))
                 stats["buildings"] += 1
             continue
         hh = z1 - g0
         front = float(np.percentile(b, 85))
         c0 = u * (a.min() + a.max()) / 2 + n * front
         if W >= 6.0 and hh < 2.2:
-            V, F = box(c0, u, n, W, max(Dm, 0.3), g0 - 0.3, z1)
+            V, F = box(c0, u, n, W, carve(c0, u, n, W, max(Dm, 0.3), g0, z1, d_min=0.3), g0 - 0.3, z1)
             M.add(V, F, C_WALL, {"kind": "wall/fence", "dist": round(dist, 1), "W": round(W, 2), "h": round(hh, 2),
                                  "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
             stats["walls"] += 1
@@ -715,6 +748,7 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
             D = max(Dm, 1.8)
         else:
             D = max(Dm, 0.5 * W, 0.4)
+        D = carve(c0, u, n, W, D, g0, z1, d_min=max(0.4, min(Dm, 1.2)))
         V, F = rounded_box(c0, u, n, W, D, g0 - 0.2, z1)
         M.add(V, F, C_PROP, {"kind": "vehicle/prop", "dist": round(dist, 1), "W": round(W, 2), "D": round(D, 2), "h": round(hh, 2),
                                   "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
@@ -750,10 +784,20 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
             rx = max(0.4, ww / 2 * 1.05)
             rz = max(0.3, (top - bot) / 2)
             front = float(np.percentile(b[s], 15))
-            cxy = u * (e[k] + e[k + 1]) / 2 + view * (front + rx * 0.9)
+            ry = rx
+            if occ is not None:
+                # crown depth along the view ray: the back half must not reach free space (ground seen behind it)
+                f0 = u * (e[k] + e[k + 1]) / 2 + view * front
+                dd = carve(f0, u, -view, 2 * rx * 0.8, 2 * rx * 0.9 + 0.2, bot, top, d_min=0.6)
+                ry = float(np.clip(dd / 1.8, 0.35, rx))
+            cxy = u * (e[k] + e[k + 1]) / 2 + view * (front + ry * 0.9)
             if blocked(cxy, rx):
                 continue
             V, F = ellipsoid(np.r_[cxy, (top + bot) / 2], rx, rx, rz, seed=ci * 31 + k)
+            if ry < rx - 1e-6:          # squash along the view ray only (the measured width stays)
+                dxy = V[:, :2] - cxy
+                along = dxy @ view
+                V[:, :2] = cxy + dxy + np.outer(along * (ry / rx - 1.0), view)
             M.add(V, F, C_TREE, {"kind": "tree crown" if bot - g0 > 0.8 else "bush/hedge", "dist": round(dist, 1),
                                  "r": round(rx, 2), "z": [round(bot, 2), round(top, 2)],
                                  "xy": [round(float(cxy[0]), 2), round(float(cxy[1]), 2)], "g0": round(g0, 2)})
@@ -766,15 +810,30 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
 
 # ============================================================================== top level
 
+def _scene_complete():
+    try:
+        from . import scene_complete as SC
+    except ImportError:          # loaded by path (tests)
+        import importlib.util as _ilu
+        import os as _os
+        _sp = _ilu.spec_from_file_location("scene_complete", _os.path.join(_os.path.dirname(__file__), "scene_complete.py"))
+        SC = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(SC)
+    return SC
+
+
 def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, budget=TRI_BUDGET, z_offset=0.0,
-          complete=True, analysis=None, obstacles=()):
+          complete=True, analysis=None, obstacles=(), free_space=False, bands=True, seam=True):
     """Detail blockout from one 精确模式 measurement → dict(ok, reason, V, F, C, parts, stats).
 
     ``far_z(x, y)``: LLM terrain height in the analysis frame (already offset like the result), used beyond
     ``r_split``. ``pad`` = (x, y, radius, z) product spot in the same frame (ground flattened to z; no part
     built inside). ``z_offset`` lifts every measured height (LLM terrain height under the camera).
     ``complete``: 场景补全 — infer the street the photo never saw (``scene_complete``; ``analysis`` = the ④ analysis
-    JSON for road direction / lot widths / poles); the result then carries ``layout`` (analysis frame)."""
+    JSON for road direction / lot widths / poles); the result then carries ``layout`` (analysis frame).
+    1.2.5 (ideas from Building Rome, arXiv 2610.08790): ``free_space`` = 空/可见/被挡住 three-state test (rule
+    depths cut back out of free space, inferred parts only in hidden / unknown space); ``bands`` = 近密远疏 (fine
+    skin / windows near, coarse far); ``seam`` = 重叠衔接 (inferred rows blend into the measured neighbours)."""
     t0 = time.time()
     ok, reason = plausible(geo, scene_kind)
     if not ok:
@@ -801,33 +860,55 @@ def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, b
     avoid = None if pad is None else (pad[0], pad[1], pad[2])
     st_vol = 2 if max(P.shape[:2]) <= 1000 else 4
     win_limit = 400
+    SC = _scene_complete()
+    occ = None
+    if free_space:
+        try:
+            occ = SC.Occupancy(geo, z_offset)
+        except Exception as exc:     # never lose the blockout over the free-space test
+            print(f"[Wondful] 空间三态不可用：{exc}")
     stats, thin, Qv = build_volumes(P, N, mask, cls, T, cam_h, M, st=st_vol, win_limit=win_limit, r_split=r_split,
-                                    avoid=avoid)
+                                    avoid=avoid, occ=occ, bands=bands)
     vol_tris = M.tris()
     room = budget - len(FT) - vol_tris
     if room < SKIN_BUDGET // 2 and stats["windows"]:
         # over budget: drop the procedural windows first
         M = Mesh()
         stats, thin, Qv = build_volumes(P, N, mask, cls, T, cam_h, M, st=st_vol, windows=False, r_split=r_split,
-                                        avoid=avoid)
+                                        avoid=avoid, occ=occ, bands=bands)
         vol_tris = M.tris()
         room = budget - len(FT) - vol_tris
     skin_budget = max(4000, min(SKIN_BUDGET, room))
     st = 2
-    while True:
-        Q, pieces = skin_quads(P, mask, cls, cam_h, st, r_split=r_split)
-        est = _skin_tris(pieces)
-        if est <= skin_budget or st >= 8:
-            break
-        st += 1
+    if bands:
+        skin_budget = max(4000, min(SKIN_BUDGET_BANDS, room - (SKIN_RESERVE if complete else 0)))
+        # 近密远疏: fine stride for the near skin, twice as coarse beyond SKIN_NEAR_R (overlapping band, no crack)
+        rr = np.hypot(P[..., 0], P[..., 1])
+        while True:
+            Qn, pn = skin_quads(P, mask & (rr < SKIN_NEAR_R), cls, cam_h, st, r_split=r_split)
+            Qf, pf = skin_quads(P, mask & (rr >= SKIN_NEAR_R - SKIN_OVERLAP), cls, cam_h, 2 * st, r_split=r_split)
+            est = _skin_tris(pn) + _skin_tris(pf)
+            if est <= skin_budget or st >= 8:
+                break
+            st += 1
+        skin_sets = [(Qn, pn), (Qf, pf)]
+    else:
+        while True:
+            Q, pieces = skin_quads(P, mask, cls, cam_h, st, r_split=r_split)
+            est = _skin_tris(pieces)
+            if est <= skin_budget or st >= 8:
+                break
+            st += 1
+        skin_sets = [(Q, pieces)]
     nq = 0
-    for qm in pieces:
-        if avoid is not None:
-            ys, xs = np.nonzero(qm)
-            cxy = np.median(Q[ys, xs, :2], 0)
-            if math.hypot(cxy[0] - avoid[0], cxy[1] - avoid[1]) < avoid[2]:
-                continue
-        nq += shell_piece(Q, qm, cam_h, M, C_SKIN, SKIN_T)
+    for Q, pieces in skin_sets:
+        for qm in pieces:
+            if avoid is not None:
+                ys, xs = np.nonzero(qm)
+                cxy = np.median(Q[ys, xs, :2], 0)
+                if math.hypot(cxy[0] - avoid[0], cxy[1] - avoid[1]) < avoid[2]:
+                    continue
+            nq += shell_piece(Q, qm, cam_h, M, C_SKIN, SKIN_T)
     # thin irregular structures (fences, railings, palm trunks): measured thin shells at the volume stride
     for c, tm in thin:
         left = budget - len(FT) - M.tris()
@@ -844,24 +925,16 @@ def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, b
     if complete:
         # 场景补全: continue the measured street where the photo did not look (closed, tagged, lower confidence)
         try:
-            from . import scene_complete as SC
-        except ImportError:          # loaded by path (tests)
-            import importlib.util as _ilu
-            import os as _os
-            _sp = _ilu.spec_from_file_location("scene_complete", _os.path.join(_os.path.dirname(__file__), "scene_complete.py"))
-            SC = _ilu.module_from_spec(_sp)
-            _sp.loader.exec_module(SC)
-        try:
-            mview = SC.MasterView(geo, z_offset)
+            mview = occ if occ is not None else SC.MasterView(geo, z_offset)
             cst, layout = SC.complete(_Prims(), M, list(M.parts), lambda x, y: terrain_z(T, x, y), mview.visible,
                                       pad=pad, analysis=analysis, budget_left=max(0, budget - len(FT) - M.tris()),
-                                      obstacles=obstacles)
+                                      obstacles=obstacles, occupancy=occ, bands=bands, seam=seam)
         except Exception as exc:     # never lose the measured blockout over the inferred part
             cst, layout = {"ok": False, "reason": f"出错：{str(exc)[:60]}"}, None
         stats["complete"] = cst
     M.add(VT, FT, C_GROUND, {"kind": "ground", "tris": int(len(FT))})
     V, F, C = M.arrays()
-    stats.update({"skin_stride": st, "skin_quads": nq, "terrain_tris": int(len(FT)), "tris": int(len(F)),
+    stats.update({"skin_stride": st, "skin_quads": nq, "free_space": occ is not None, "bands": bool(bands), "terrain_tris": int(len(FT)), "tris": int(len(F)),
                   "terrain_s": round(t_ter, 3), "r_split": r_split})
     return {"ok": True, "reason": "", "V": V, "F": F, "C": C, "parts": M.parts, "stats": stats,
             "layout": layout, "seconds": round(time.time() - t0, 3)}
@@ -1119,7 +1192,8 @@ def find_carrier(scene=None):
     return None
 
 
-def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, analysis=None, complete=True):
+def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, analysis=None, complete=True,
+                     free_space=False, bands=True, seam=True):
     """Build the detail blockout for a just-built ④ blockout (``scene_blockout_build.build`` info dict).
 
     Objects go to a hidden child collection 「Wondful 细节粗模（投影）」 of the blockout collection (tagged
@@ -1164,7 +1238,7 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, 
         except Exception as exc:
             print(f"[Wondful] 场景补全：读取 AI 体块失败：{exc}")
     res = build(geo, far_z=far_z, pad=pad, scene_kind=scene_kind, r_split=r_split, z_offset=z_offset,
-                complete=complete, analysis=analysis, obstacles=obstacles)
+                complete=complete, analysis=analysis, obstacles=obstacles, free_space=free_space, bands=bands, seam=seam)
     out = {k: res.get(k) for k in ("ok", "reason", "stats", "seconds")}
     if not res["ok"]:
         print(f"[Wondful] 细节粗模未生成：{res['reason']}（多角度沿用普通粗模）")
@@ -1366,7 +1440,7 @@ def llm_footprints(coll, winv, r_max=R_SPLIT):
     return out
 
 
-def complete_llm_in_blender(context, info, analysis=None):
+def complete_llm_in_blender(context, info, analysis=None, bands=True, seam=True):
     """场景补全 for a 场景粗模 without a measurement (精确模式 off / failed): building rows / curbs / greenery
     inferred from the LLM blocks, visible in the blockout. Visibility = the reference camera's frustum + a ray
     test against the blockout. Returns a JSON-safe summary."""
@@ -1435,7 +1509,8 @@ def complete_llm_in_blender(context, info, analysis=None):
     M = Mesh()
     obstacles = [(f[0], f[1], f[2], f[3], f[4]) for f in feet]
     try:
-        cst, layout = SC.complete(_Prims(), M, parts, ground, visible, pad=pad, analysis=analysis, obstacles=obstacles)
+        cst, layout = SC.complete(_Prims(), M, parts, ground, visible, pad=pad, analysis=analysis, obstacles=obstacles,
+                                  bands=bands, seam=seam)
     except Exception as exc:
         return {"ok": False, "reason": f"出错：{str(exc)[:60]}"}
     if not cst.get("ok"):
