@@ -1515,6 +1515,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         coll = getattr(props, "product_collection", None)
         data = dict(data)
         data.setdefault("_frame", {"w": self._sb["frame"][0], "h": self._sb["frame"][1]})
+        self._sb["analysis"] = data          # 1.2.5 场景补全: road direction / lot widths / poles
         own = [o for o in MS.massing_objects(parent, coll) if not any(c.get("wondful_scene_blockout") for c in o.users_collection)]
         info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
                          set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
@@ -1561,6 +1562,10 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         elif self._sb.get("precise"):
             info["precise_fallback"] = self._sb.get("precise_error") or "深度测量没有完成"
         detail_line = ""
+        from . import detail_blockout as DB
+        DB.remove_inferred()
+        complete = bool(getattr(props, "sb_complete", True))     # 1.2.5 场景补全 (④ 高级, default on)
+        detail_done = False
         if self._sb.get("geo") is not None and info.get("world") and bool(getattr(props, "sb_detail_carrier", True)):
             # 1.2.5 细节粗模: measured near / mid-ground carrier for 多角度场景一致 (hidden; far field stays LLM)
             from . import detail_blockout as DB
@@ -1570,11 +1575,22 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                     PD.save_geo(str(Path(self._sb["session"], "precise_geo.npz")), self._sb["geo"])
                 except Exception:
                     pass
-                info["detail"] = DB.build_in_blender(context, info, self._sb["geo"], scene_kind=info.get("kind", "outdoor"))
+                info["detail"] = DB.build_in_blender(context, info, self._sb["geo"], scene_kind=info.get("kind", "outdoor"),
+                                                     analysis=self._sb.get("analysis"), complete=complete)
             except Exception as exc:
                 print("[Wondful] 细节粗模失败：\n" + traceback.format_exc())
                 info["detail"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
             detail_line = DB.summary_text(info["detail"])
+            detail_done = bool((info["detail"] or {}).get("ok"))
+        if complete and not detail_done and info.get("world") and info.get("kind", "outdoor") != "interior":
+            # 场景补全 without a measurement: rows / curbs / greenery inferred from the LLM blocks
+            try:
+                info["complete"] = DB.complete_llm_in_blender(context, info, self._sb.get("analysis"))
+            except Exception as exc:
+                print("[Wondful] 场景补全失败：\n" + traceback.format_exc())
+                info["complete"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
+            line = DB.completion_text(info["complete"])
+            detail_line = (detail_line + " · " + line) if detail_line else line
         props.last_sb_note = SB.summary(info) + (f" · {detail_line}" if detail_line else "")
         print("[Wondful] " + props.last_sb_note)
         try:
@@ -4420,10 +4436,19 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         old_cam = scene.camera
         views = {}
         t_prep = time.time()
+        # 1.2.5 场景补全: the ④ blockout already continues the street → no filler buildings, style fill per pixel
+        completion = None
+        has_inferred = False
+        try:
+            from . import detail_blockout as _DBc
+            has_inferred = _DBc.find_inferred() is not None
+            completion = _DBc.completion_layout()
+        except Exception as exc:
+            print(f"[Wondful] 多角度场景一致：读取场景补全失败：{exc}")
         try:
             if bool(getattr(props, "mv_widen", True)) and massing_coll is not None:
                 try:
-                    made, wlog = MV.widen_blockout(context, massing_coll, coll, master)
+                    made, wlog = MV.widen_blockout(context, massing_coll, coll, master, fillers=not has_inferred)
                 except Exception as exc:
                     print(f"[Wondful] 多角度场景一致：加宽体块失败：{exc}")
             for cam in [master] + others:
@@ -4550,6 +4575,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             reused = [e for e in data.get("views", []) if not e.get("master") and e["name"] not in views
                       and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()
                       and e.get("geometry", "llm") == geo_kind]
+            # 1.2.5: AI-from-AI views (hop ≥ 2) stay in the pool but are not projected again
+            reused_src = [e for e in reused if MV.usable_source(e)]
             light, light_note = None, ""
             lp = pool / MV.LIGHT_FILE
             key = MV.file_md5(master_png)
@@ -4572,7 +4599,22 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 except Exception as exc:
                     light_note = f"光照估计失败（未锁定光照）：{str(exc)[:60]}"
             master_view = MV.load_view(pool, entry_m)
-            sources = [master_view] + [MV.load_view(pool, e) for e in reused]
+            sources = [master_view] + [MV.load_view(pool, e) for e in reused_src]
+            patches = None
+            fill_words = ""
+            if completion:
+                try:
+                    patches = MV.master_patches(master_view, completion)
+                    for k, pimg in enumerate(patches.get("facade") or []):
+                        write_png(str(pool / f"_fill_facade_{k}.png"), np.clip(pimg, 0, 255).astype(np.uint8))
+                    for key in ("road", "side", "veg"):
+                        if patches.get(key) is not None:
+                            write_png(str(pool / f"_fill_{key}.png"), np.clip(patches[key], 0, 255).astype(np.uint8))
+                    from .scene_complete import describe as _describe
+                    fill_words = _describe(completion.get("stats") or {})
+                except Exception as exc:
+                    print(f"[Wondful] 多角度场景一致：主视角材质取样失败：{exc}")
+                    patches = None
             results = []
             accepted = [entry_m] + reused
             stop = None
@@ -4594,10 +4636,23 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 mfull = read_png(v["files"]["mask"]).astype(np.float32)
                 mfull = (mfull[..., 3] if mfull.shape[-1] == 4 else mfull[..., 0]) / 255.0
                 env, cover, _srcmap, st = MV.build_base(vk, sources, resize(clay_full, ww, wh))
+                fill_line = ""
+                if patches is not None:      # 1.2.5 场景补全: uncovered pixels take a master style patch
+                    try:
+                        cmap, sty = MV.class_map(vk, completion)
+                        fimg, have = MV.style_fill(vk, cmap, sty, patches, completion)
+                        env, cover, filled = MV.apply_fill(env, cover, fimg, have)
+                        envm = np.asarray(vk["mask"]) < 0.5
+                        st["fill"] = round(float((filled & envm).sum()) / max(1, int(envm.sum())), 3)
+                        fill_line = MV.fill_note(cmap, filled & envm, fill_words)
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 补全填色失败：{exc}")
+                st["hop"] = MV.view_hop(st, sources)
                 base = pre + "_base.png"
                 write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
                 res["projection"] = st
-                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec), [s["name"] for s in sources])
+                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec), [s["name"] for s in sources],
+                                    fill_line=fill_line)
                 Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
                 work = Path(pre + "_work")
                 work.mkdir(exist_ok=True)
@@ -4697,9 +4752,10 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 res["ok"] = True
                 entry = {"name": rec["name"], "cam": rec, "pos": Path(pre + "_pos.npy").name, "nrm": Path(pre + "_nrm.npy").name,
                          "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False,
-                         "geometry": geo_kind}
+                         "geometry": geo_kind, "hop": int(st.get("hop", 1))}
                 accepted.append(entry)
-                sources.append(MV.load_view(pool, entry))
+                if MV.usable_source(entry):
+                    sources.append(MV.load_view(pool, entry))
                 MV.write_pool(pool, {"master": master_name, "views": accepted})
                 (pool / f"{MV.safe_name(rec['name'])}_meta.json").write_text(
                     json.dumps(res, ensure_ascii=False, indent=1, default=str), encoding="utf-8")

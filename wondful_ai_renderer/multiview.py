@@ -39,7 +39,8 @@ COLOUR_DE = 15.0           # … or the product colour ΔE
 OFFSET_PX = 4.0            # … or the product moved
 SCALE_PCT = 1.5            # … or was scaled
 ENV_GEOM_DE = 15.0         # environment: geometry-pixel reprojection ΔE vs the master
-ENV_MIN_COVIS = 0.5        # … only judged when the views share at least this much of the frame
+ENV_MIN_COVIS = 0.4        # … only judged when the views share at least this much of the frame (1.2.5: 0.5 → 0.4;
+                           #     the 2026-10-20 orbit's broken 216° view had covis 0.44 and never retried)
 MAX_CALLS = 2              # one call + at most one retry per camera
 
 
@@ -49,7 +50,13 @@ def camera_calls(pref_max) -> int:
         return max(1, min(MAX_CALLS, int(pref_max)))
     except (TypeError, ValueError):
         return MAX_CALLS
-MASTER_BIAS = 0.10         # the master wins ties between equally head-on sources
+MASTER_BIAS = 0.30         # the master wins over AI views unless they see the point much more head-on (1.2.5: 0.10)
+HOP_PENALTY = 0.20         # per generation of AI-from-AI (a view rendered mostly from other AI views)
+MAX_SOURCE_HOP = 1         # 1.2.5: only the master and views rendered mostly from it are projection sources
+HOP_SHARE = 0.15           # a source counts for a view's hop when it coloured at least this share of it
+STRETCH_MAX = 4.0          # source pixel footprint / target footprint above this = stretched streak → not used
+STRETCH_MAX_MASTER = 64.0  # the master is the truth: only extreme smears (> 8× linear) are refused (real orbit test
+                           #     2026-10-20: 9.0 dropped 17 % of the master's coverage at 72° and its ΔE rose 5.1 → 8.0)
 AUX_TAG = "wondful_mv_aux"
 POOL_FILE = "pool.json"
 LIGHT_FILE = "light.json"
@@ -355,6 +362,26 @@ def correspond(vk, vj):
     return np.where(hit, u, su), np.where(hit, v, sv), vis, sky, hit, sky_in
 
 
+def fj2(rec, W):
+    """Squared focal length in working pixels (pixel footprint ∝ distance² / (cos · f²))."""
+    f = (W / 2.0) / max(float(rec.get("tx", 1.0)), 1e-6)
+    return f * f
+
+
+def view_hop(stats, sources) -> int:
+    """Generation of a new view: 1 + the highest hop among the sources that coloured ≥ HOP_SHARE of it
+    (master = 0). A view rendered mostly from AI views is hop 2 and is no longer a projection source."""
+    share = (stats or {}).get("share") or {}
+    hops = [int(v.get("hop", 0 if v.get("master") else 1)) for v in sources
+            if share.get(v["name"], 0.0) >= HOP_SHARE]
+    return 1 + (max(hops) if hops else 0)
+
+
+def usable_source(entry) -> bool:
+    """1.2.5: only the master and views at most MAX_SOURCE_HOP generations from it are re-projected."""
+    return bool(entry.get("master")) or int(entry.get("hop", 1)) <= MAX_SOURCE_HOP
+
+
 def build_base(vk, sources, clay):
     """Accumulated projection of every accepted source view onto view k (working resolution).
 
@@ -367,6 +394,10 @@ def build_base(vk, sources, clay):
     Nk = Nk / np.maximum(np.linalg.norm(Nk, axis=-1, keepdims=True), 1e-6)
     mk = np.asarray(vk["mask"], np.float32)
     out = np.asarray(clay, np.float32)[..., :3].copy()
+    ok_ = _mat(vk["cam"])[:3, 3] - Pk[..., :3]
+    dk = np.maximum(np.linalg.norm(ok_, axis=-1), 1e-6)
+    cos_k = np.abs((Nk * (ok_ / dk[..., None])).sum(-1))
+    foot_k = (dk ** 2 / np.maximum(cos_k, 0.05)) / (fj2(vk["cam"], W) + 1e-12)
     best = np.full((H, W), -1.0, np.float32)
     srcmap = np.zeros((H, W), np.int16)
     skydone = np.zeros((H, W), bool)
@@ -375,8 +406,14 @@ def build_base(vk, sources, clay):
         U, V, vis, sky, hit, sky_in = correspond(vk, vj)
         cached.append((U, V, sky, sky_in))
         dvec = _mat(vj["cam"])[:3, 3] - Pk[..., :3]
-        dvec /= np.maximum(np.linalg.norm(dvec, axis=-1, keepdims=True), 1e-6)
-        face = np.abs((Nk * dvec).sum(-1)) + (MASTER_BIAS if vj.get("master") else 0.0)
+        dj = np.maximum(np.linalg.norm(dvec, axis=-1, keepdims=True), 1e-6)
+        dvec /= dj
+        cos_j = np.abs((Nk * dvec).sum(-1))
+        face = cos_j + (MASTER_BIAS if vj.get("master") else -HOP_PENALTY * max(0, int(vj.get("hop", 1)) - 1))
+        # 1.2.5 stretch clamp: a source that saw the surface much coarser (far / grazing) than this view smears
+        # it into streaks (the 216° hedge-on-the-ground) → refused; the pixel stays for the style fill
+        ratio = ((dj[..., 0] ** 2 / np.maximum(cos_j, 0.05)) / (fj2(vj["cam"], W) + 1e-12)) / foot_k
+        vis = vis & (ratio <= (STRETCH_MAX_MASTER if vj.get("master") else STRETCH_MAX))
         take = vis & (face > best)
         if take.any():
             col = bilinear(vj["img"], U, V)
@@ -408,6 +445,348 @@ def build_base(vk, sources, clay):
              "share": {v["name"]: round(float(((srcmap == n) | (srcmap == 100 + n) | (srcmap == 200 + n))[env].sum()) / n_env, 3)
                        for n, v in enumerate(sources, start=1)}}
     return out, cover, srcmap, stats
+
+
+# --------------------------------------------------------------------------- 1.2.5 场景补全 style fill
+# Pixels no accepted view covers (the parts the reference photo never saw) used to stay clay grey, and the image
+# model painted them as blank white walls. They now get a style patch rectified from the 主视角: facades of the
+# measured buildings, the road / sidewalk surface, the hedges — tiled in world units on the 场景补全 layout.
+
+FILL_MPP_FACADE = 0.06     # metres per texel of a rectified facade patch
+FILL_MPP_GROUND = 0.03
+FILL_ALPHA = 0.9           # how strongly an uncovered pixel takes the fill (the rest stays clay)
+MAX_FACADE_PATCHES = 4
+CLS_NONE, CLS_ROAD, CLS_SIDE, CLS_FACADE, CLS_VEG, CLS_CURB, CLS_POLE = range(7)
+KIND_CLASS = {"building": CLS_FACADE, "hedge": CLS_VEG, "tree": CLS_VEG, "pole": CLS_POLE, "curb": CLS_CURB}
+CLASS_WORD = {CLS_ROAD: "路面", CLS_SIDE: "人行道", CLS_FACADE: "房屋立面", CLS_VEG: "树篱 / 树", CLS_CURB: "路沿",
+              CLS_POLE: "电杆"}
+
+
+def _mirror(x, n):
+    x = np.floor(x).astype(np.int64) % (2 * n)
+    return np.where(x < n, x, 2 * n - 1 - x)
+
+
+def _unit_n(N):
+    N = np.asarray(N, np.float64)[..., :3]
+    return N / np.maximum(np.linalg.norm(N, axis=-1, keepdims=True), 1e-6)
+
+
+def facade_tangent(P, N):
+    """Horizontal unit tangent of vertical surfaces: from the position pass along the image row (render normals
+    can be smoothed across box corners), the normal's perpendicular where the row has a depth jump."""
+    P = np.asarray(P, np.float64)
+    hit = P[..., 3] > 0.5
+    g = np.zeros(P.shape[:2] + (2,))
+    g[:, 1:-1] = P[:, 2:, :2] - P[:, :-2, :2]
+    both = np.zeros(hit.shape, bool)
+    both[:, 1:-1] = hit[:, 2:] & hit[:, :-2]
+    ln = np.linalg.norm(g, axis=-1)
+    dz = np.zeros(hit.shape)
+    dz[:, 1:-1] = np.abs(P[:, 2:, 2] - P[:, :-2, 2])
+    rng_ok = both & (ln > 1e-4) & (ln < 3.0) & (dz < 0.5 * ln + 0.05)
+    tan = np.stack([-N[..., 1], N[..., 0]], -1)
+    tan[rng_ok] = g[rng_ok]
+    return tan / np.maximum(np.linalg.norm(tan, axis=-1, keepdims=True), 1e-6)
+
+
+def in_box(P, b, tol=0.15):
+    c = np.asarray(b["c"], np.float64)
+    u = np.asarray(b["u"], np.float64)
+    n = np.asarray(b["n"], np.float64)
+    d = np.asarray(P, np.float64)[..., :2] - c
+    a = d @ u
+    bb = d @ n
+    z = np.asarray(P, np.float64)[..., 2]
+    return ((a >= b["a"][0] - tol) & (a <= b["a"][1] + tol) & (bb >= b["b"][0] - tol) & (bb <= b["b"][1] + tol)
+            & (z >= b["z"][0] - tol) & (z <= b["z"][1] + tol))
+
+
+def class_map(vk, layout):
+    """Per pixel of view k: what the surface is (CLS_*) and a style index (which facade patch)."""
+    P = np.asarray(vk["pos"], np.float64)
+    H, W = P.shape[:2]
+    hit = P[..., 3] > 0.5
+    N = _unit_n(vk["nrm"])
+    cls = np.zeros((H, W), np.int8)
+    style = np.zeros((H, W), np.int64)
+    up = np.abs(N[..., 2]) > 0.7
+    cls[hit & up] = CLS_ROAD
+    st = (layout or {}).get("street")
+    if st:
+        a0 = np.asarray(st["a0"], np.float64)
+        t = np.asarray(st["t"], np.float64)
+        nperp = np.array([t[1], -t[0]])
+        off = (P[..., :2] - a0) @ nperp
+        cls[hit & up & (np.abs(off) > float(st["half_width"]) + 0.3)] = CLS_SIDE
+    vert = hit & ~up
+    cls[vert] = CLS_FACADE
+    tan = facade_tangent(P, N)
+    s = (P[..., :2] * tan).sum(-1)
+    plane = (P[..., :2] * np.stack([tan[..., 1], -tan[..., 0]], -1)).sum(-1)
+    style[vert] = (np.floor(s[vert] / 9.0).astype(np.int64) * 7 + np.round(plane[vert] / 3.0).astype(np.int64) * 13) % 997
+    for b in (layout or {}).get("boxes", []):
+        k = KIND_CLASS.get(b.get("kind"), CLS_FACADE)
+        inside = hit & in_box(P, b)
+        if k == CLS_FACADE:
+            inside &= ~(up & (P[..., 2] < b["z"][0] + 0.7))       # the ground at its foot stays ground
+        cls[inside] = k
+        style[inside] = int(b.get("style", 0))
+    return cls, style
+
+
+def _rectify(mv, origin, ax_u, ax_v, nu, nv, mpp, tol, rel=0.03):
+    """Sample the master image on a world grid (origin + ax_u·i·mpp + ax_v·j·mpp): colour + validity
+    (the master sees that point: its position pass agrees within ``tol`` and it is not product / sky)."""
+    P = mv["pos"]
+    H, W = P.shape[:2]
+    i = (np.arange(nu) + 0.5) * mpp
+    j = (np.arange(nv) + 0.5) * mpp
+    Q = (np.asarray(origin, np.float64)[None, None] + np.asarray(ax_u, np.float64)[None, None] * i[None, :, None]
+         + np.asarray(ax_v, np.float64)[None, None] * j[:, None, None])
+    u, v, z = project(mv["cam"], Q, W, H)
+    inside = (z > 0) & (u >= 0) & (u <= W - 1) & (v >= 0) & (v <= H - 1)
+    ui = np.clip(np.round(u).astype(int), 0, W - 1)
+    vi = np.clip(np.round(v).astype(int), 0, H - 1)
+    S = P[vi, ui]
+    rng = np.linalg.norm(Q - _mat(mv["cam"])[:3, 3], axis=-1)
+    prod = dilate(np.asarray(mv["mask"]) > 0.3, 3)
+    ok = inside & (S[..., 3] > 0.5) & (np.linalg.norm(S[..., :3] - Q, axis=-1) < tol + rel * rng) & ~prod[vi, ui]
+    if mv.get("sky") is not None:
+        ok &= ~np.asarray(mv["sky"])[vi, ui]
+    col = bilinear(np.asarray(mv["img"], np.float32), u, v)
+    return col, ok
+
+
+def _crop_facade(col, ok, min_px=24, need=0.75):
+    """Facade patch: rows anchored at the foot (bottom) — the tallest band that still has a long run of mostly
+    valid columns wins (largest area). None if nothing big enough."""
+    nv = ok.shape[0]
+    best = None
+    for frac in (1.0, 0.8, 0.62, 0.48, 0.36):
+        r0 = int(nv * (1 - frac))
+        if nv - r0 < min_px:
+            continue
+        C = _crop_patch(col[r0:], ok[r0:], min_px=min_px, need=need, rows_fixed=True)
+        if C is not None and (best is None or C.size > best.size):
+            best = C
+    return best
+
+
+def _crop_patch(col, ok, min_px=24, need=0.75, rows_fixed=False, min_valid=0.8):
+    """Largest block of rows / columns that is mostly valid; holes filled down each column. None if too small."""
+    cf = ok.mean(0)
+    good = cf >= need
+    best, run, start = (0, 0, 0), 0, 0
+    for k, g in enumerate(list(good) + [False]):
+        if g:
+            if run == 0:
+                start = k
+            run += 1
+        else:
+            if run > best[0]:
+                best = (run, start, start + run)
+            run = 0
+    if best[0] < min_px:
+        return None
+    c0, c1 = best[1], best[2]
+    if rows_fixed:
+        r0, r1 = 0, ok.shape[0]
+    else:
+        rf = ok[:, c0:c1].mean(1)
+        rows = np.nonzero(rf >= need)[0]
+        if len(rows) < min_px:
+            return None
+        r0, r1 = rows[0], rows[-1] + 1
+    C = col[r0:r1, c0:c1].astype(np.float32).copy()
+    O = ok[r0:r1, c0:c1].copy()
+    if O.mean() < min_valid:
+        return None
+    # holes: normalised convolution at growing radii (no column streaks)
+    for r in (1, 2, 4, 8, 16, 32, 64):
+        if O.all():
+            break
+        w = blur(O.astype(np.float32), r, passes=1)
+        num = blur(C * O[..., None], r, passes=1)
+        fill = (~O) & (w > 0.05)
+        C[fill] = num[fill] / w[fill][:, None]
+        O = O | fill
+    if not O.all():
+        C[~O] = np.median(C[O], 0) if O.any() else 128
+    return C
+
+
+def master_patches(mv, layout):
+    """Style patches rectified from the master view: facades (≤ 4, distinct colours), road, sidewalk, greenery."""
+    out = {"facade": [], "road": None, "side": None, "veg": None}
+    if mv.get("img") is None or not layout:
+        return out
+    cam_o = _mat(mv["cam"])[:3, 3]
+    cands = []
+    for f in layout.get("facades", []):
+        c = np.asarray(f["c"], np.float64)
+        u = np.asarray(f["u"], np.float64)
+        n = np.asarray(f["n"], np.float64)
+        z0, z1 = float(f["z"][0]) + 0.2, float(f["z"][1])
+        Wd = float(f["W"])
+        if Wd < 2.0 or z1 - z0 < 2.0:
+            continue
+        # the master must have seen this facade at least about as finely as the patch texel (else it is a blur)
+        dist = float(np.linalg.norm(np.r_[c, (z0 + z1) / 2] - cam_o))
+        if dist * 2.0 * float(mv["cam"].get("tx", 1.0)) / mv["pos"].shape[1] > 2.0 * FILL_MPP_FACADE:
+            continue
+        nu = int(min(600, Wd / FILL_MPP_FACADE))
+        nv = int(min(400, (z1 - z0) / FILL_MPP_FACADE))
+        origin = np.r_[c - u * Wd / 2 + n * 0.35, z1]
+        # the measured facade is not one plane (recesses, awnings, hedges in front): loose depth agreement — what
+        # matters is that the master pixel shows that street front, not the sky or the product
+        col, ok = _rectify(mv, origin, np.r_[u, 0.0], np.array([0.0, 0.0, -1.0]), nu, nv, FILL_MPP_FACADE, 1.5, rel=0.25)
+        C = _crop_facade(col, ok, min_px=int(2.5 / FILL_MPP_FACADE))
+        if C is not None:
+            cands.append((C.shape[0] * C.shape[1], C))
+    cands.sort(key=lambda x: -x[0])
+    for _a, C in cands:
+        mean = lab(C.reshape(-1, 3).mean(0))
+        if all(float(np.linalg.norm(mean - lab(D.reshape(-1, 3).mean(0)))) > 6.0 for D in out["facade"]):
+            out["facade"].append(C)
+        if len(out["facade"]) >= MAX_FACADE_PATCHES:
+            break
+    # ground: 4 m squares around master ground pixels near the camera, away from the product
+    P = mv["pos"]
+    N = _unit_n(mv["nrm"])
+    H, W = P.shape[:2]
+    rng = np.linalg.norm(P[..., :3] - cam_o, axis=-1)
+    prod = dilate(np.asarray(mv["mask"]) > 0.3, max(3, W // 60))
+    g = (P[..., 3] > 0.5) & (N[..., 2] > 0.8) & (rng < 30) & ~prod
+    st = layout.get("street")
+    ys, xs = np.nonzero(g)
+    if len(ys):
+        rs = np.random.default_rng(7)
+        pick = rs.choice(len(ys), min(60, len(ys)), replace=False)
+        side = 2.0
+        n_g = int(side / FILL_MPP_GROUND)
+        best = {"road": (0.0, None), "side": (0.0, None)}
+        for k in pick:
+            q = P[ys[k], xs[k], :3]
+            key = "road"
+            if st:
+                t = np.asarray(st["t"], np.float64)
+                off = float((q[:2] - np.asarray(st["a0"])) @ np.array([t[1], -t[0]]))
+                key = "road" if abs(off) <= float(st["half_width"]) - 0.5 else (
+                    "side" if abs(off) >= float(st["half_width"]) + 0.5 else "")
+            if not key:
+                continue
+            origin = q - np.array([side / 2, side / 2, 0.0])
+            col, ok = _rectify(mv, origin, np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), n_g, n_g, FILL_MPP_GROUND,
+                               0.25)
+            sc = float(ok.mean()) - 0.004 * float(rng[ys[k], xs[k]])
+            if ok.mean() > 0.85 and sc > best[key][0]:
+                C = _crop_patch(col, ok, min_px=n_g // 2, need=0.7)
+                if C is not None:
+                    best[key] = (sc, C)
+        out["road"], out["side"] = best["road"][1], best["side"][1]
+    for v in layout.get("veg_refs", []):
+        xy = np.asarray(v["xy"], np.float64)
+        r = float(v["r"])
+        bot, top = float(v["z"][0]), float(v["z"][1])
+        if r < 0.4 or top - bot < 0.4:
+            continue
+        d = cam_o[:2] - xy
+        d /= max(np.linalg.norm(d), 1e-6)
+        tg = np.array([d[1], -d[0]])
+        origin = np.r_[xy - tg * r + d * r * 0.6, top]
+        nu = max(8, int(2 * r / FILL_MPP_FACADE))
+        nv = max(8, int((top - bot) / FILL_MPP_FACADE))
+        col, ok = _rectify(mv, origin, np.r_[tg, 0.0], np.array([0.0, 0.0, -1.0]), nu, nv, FILL_MPP_FACADE, r + 0.8)
+        C = _crop_patch(col, ok, min_px=8, need=0.6)
+        if C is not None and (out["veg"] is None or C.size > out["veg"].size):
+            out["veg"] = C
+    return out
+
+
+def style_fill(vk, cls, style, patches, layout):
+    """(fill image H×W×3, fill mask) for view k from the master patches, tiled in world units."""
+    P = np.asarray(vk["pos"], np.float64)
+    H, W = P.shape[:2]
+    N = _unit_n(vk["nrm"])
+    out = np.zeros((H, W, 3), np.float32)
+    have = np.zeros((H, W), bool)
+    gz = (layout or {}).get("ground_z")
+    gz = float(gz) if gz is not None else float(np.percentile(P[..., 2][(P[..., 3] > 0.5) & (N[..., 2] > 0.8)], 30))         if ((P[..., 3] > 0.5) & (N[..., 2] > 0.8)).any() else 0.0
+    st = (layout or {}).get("street")
+    if st:
+        t = np.asarray(st["t"], np.float64)
+        a0 = np.asarray(st["a0"], np.float64)
+        gs = (P[..., :2] - a0) @ t
+        go = (P[..., :2] - a0) @ np.array([t[1], -t[0]])
+    else:
+        gs, go = P[..., 0], P[..., 1]
+
+    def put(sel, patch, pu, pv):
+        if patch is None or not sel.any():
+            return
+        h, w = patch.shape[:2]
+        u, v = pu[sel] - 0.5, pv[sel] - 0.5          # bilinear on the mirrored tiling (no blocky near texels)
+        fu, fv = u - np.floor(u), v - np.floor(v)
+        u0, v0 = np.floor(u), np.floor(v)
+        acc = 0.0
+        for dv, wv in ((0, 1 - fv), (1, fv)):
+            for du, wu in ((0, 1 - fu), (1, fu)):
+                acc = acc + patch[_mirror(v0 + dv, h), _mirror(u0 + du, w)] * (wv * wu)[:, None]
+        out[sel] = acc
+        have[sel] = True
+    road = patches.get("road")
+    side = patches.get("side") if patches.get("side") is not None else road
+    put(cls == CLS_ROAD, road if road is not None else side, gs / FILL_MPP_GROUND, go / FILL_MPP_GROUND)
+    put(cls == CLS_SIDE, side, gs / FILL_MPP_GROUND, go / FILL_MPP_GROUND)
+    if side is not None:
+        put(cls == CLS_CURB, np.clip(side * 1.12 + 6, 0, 255), gs / FILL_MPP_GROUND, (P[..., 2] - gz) / FILL_MPP_GROUND)
+    tan = facade_tangent(P, N)
+    s = (P[..., :2] * tan).sum(-1)
+    fac = patches.get("facade") or []
+    zbase = np.full((H, W), gz)
+    for b in (layout or {}).get("boxes", []):
+        if b.get("kind") == "building":
+            inside = (cls == CLS_FACADE) & in_box(P, b)
+            zbase[inside] = float(b["z"][0]) + 0.5
+    for k, patch in enumerate(fac):
+        sel = (cls == CLS_FACADE) & (style % len(fac) == k)
+        h = patch.shape[0]
+        zr = P[..., 2] - zbase
+        # bottom row of the patch = the facade's foot; above the patch height the upper storeys repeat
+        put(sel, patch, s / FILL_MPP_FACADE, (h - 1) - zr / FILL_MPP_FACADE)
+    veg = patches.get("veg")
+    if veg is None:
+        veg = np.full((8, 8, 3), (58, 78, 46), np.float32)
+    put(cls == CLS_VEG, veg, s / FILL_MPP_FACADE, -P[..., 2] / FILL_MPP_FACADE)
+    pole = cls == CLS_POLE
+    out[pole] = (96, 96, 98)
+    have |= pole
+    have &= np.asarray(vk["mask"]) < 0.5
+    return out, have
+
+
+def apply_fill(env, cover, fill, have, alpha=FILL_ALPHA):
+    """Uncovered pixels take the style fill: returns (env', cover', filled share mask)."""
+    need = np.clip(1.0 - cover, 0.0, 1.0) * have.astype(np.float32) * float(alpha)
+    env2 = env * (1.0 - need[..., None]) + fill * need[..., None]
+    cover2 = np.clip(cover + need, 0.0, 1.0)
+    return env2, cover2, need > 0.25
+
+
+def fill_note(cls, filled, stats_text="") -> str:
+    """Prompt note for a view whose base carries style fill (empty when it is negligible)."""
+    n = max(1, int(filled.size))
+    share = float(filled.sum()) / n
+    if share < 0.02:
+        return ""
+    kinds = [CLASS_WORD[k] for k in (CLS_FACADE, CLS_ROAD, CLS_SIDE, CLS_VEG, CLS_CURB, CLS_POLE)
+             if float((filled & (cls == k)).sum()) / n > 0.004]
+    return ("底图里主视角没拍到的部分（约 {:.0%}）已按看到的街道推测补全，并铺了从主视角取样的同类材质示意纹理（{}）："
+            "请把这些部分画成主视角同一条街的自然延续{}——同样类型、相近颜色和层数的房屋（有窗户、门、屋顶 / 雨棚），"
+            "同样的路面、路沿、树篱和电杆；示意纹理只表示材质和颜色范围，可以重画细节，"
+            "不要画成空白墙面、大面积纯色墙或空地。").format(share, "、".join(kinds) or "环境",
+                                                        f"（{stats_text}）" if stats_text else "")
 
 
 def compose_canvas(env_work, cover_work, clay_full, mask_full):
@@ -640,13 +1019,15 @@ def light_sentence(light: dict, cam) -> str:
             "阴影软硬与主视角一致" + (f"（{words}）" if words else "") + "，不要改变时段或天气。")
 
 
-def view_text(massing_text, light_line, source_names) -> str:
+def view_text(massing_text, light_line, source_names, fill_line="") -> str:
     """Per-view addition to the simple-path prompt (goes in as ``massing_text``)."""
     parts = [t.strip() for t in (massing_text or "",) if t and t.strip()]
     if light_line:
         parts.append(light_line)
     names = [n for n in source_names or () if n]
     parts.append(BASE_NOTE.format(sources="主视角" + ("和" + "、".join(names[1:]) if len(names) > 1 else "")))
+    if fill_line:
+        parts.append(fill_line)
     return "\n".join(parts)
 
 
@@ -704,6 +1085,7 @@ def load_view(pool, entry, with_image=True):
     from .png_io import read_png
     d = Path(pool)
     v = {"name": entry["name"], "cam": entry["cam"], "master": bool(entry.get("master")),
+         "hop": 0 if entry.get("master") else int(entry.get("hop", 1)),
          "pos": np.load(d / entry["pos"]), "nrm": np.load(d / entry["nrm"]),
          "mask": np.load(d / entry["mask"]).astype(np.float32)}
     H, W = v["pos"].shape[:2]
@@ -926,7 +1308,7 @@ def _block_words(obj) -> str:
     return (hint + " " + obj.name).lower()
 
 
-def widen_blockout(context, massing_coll, product_coll, master_cam):
+def widen_blockout(context, massing_coll, product_coll, master_cam, fillers=True):
     """Temporary wider blockout for the other cameras (removed again by ``remove_aux``):
     - interiors (horizontal rays from the product mostly hit blocks, or wall-like blocks exist):
       flat walls closing every side where rays escape, never on a side the master camera sees;
@@ -1002,6 +1384,9 @@ def widen_blockout(context, massing_coll, product_coll, master_cam):
             log["closure"].append(key)
         return made, log
     builds = [o for o, t in zip(blocks, words) if any(w in t for w in BUILDING_WORDS)]
+    if not fillers:          # 1.2.5: the ④ 场景补全 already continues the street
+        log["fillers_skipped"] = "场景补全"
+        return made, log
     if len(builds) < 2:
         return made, log
     dims = sorted((o.dimensions.x, o.dimensions.y, o.dimensions.z) for o in builds)

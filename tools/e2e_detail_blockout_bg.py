@@ -76,6 +76,7 @@ def run(OPS, props, kw, limit=300):
     coll = bpy.data.collections.get(SB.COLLECTION_NAME)
     objs = list(coll.all_objects) if coll else []
     car = [o for o in objs if o.get(DB.CARRIER_TAG)]
+    inf = [o for o in objs if o.get(DB.INFER_TAG)]
     tris = 0
     for o in car:
         o.data.calc_loop_triangles()
@@ -84,7 +85,32 @@ def run(OPS, props, kw, limit=300):
             "llm_objects": sorted(o.name for o in objs if not o.get(DB.CARRIER_TAG)),
             "carrier_objects": len(car), "carrier_tris": tris,
             "carrier_hidden": all(o.hide_render and o.hide_viewport for o in car),
-            "far_kept": sum(int(o.get(DB.FAR_TAG, 0) or 0) for o in objs), "seconds": round(time.time() - t, 1)}
+            "far_kept": sum(int(o.get(DB.FAR_TAG, 0) or 0) for o in objs), "seconds": round(time.time() - t, 1),
+            "inferred_objects": len(inf), "inferred_visible": all(not o.hide_render for o in inf),
+            "inferred_seen": _seen(inf), "layout": bool(DB.completion_layout())}
+
+
+def _seen(objs):
+    """Inferred vertices the reference camera sees directly (frustum + ray hits that very object)."""
+    from bpy_extras.object_utils import world_to_camera_view
+    sc = bpy.context.scene
+    cam = sc.camera
+    if cam is None or not objs:
+        return 0
+    dg = bpy.context.evaluated_depsgraph_get()
+    o0 = cam.matrix_world.translation
+    seen = 0
+    for ob in objs:
+        for v in list(ob.data.vertices)[::5]:
+            p = ob.matrix_world @ v.co
+            c = world_to_camera_view(sc, cam, p)
+            if not (c.z > 0 and 0.01 <= c.x <= 0.99 and 0.01 <= c.y <= 0.99):
+                continue
+            d = p - o0
+            hit, loc, _n, _i, hob, _m = sc.ray_cast(dg, o0, d.normalized(), distance=d.length + 0.05)
+            if hit and hob == ob and (loc - p).length < 0.2:
+                seen += 1
+    return seen
 
 
 def geometry_pass(props, prefix, detail):
@@ -139,6 +165,7 @@ def main():
         props.sb_image_path = ref
         props.sb_set_camera = True
         props.sb_correct = False
+        props.sb_complete = False     # 1.2.5 场景补全: its own arms below (the carrier checks predate it)
         fixture = json.load(open(FIX, encoding="utf-8"))
         state = {"fixture": fixture}
         SB.call_analysis = lambda content, **kw: json.loads(json.dumps(state["fixture"]))
@@ -186,6 +213,14 @@ def main():
         props.sb_detail_carrier = True
         props.sb_precise = False
         rep["off"] = run(OPS, props, {})
+        props.sb_precise = True
+        # 1.2.5 场景补全 (default on): part of the ④ build, with and without 精确模式
+        props.sb_complete = True
+        rep["complete_precise"] = run(OPS, props, {"precise_geo": geo_path})
+        props.sb_precise = False
+        rep["complete_llm"] = run(OPS, props, {})
+        props.sb_complete = False
+        rep["complete_off"] = run(OPS, props, {})
         props.sb_precise = True
         inter = os.path.join(os.path.dirname(FIX), "interior_v3.json")
         state["fixture"] = json.load(open(inter, encoding="utf-8"))

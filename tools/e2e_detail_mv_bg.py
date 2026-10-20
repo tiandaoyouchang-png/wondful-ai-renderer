@@ -22,6 +22,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 _src = open(os.path.join(HERE, "e2e_scene_blockout_bg.py"), encoding="utf-8").read()
 _src = _src[:_src.rindex("\nmain()")]
+REF = ZIP = RUN = LOG = CACHED = patch = wait = build_scene = log = None  # defined by the exec below (pyflakes)
 exec(compile(_src, "e2e_scene_blockout_bg.py", "exec"))   # noqa: S102 — harness: patch, wait, build_scene, log …
 
 import bpy  # noqa: E402

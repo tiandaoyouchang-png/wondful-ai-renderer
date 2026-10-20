@@ -267,6 +267,18 @@ class BlenderDetailTest(unittest.TestCase):
         self.assertLess(g["carrier_hole_below_horizon"], 0.002)
         self.assertTrue(g["restored"])
 
+    def test_scene_completion_in_blockout(self):
+        cp, cl, off = self.rep["complete_precise"], self.rep["complete_llm"], self.rep["complete_off"]
+        self.assertGreater(cp["inferred_objects"], 0, cp["note"])
+        self.assertTrue(cp["inferred_visible"])          # part of the visible 场景粗模, not the hidden carrier
+        self.assertEqual(cp["inferred_seen"], 0)         # never where the reference camera looks
+        self.assertTrue(cp["layout"])
+        self.assertIn("场景补全", cp["note"])
+        self.assertIn("场景补全", cl["note"])
+        self.assertEqual(cl["inferred_seen"], 0)
+        self.assertEqual(off["inferred_objects"], 0)
+        self.assertNotIn("场景补全", off["note"])
+
     def test_interior_fallback(self):
         self.assertEqual(self.rep["interior"]["carrier_objects"], 0)
         self.assertIn("室内", self.rep["interior"]["note"])

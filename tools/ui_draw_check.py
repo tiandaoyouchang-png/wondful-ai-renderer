@@ -598,6 +598,9 @@ def main():
     # 1.2.5 精确模式: a small checkbox in ④ (default off); on + not installed → one download hint
     if "prop sb_precise" not in "\n".join(step4(draw("scene_blockout_precise_off"))) or props.sb_precise:
         problems.append("sb precise: ④ has no 精确模式 checkbox, or it is on by default")
+    # 1.2.5 场景补全: part of building the 场景粗模 (④), default on
+    if "prop sb_complete" not in "\n".join(step4(draw("scene_blockout_complete"))) or not props.sb_complete:
+        problems.append("sb 场景补全: ④ has no 场景补全 checkbox, or it is off by default")
     from wondful_ai_renderer import precise_setup as _PS
     os.environ["WONDFUL_PRECISE_DIR"] = os.path.join(tmp, "precise_empty")
     _PS._CACHE["v"] = None

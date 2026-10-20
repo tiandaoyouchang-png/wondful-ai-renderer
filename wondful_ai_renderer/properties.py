@@ -970,6 +970,11 @@ class WONDFUL_AISettings(PropertyGroup):
                              description="在本机用深度模型测量参考图：相机（高度、俯仰、视角）用实测值，每个体块的距离和"
                                          "宽高按实测深度对齐。第一次使用会下载约 155 MB（深度模型 + 运行库），参考图不上传；"
                                          "装不上时自动改用普通模式")
+    # 1.2.5 场景补全 (④ 场景粗模, default on): infer what the reference photo does not show
+    sb_complete: BoolProperty(name="场景补全", default=True,
+                              description="搭场景粗模时按参考图里看到的街道推测看不到的部分并补上体块：道路按实测方向和宽度继续、"
+                                          "路沿，两侧房屋按实测的退线、高度、进深和间距延续（只有一侧时按对侧推测），树篱 / 树 / 电杆"
+                                          "按看到的节奏延续；只放在参考相机看不到、也不挡产品周围的位置。换角度渲染时背面不再是空地 / 白墙")
     # 1.2.5 细节粗模 (V3 phase 1, 高级 › 多角度): measured near / mid-ground geometry, built only with 精确模式
     sb_detail_carrier: BoolProperty(name="细节粗模投影", default=True,
                                     description="精确模式下，④ 额外按实测深度搭一份近中景细节粗模（地面高度场、建筑表皮 + 体积、"

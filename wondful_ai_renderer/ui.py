@@ -894,7 +894,10 @@ def _draw_blockout_step(layout, context, props, busy, connected, is_antigravity,
     row.prop(props, "sb_set_camera", text="同时设置相机")
     row.prop(props, "sb_correct", text="自动校正一轮")
     # 1.2.5 精确模式 (default off): local depth model measures camera + distances
-    col.prop(props, "sb_precise", text="精确模式（本机测深度）")
+    row = col.row(align=True)
+    row.prop(props, "sb_precise", text="精确模式（本机测深度）")
+    # 1.2.5 场景补全 (default on): the blockout continues the street the photo does not show
+    row.prop(props, "sb_complete", text="场景补全")
     if getattr(props, "sb_precise", False) and not running:
         from . import precise_setup as PS
         if not PS.cached_status()["ready"]:

@@ -54,7 +54,12 @@ MIN_GROUND_SHARE = 0.04
 # part classes (stored per face as ``C``)
 C_GROUND, C_BUILDING, C_PROP, C_TREE, C_POLE, C_SKIN, C_WINDOW, C_WALL = 0, 1, 2, 3, 4, 5, 6, 7
 C_NAME = {C_GROUND: "地面", C_BUILDING: "建筑体积", C_PROP: "车辆道具", C_TREE: "树冠", C_POLE: "杆",
-          C_SKIN: "实测表皮", C_WINDOW: "窗", C_WALL: "墙栏"}
+          C_SKIN: "实测表皮", C_WINDOW: "窗", C_WALL: "墙栏",
+          # 场景补全 (scene_complete.C_INF_*): inferred parts, separate objects tagged INFER_TAG
+          8: "推测建筑", 9: "推测绿植", 10: "推测电杆", 11: "推测路沿", 12: "推测窗"}
+C_INFERRED = (8, 9, 10, 11, 12)
+INFER_TAG = "wondful_detail_inferred"
+LAYOUT_KEY = "wondful_completion"
 
 
 # ============================================================================== numpy stand-ins for scipy.ndimage
@@ -261,10 +266,11 @@ def window_frames(o, a, b, la, lb, nrm, floor_h=3.0, bay=3.2, win_w=1.2, win_h=1
     return V, F
 
 
-def prism_with_windows(M, c, u, n, W, D, z0, z1, cam_xy, info, windows=True, win_limit=10 ** 9):
+def prism_with_windows(M, c, u, n, W, D, z0, z1, cam_xy, info, windows=True, win_limit=10 ** 9,
+                       cls=C_BUILDING, win_cls=C_WINDOW):
     """Closed prism (``box``) + window frames only on its vertical faces the reference camera cannot see."""
     V, F = box(c, u, n, W, D, z0, z1)
-    M.add(V, F, C_BUILDING, info)
+    M.add(V, F, cls, info)
     if not windows or z1 - z0 < 4.0:
         return 0
     c = np.asarray(c, float); u = np.asarray(u, float); n = np.asarray(n, float)
@@ -282,7 +288,7 @@ def prism_with_windows(M, c, u, n, W, D, z0, z1, cam_xy, info, windows=True, win
             continue
         Vw, Fw = window_frames(o, a, up, la, z1 - z0, nrm, limit=win_limit - made)
         if Fw:
-            M.add(Vw, Fw, C_WINDOW)
+            M.add(Vw, Fw, win_cls)
             made += len(Fw) // 6
     return made
 
@@ -628,7 +634,8 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
             continue
         if W < 0.7 and z1 - zb > 2.5:
             V, F = cylinder(cen[0], cen[1], max(0.12, W / 2), g0 - 0.3, z1)
-            M.add(V, F, C_POLE, {"kind": "pole", "dist": round(dist, 1), "h": round(z1 - g0, 2)})
+            M.add(V, F, C_POLE, {"kind": "pole", "dist": round(dist, 1), "h": round(z1 - g0, 2),
+                                 "xy": [round(float(cen[0]), 2), round(float(cen[1]), 2)]})
             stats["poles"] += 1
             continue
         if z1 - g0 < 0.4:
@@ -687,7 +694,9 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                 c0 = u * (a0 + a1) / 2 + n * front - n * 0.35
                 stats["windows"] += prism_with_windows(
                     M, c0, u, n, Ws * shrink + 0.05, D, g0 - 0.5, top, cam_xy,
-                    {"kind": "building", "dist": round(dist, 1), "W": round(Ws, 2), "D": round(D, 1), "top": round(top, 2)},
+                    {"kind": "building", "dist": round(dist, 1), "W": round(Ws, 2), "D": round(D, 1), "top": round(top, 2),
+                     "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)], "u": [round(float(u[0]), 4), round(float(u[1]), 4)],
+                     "n": [round(float(n[0]), 4), round(float(n[1]), 4)], "g0": round(g0, 2)},
                     windows=windows, win_limit=max(0, win_limit - stats["windows"]))
                 stats["buildings"] += 1
             continue
@@ -696,7 +705,8 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
         c0 = u * (a.min() + a.max()) / 2 + n * front
         if W >= 6.0 and hh < 2.2:
             V, F = box(c0, u, n, W, max(Dm, 0.3), g0 - 0.3, z1)
-            M.add(V, F, C_WALL, {"kind": "wall/fence", "dist": round(dist, 1), "W": round(W, 2), "h": round(hh, 2)})
+            M.add(V, F, C_WALL, {"kind": "wall/fence", "dist": round(dist, 1), "W": round(W, 2), "h": round(hh, 2),
+                                 "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
             stats["walls"] += 1
             continue
         if 1.4 <= W <= 2.8 and 1.2 <= hh <= 4.0:            # vehicle seen end-on → length assumed
@@ -706,7 +716,8 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
         else:
             D = max(Dm, 0.5 * W, 0.4)
         V, F = rounded_box(c0, u, n, W, D, g0 - 0.2, z1)
-        M.add(V, F, C_PROP, {"kind": "vehicle/prop", "dist": round(dist, 1), "W": round(W, 2), "D": round(D, 2), "h": round(hh, 2)})
+        M.add(V, F, C_PROP, {"kind": "vehicle/prop", "dist": round(dist, 1), "W": round(W, 2), "D": round(D, 2), "h": round(hh, 2),
+                                  "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
         stats["props"] += 1
     vcomps, _ = components(P, mask, cls, [VEG], st, min_px=25, r_split=r_split)
     for ci, c in enumerate(vcomps):
@@ -744,7 +755,8 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                 continue
             V, F = ellipsoid(np.r_[cxy, (top + bot) / 2], rx, rx, rz, seed=ci * 31 + k)
             M.add(V, F, C_TREE, {"kind": "tree crown" if bot - g0 > 0.8 else "bush/hedge", "dist": round(dist, 1),
-                                 "r": round(rx, 2), "z": [round(bot, 2), round(top, 2)]})
+                                 "r": round(rx, 2), "z": [round(bot, 2), round(top, 2)],
+                                 "xy": [round(float(cxy[0]), 2), round(float(cxy[1]), 2)], "g0": round(g0, 2)})
             stats["trees"] += 1
             if bot - g0 > 0.8:
                 V, F = cylinder(cxy[0], cxy[1], max(0.12, min(0.35, rx * 0.12)), g0 - 0.2, bot + rz * 0.5, 6)
@@ -754,12 +766,15 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
 
 # ============================================================================== top level
 
-def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, budget=TRI_BUDGET, z_offset=0.0):
+def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, budget=TRI_BUDGET, z_offset=0.0,
+          complete=True, analysis=None, obstacles=()):
     """Detail blockout from one 精确模式 measurement → dict(ok, reason, V, F, C, parts, stats).
 
     ``far_z(x, y)``: LLM terrain height in the analysis frame (already offset like the result), used beyond
     ``r_split``. ``pad`` = (x, y, radius, z) product spot in the same frame (ground flattened to z; no part
-    built inside). ``z_offset`` lifts every measured height (LLM terrain height under the camera)."""
+    built inside). ``z_offset`` lifts every measured height (LLM terrain height under the camera).
+    ``complete``: 场景补全 — infer the street the photo never saw (``scene_complete``; ``analysis`` = the ④ analysis
+    JSON for road direction / lot widths / poles); the result then carries ``layout`` (analysis frame)."""
     t0 = time.time()
     ok, reason = plausible(geo, scene_kind)
     if not ok:
@@ -825,12 +840,38 @@ def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, b
         if 5 * int(qm.sum()) > left:
             continue
         shell_piece(Qv[::k, ::k], qm, cam_h, M, C_SKIN, tm)
+    layout = None
+    if complete:
+        # 场景补全: continue the measured street where the photo did not look (closed, tagged, lower confidence)
+        try:
+            from . import scene_complete as SC
+        except ImportError:          # loaded by path (tests)
+            import importlib.util as _ilu
+            import os as _os
+            _sp = _ilu.spec_from_file_location("scene_complete", _os.path.join(_os.path.dirname(__file__), "scene_complete.py"))
+            SC = _ilu.module_from_spec(_sp)
+            _sp.loader.exec_module(SC)
+        try:
+            mview = SC.MasterView(geo, z_offset)
+            cst, layout = SC.complete(_Prims(), M, list(M.parts), lambda x, y: terrain_z(T, x, y), mview.visible,
+                                      pad=pad, analysis=analysis, budget_left=max(0, budget - len(FT) - M.tris()),
+                                      obstacles=obstacles)
+        except Exception as exc:     # never lose the measured blockout over the inferred part
+            cst, layout = {"ok": False, "reason": f"出错：{str(exc)[:60]}"}, None
+        stats["complete"] = cst
     M.add(VT, FT, C_GROUND, {"kind": "ground", "tris": int(len(FT))})
     V, F, C = M.arrays()
     stats.update({"skin_stride": st, "skin_quads": nq, "terrain_tris": int(len(FT)), "tris": int(len(F)),
                   "terrain_s": round(t_ter, 3), "r_split": r_split})
     return {"ok": True, "reason": "", "V": V, "F": F, "C": C, "parts": M.parts, "stats": stats,
-            "seconds": round(time.time() - t0, 3)}
+            "layout": layout, "seconds": round(time.time() - t0, 3)}
+
+
+class _Prims:
+    """This module's primitives for ``scene_complete`` (works the same when the module was exec'd by path)."""
+
+    def __getattr__(self, name):
+        return globals()[name]
 
 
 # ============================================================================== far skyline silhouette (远山剪影)
@@ -1017,8 +1058,22 @@ def summary_text(res) -> str:
     s = res["stats"]
     sk = res.get("skyline") or {}
     far = "远景沿用 AI 远景带" + ("（远山剪影可用）" if sk.get("ok") else "")
-    return (f"细节粗模 {s['tris'] // 1000}k 面：建筑 {s['buildings']} · 车辆道具 {s['props'] + s['slabs']} · "
+    line = (f"细节粗模 {s['tris'] // 1000}k 面：建筑 {s['buildings']} · 车辆道具 {s['props'] + s['slabs']} · "
             f"树 {s['trees']} · {far}")
+    cst = s.get("complete")
+    if cst:
+        line += " · " + completion_text(cst)
+    return line
+
+
+def completion_text(cst) -> str:
+    if not cst:
+        return ""
+    if not cst.get("ok"):
+        return f"场景补全：{cst.get('reason', '未补全')}"
+    return (f"场景补全：推测建筑 {cst.get('buildings', 0)} · 绿植 {cst.get('hedges', 0) + cst.get('trees', 0)} · "
+            f"电杆 {cst.get('poles', 0)} · 路沿 {cst.get('curbs', 0)}"
+            + (f"（{'、'.join(cst['mirrored'])}侧按对侧推测）" if cst.get("mirrored") else ""))
 
 
 # ============================================================================== Blender side (main thread)
@@ -1047,7 +1102,7 @@ def _world_tris(objs, depsgraph=None):
 
 def remove_carrier():
     import bpy
-    for coll in [c for c in bpy.data.collections if c.get(CARRIER_TAG)]:
+    for coll in [c for c in bpy.data.collections if c.get(CARRIER_TAG) or c.get(INFER_TAG)]:
         for ob in list(coll.all_objects):
             me = ob.data if ob.type == "MESH" else None
             bpy.data.objects.remove(ob, do_unlink=True)
@@ -1064,7 +1119,7 @@ def find_carrier(scene=None):
     return None
 
 
-def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
+def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, analysis=None, complete=True):
     """Build the detail blockout for a just-built ④ blockout (``scene_blockout_build.build`` info dict).
 
     Objects go to a hidden child collection 「Wondful 细节粗模（投影）」 of the blockout collection (tagged
@@ -1102,7 +1157,14 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
     pad = None
     if sp:
         pad = (float(sp[0]), float(sp[1]), float(info.get("pad_radius", 2.5)), float(sp[2]))
-    res = build(geo, far_z=far_z, pad=pad, scene_kind=scene_kind, r_split=r_split, z_offset=z_offset)
+    obstacles = []
+    if complete:
+        try:
+            obstacles = [f[:5] for f in llm_footprints(coll, winv, r_split)]
+        except Exception as exc:
+            print(f"[Wondful] 场景补全：读取 AI 体块失败：{exc}")
+    res = build(geo, far_z=far_z, pad=pad, scene_kind=scene_kind, r_split=r_split, z_offset=z_offset,
+                complete=complete, analysis=analysis, obstacles=obstacles)
     out = {k: res.get(k) for k in ("ok", "reason", "stats", "seconds")}
     if not res["ok"]:
         print(f"[Wondful] 细节粗模未生成：{res['reason']}（多角度沿用普通粗模）")
@@ -1115,32 +1177,18 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
     V, F, C = res["V"], res["F"], res["C"]
     Mw = np.array(world)
     Vw = V @ Mw[:3, :3].T + Mw[:3, 3]
+    inf_coll = None
     for c in np.unique(C):
         sel = C == c
-        Fc = F[sel]
-        used = np.unique(Fc)
-        remap = -np.ones(len(Vw), np.int64)
-        remap[used] = np.arange(len(used))
-        Vc = Vw[used].astype(np.float32)
-        Fl = remap[Fc].astype(np.int32)
-        name = f"细节_{C_NAME.get(int(c), str(c))}"
-        me = bpy.data.meshes.new(name)
-        me.vertices.add(len(Vc))
-        me.vertices.foreach_set("co", Vc.ravel())
-        me.loops.add(Fl.size)
-        me.loops.foreach_set("vertex_index", Fl.ravel())
-        me.polygons.add(len(Fl))
-        me.polygons.foreach_set("loop_start", np.arange(0, Fl.size, 3, dtype=np.int32))
-        me.polygons.foreach_set("loop_total", np.full(len(Fl), 3, np.int32))
-        me.update()
-        me.validate()
-        me.materials.append(mat)
-        ob = bpy.data.objects.new(name, me)
-        ob[CARRIER_TAG] = 1
-        ob["wondful_hint"] = C_NAME.get(int(c), "")
-        sub.objects.link(ob)
-        ob.hide_render = True
-        ob.hide_viewport = True
+        if int(c) in C_INFERRED:
+            # 场景补全: part of the visible 场景粗模 (the saved blockout holds the completed street)
+            if inf_coll is None:
+                inf_coll = _inferred_collection(coll)
+            _link_mesh(inf_coll, f"补全_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=False,
+                       tags=(INFER_TAG,), hint=INFER_HINT.get(int(c), C_NAME.get(int(c), "")))
+            continue
+        ob = _link_mesh(sub, f"细节_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=True, tags=(CARRIER_TAG,),
+                        hint=C_NAME.get(int(c), ""))
     # 远山剪影 (optional at render time): measured far silhouette ridge, hidden like the rest of the carrier
     try:
         sk = measured_skyline(geo, r_split=r_split, z_offset=z_offset)
@@ -1175,7 +1223,7 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
     # mark the far LLM blocks (kept in a detail pass)
     kept = 0
     for ob in coll.all_objects:
-        if ob.get(CARRIER_TAG):
+        if ob.get(CARRIER_TAG) or ob.get(INFER_TAG):
             continue
         try:
             pts = [winv @ (ob.matrix_world @ Vector(c)) for c in ob.bound_box]
@@ -1191,11 +1239,223 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
         ob[FAR_TAG] = 1 if role == "keep" else 0
         kept += role == "keep"
     sub["wondful_detail_stats"] = str(res["stats"])
+    if res.get("layout"):
+        try:
+            from . import scene_complete as SC
+            import json as _json
+            lw = SC.layout_to_world(res["layout"], Mw)
+            lw["stats"] = (res["stats"].get("complete") or {})
+            (inf_coll if inf_coll is not None else sub)[LAYOUT_KEY] = _json.dumps(lw, ensure_ascii=False, default=float)
+        except Exception as exc:
+            print(f"[Wondful] 场景补全布局保存失败：{exc}")
     out["stats"]["llm_kept"] = kept
     out["seconds_total"] = round(time.time() - t0, 3)
     print(f"[Wondful] 细节粗模：{res['stats']['tris']} 面（地面 {res['stats']['terrain_tris']}，表皮步长 "
           f"{res['stats']['skin_stride']}），生成 {res['seconds']:.2f} s，保留远景体块 {kept} 个")
     return out
+
+
+INFER_COLLECTION = "Wondful 场景补全（推测）"
+INFER_HINT = {8: "与主视角同一条街的房屋（主视角以外，按看到的街道推测补全）：同样的类型、颜色范围、层数、窗户和屋顶，不要画成空白墙",
+              9: "与主视角同样的修剪树篱 / 行道树（推测补全）", 10: "与主视角同样的电线杆（推测补全）",
+              11: "与主视角同样的路沿（推测补全）", 12: "房屋窗户（推测补全）"}
+
+
+def _inferred_collection(parent):
+    import bpy
+    sub = bpy.data.collections.new(INFER_COLLECTION)
+    sub[INFER_TAG] = 1
+    parent.children.link(sub)
+    return sub
+
+
+def remove_inferred():
+    """Drop every 场景补全 collection (a new 场景粗模 is being finished)."""
+    import bpy
+    for old in [c for c in bpy.data.collections if c.get(INFER_TAG)]:
+        for ob in list(old.all_objects):
+            me = ob.data if ob.type == "MESH" else None
+            bpy.data.objects.remove(ob, do_unlink=True)
+            if me is not None and me.users == 0:
+                bpy.data.meshes.remove(me)
+        bpy.data.collections.remove(old)
+
+
+def find_inferred(scene=None):
+    """The 场景补全 collection (visible part of the 场景粗模), or None."""
+    import bpy
+    for coll in bpy.data.collections:
+        if coll.get(INFER_TAG) and len(coll.objects):
+            return coll
+    return None
+
+
+def completion_layout(scene=None):
+    """World-frame 场景补全 layout (dict) of the current 场景粗模, or None."""
+    import json as _json
+    import bpy
+    for coll in bpy.data.collections:
+        raw = coll.get(LAYOUT_KEY) if (coll.get(INFER_TAG) or coll.get(CARRIER_TAG)) else None
+        if raw:
+            try:
+                return _json.loads(raw)
+            except ValueError:
+                return None
+    return None
+
+
+def _link_mesh(coll, name, Vw, F, mat, hidden=True, tags=(), hint=""):
+    import bpy
+    used = np.unique(F)
+    remap = -np.ones(len(Vw), np.int64)
+    remap[used] = np.arange(len(used))
+    Vc = np.asarray(Vw)[used].astype(np.float32)
+    Fl = remap[F].astype(np.int32)
+    me = bpy.data.meshes.new(name)
+    me.vertices.add(len(Vc))
+    me.vertices.foreach_set("co", Vc.ravel())
+    me.loops.add(Fl.size)
+    me.loops.foreach_set("vertex_index", Fl.ravel())
+    me.polygons.add(len(Fl))
+    me.polygons.foreach_set("loop_start", np.arange(0, Fl.size, 3, dtype=np.int32))
+    me.polygons.foreach_set("loop_total", np.full(len(Fl), 3, np.int32))
+    try:      # flat faces: the normal pass of a box must not be smoothed across its corners
+        me.polygons.foreach_set("use_smooth", np.zeros(len(Fl), bool))
+    except Exception:
+        pass
+    me.update()
+    me.validate()
+    me.materials.append(mat)
+    ob = bpy.data.objects.new(name, me)
+    for t in tags:
+        ob[t] = 1
+    ob["wondful_hint"] = hint
+    coll.objects.link(ob)
+    ob.hide_render = bool(hidden)
+    ob.hide_viewport = bool(hidden)
+    return ob
+
+
+BUILDING_ENV = ("building", "house", "tower", "shop", "wall", "kiosk", "pavilion")
+NON_OBSTACLE_ENV = GROUND_TYPES | {"band_far", "band_mid", "band_near", "band_sea", "cliff", "sky"}
+
+
+def llm_footprints(coll, winv, r_max=R_SPLIT):
+    """LLM blocks of the 场景粗模 as local-frame footprints [(c, u, n, W, D, ob)] (front = the −y face)."""
+    from mathutils import Vector
+    out = []
+    for ob in coll.all_objects:
+        if ob.type != "MESH" or ob.get(CARRIER_TAG) or ob.get(INFER_TAG):
+            continue
+        et = str(ob.get("wondful_env_type") or "")
+        if not et or et in NON_OBSTACLE_ENV or et.startswith(FAR_TYPE_PREFIX):
+            continue
+        bb = [winv @ (ob.matrix_world @ Vector(c)) for c in ob.bound_box]
+        c0, c3, c4 = np.array(bb[0][:2]), np.array(bb[3][:2]), np.array(bb[4][:2])
+        W = float(np.linalg.norm(c4 - c0))
+        D = float(np.linalg.norm(c3 - c0))
+        if W < 0.2 or D < 0.05:
+            continue
+        mid = (c0 + c4) / 2
+        if math.hypot(*mid) > r_max:
+            continue
+        u = (c4 - c0) / W
+        n = -(c3 - c0) / D
+        zs = [p.z for p in bb]
+        out.append((mid, u, n, W, D, ob, min(zs), max(zs), et))
+    return out
+
+
+def complete_llm_in_blender(context, info, analysis=None):
+    """场景补全 for a 场景粗模 without a measurement (精确模式 off / failed): building rows / curbs / greenery
+    inferred from the LLM blocks, visible in the blockout. Visibility = the reference camera's frustum + a ray
+    test against the blockout. Returns a JSON-safe summary."""
+    import bpy
+    from bpy_extras.object_utils import world_to_camera_view
+    from mathutils import Matrix, Vector
+    from . import massing as MS
+    from . import scene_complete as SC
+    t0 = time.time()
+    coll = bpy.data.collections.get(info.get("collection", ""))
+    if coll is None or not info.get("world"):
+        return {"ok": False, "reason": "场景粗模集合不存在"}
+    remove_inferred()
+    world = Matrix(info["world"])
+    winv = world.inverted()
+    scene = context.scene
+    cam = scene.objects.get(info.get("camera_name", "")) or scene.camera
+    if cam is None:
+        return {"ok": False, "reason": "没有参考相机"}
+    feet = llm_footprints(coll, winv)
+    camxy = np.array((winv @ cam.matrix_world.translation)[:2])
+    parts = []
+    for mid, u, n, W, D, ob, z0, z1, et in feet:
+        if not any(w in et for w in BUILDING_ENV) or "wall" in et:
+            continue
+        # front = the long face turned most toward the camera
+        best = None
+        for cc, uu, nn, ww, dd in ((mid, u, n, W, D), (mid - n * D + 0 * u, -u, -n, W, D),
+                                   (mid - n * D / 2 + u * W / 2, -n, u, D, W), (mid - n * D / 2 - u * W / 2, n, -u, D, W)):
+            to = camxy - cc
+            sc = float(nn @ to) / max(1e-6, float(np.linalg.norm(to)))
+            if best is None or sc > best[0]:
+                best = (sc, cc, uu, nn, ww, dd)
+        _sc, cc, uu, nn, ww, dd = best
+        parts.append({"kind": "building", "xy": [float(cc[0]), float(cc[1])], "u": [float(uu[0]), float(uu[1])],
+                      "n": [float(nn[0]), float(nn[1])], "W": ww, "D": dd, "top": z1, "g0": z0 + 0.0,
+                      "dist": round(float(np.hypot(*cc)), 1)})
+    ground_objs = [o for o in coll.all_objects if o.get("wondful_env_type") in ("terrain",) and o.type == "MESH"]
+    tris = _world_tris(ground_objs)
+    sampler = None
+    if len(tris):
+        loc = tris.reshape(-1, 3) @ np.array(winv)[:3, :3].T + np.array(winv)[:3, 3]
+        sampler = _height_sampler(loc.reshape(-1, 3, 3))
+    zcam = float(info.get("cam_local_z", 1.6))
+
+    def ground(x, y):
+        return float(sampler(np.array([x]), np.array([y]), 0.0)[0]) if sampler is not None else 0.0
+    dg = context.evaluated_depsgraph_get()
+    origin = cam.matrix_world.translation
+
+    def visible(Q):
+        out = []
+        for q in np.asarray(Q).reshape(-1, 3):
+            pw = world @ Vector((float(q[0]), float(q[1]), float(q[2])))
+            c = world_to_camera_view(scene, cam, pw)
+            if not (c.z > 0.05 and -0.02 <= c.x <= 1.02 and -0.02 <= c.y <= 1.02):
+                out.append(False)
+                continue
+            d = pw - origin
+            dist = d.length
+            hit, loc, _n, _i, _o, _m = scene.ray_cast(dg, origin, d.normalized(), distance=dist)
+            out.append(not (hit and (loc - origin).length < dist * 0.97 - 0.3))
+        return np.array(out, bool)
+    sp = info.get("spot_local")
+    pad = (float(sp[0]), float(sp[1]), float(info.get("pad_radius", 2.5)), float(sp[2])) if sp else None
+    M = Mesh()
+    obstacles = [(f[0], f[1], f[2], f[3], f[4]) for f in feet]
+    try:
+        cst, layout = SC.complete(_Prims(), M, parts, ground, visible, pad=pad, analysis=analysis, obstacles=obstacles)
+    except Exception as exc:
+        return {"ok": False, "reason": f"出错：{str(exc)[:60]}"}
+    if not cst.get("ok"):
+        return cst
+    V, F, C = M.arrays()
+    Mw = np.array(world)
+    Vw = V @ Mw[:3, :3].T + Mw[:3, 3]
+    mat = bpy.data.materials.get(MS.MAT_NAME) or MS.make_material(bpy.data.materials.new)
+    sub = _inferred_collection(coll)
+    for c in np.unique(C):
+        sel = C == c
+        _link_mesh(sub, f"补全_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=False, tags=(INFER_TAG,),
+                   hint=INFER_HINT.get(int(c), C_NAME.get(int(c), "")))
+    import json as _json
+    lw = SC.layout_to_world(layout, Mw)
+    lw["stats"] = cst
+    sub[LAYOUT_KEY] = _json.dumps(lw, ensure_ascii=False, default=float)
+    cst["seconds"] = round(time.time() - t0, 2)
+    print("[Wondful] " + SC.summary_text(cst))
+    return cst
 
 
 def _height_sampler(tris):
