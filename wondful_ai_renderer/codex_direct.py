@@ -653,6 +653,39 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
+# 1.2.4 摄影化提示词 (internal flag, default OFF until the multi-scene A/B says otherwise). The CG wording
+# below literally asks for an advert render (sharp highlight bands, horizon reflection line, strong
+# contrast); the photographic variant describes a real camera and real surface wear instead, and asks
+# for scale-appropriate micro-texture in the near foreground (user 2026-10-20: 近处的场景看起来也塑料).
+PHOTO_PROMPT = os.environ.get("WONDFUL_PHOTO_PROMPT", "") == "1"
+CLEARCOAT_CG = ("车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、"
+                "深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
+CLEARCOAT_PHOTO = ("车身清漆按真实相机实拍的样子表现：反射是周围真实环境（天空、地面、路边物体）在曲面上的自然倒影，"
+                   "高光随曲面和粗糙度自然展开，亮部有柔和的高光滚降、不过曝，不要人为添加锐利亮条、发光轮廓或棚拍反光板；"
+                   "漆面带极细的浮尘和轻微橘皮纹理，轮胎和下裙沾有少量与地面一致的尘土，轮毂、玻璃和饰条各有不同的反射质感；"
+                   "不要塑料感、玩具模型感或 CG 渲染感。")
+MATERIAL_CG_TAIL = "明暗过渡自然；不要平涂、不要塑料感或玩具模型感。"
+MATERIAL_PHOTO_TAIL = ("明暗过渡自然，表面带真实使用中的细微差异（轻微灰尘、纤维起伏、磨损），高光柔和滚降、不过曝；"
+                       "不要平涂、不要塑料感、玩具模型感或 CG 渲染感。")
+ENDING_CG = "地面接触阴影、反射和环境光与新场景一致，照片质感真实自然。只输出一张图。"
+FOREGROUND_PHOTO = ("画面下部的近景地面和近处物体离镜头最近，细节要最丰富：按场景描述里的地面材质画出与距离相符的真实微观纹理"
+                    "——细小颗粒、碎石或沙粒、浮尘、轮胎痕或脚印、裂缝、修补和不均匀的磨损与颜色深浅（室内则是地毯纤维、木纹、"
+                    "缝隙和轻微使用痕迹；只用与场景描述一致的类型，描述写了干燥就不要加水渍），越近纹理越细越清楚，"
+                    "随机不重复；不要像塑料、蜡面或被涂抹过一样光滑均匀。")
+ENDING_PHOTO = ("地面接触阴影、反射和环境光与新场景一致。整体要像全画幅相机实拍的商业广告照片而不是渲染图：约 50mm 镜头、"
+                "f/5.6、ISO 200，焦点在主体上，远景随距离略微失焦并带自然的大气透视；保留真实传感器的细微颗粒和自然的局部"
+                "细节差异，色彩是克制的相机直出（不过饱和、不做重度 HDR、不过度锐化、不磨皮式平滑）。只输出一张图。")
+
+
+def photo_rewrite(text: str, vehicle: bool = False) -> str:
+    """The photographic variant of a ``build_simple_prompt`` text (also used to replay logged prompts in A/B
+    tests, so the test sends exactly what the plugin would send)."""
+    out = text.replace(CLEARCOAT_CG, CLEARCOAT_PHOTO) if vehicle else text.replace(MATERIAL_CG_TAIL, MATERIAL_PHOTO_TAIL)
+    if ENDING_CG in out:
+        out = out.replace(ENDING_CG, FOREGROUND_PHOTO + "\n" + ENDING_PHOTO)
+    return out
+
+
 def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
                         massing_text="", building_text="", keep_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
@@ -693,7 +726,7 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     if vehicle:
         lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
-                     "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
+                     "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。" + CLEARCOAT_CG)
     else:
         lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
@@ -722,8 +755,9 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         lines.append("场景要求：" + scene + "。")
     elif not env_text and fallback_prompt:
         lines.append("场景要求：" + fallback_prompt.strip()[:400])
-    lines.append("地面接触阴影、反射和环境光与新场景一致，照片质感真实自然。只输出一张图。")
-    return "\n".join(lines)
+    lines.append(ENDING_CG)
+    text = "\n".join(lines)
+    return photo_rewrite(text, vehicle=bool(vehicle)) if PHOTO_PROMPT else text
 
 
 def build_payload(prompt, images, *, size, mask_path="", model="", quality="high", compat=False, instructions=""):

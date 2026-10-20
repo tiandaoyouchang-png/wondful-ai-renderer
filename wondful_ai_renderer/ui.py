@@ -975,6 +975,27 @@ def _draw_person_refs(adv, context, props, busy):
 
 
 # ---------------------------------------------------------------------------
+# 高级 › 成片
+# ---------------------------------------------------------------------------
+
+def _draw_photo_finish(adv, context, props, busy):
+    """高级 › 成片 › 照片质感 (1.2.4): 关 / 细微 / 标准, the last step on the final image."""
+    box, _head, _on = _section(adv, "照片质感", "IMAGE_DATA")
+    cells = _cols(context, 2)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "photo_finish", expand=True)
+    level = getattr(props, "photo_finish", "SUBTLE")
+    if level == "OFF":
+        _hint(box, "不加后期，输出与以前相同", cells)
+    else:
+        _hint(box, "高光滚降 · 环境饱和度 · 暗角 · 色差 · 颗粒；产品轮廓和颜色不变", cells)
+    note = getattr(props, "last_finish_note", "")
+    if note:
+        _note(box, note, cells, _state(note), 2)
+
+
+# ---------------------------------------------------------------------------
 # 高级 › 多角度
 # ---------------------------------------------------------------------------
 
@@ -1003,10 +1024,13 @@ def _draw_multiview(adv, context, props, busy):
     row.enabled = not busy
     row.prop(props, "mv_widen", text="加宽体块")
     row.prop(props, "mv_env_check", text="环境一致性检查")
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "mv_colour_match", text="统一调色")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:
-        _hint(box, "每个相机 1 次生图；产品超标最多重试 1 次", cells)
+        _hint(box, "每个相机 1 次生图；产品超标或 low 画质档最多重试 1 次", cells)
     act = box.row(align=True)
     act.scale_y = 1.2
     act.enabled = bool(master is not None and others) and not busy
@@ -1434,7 +1458,7 @@ class WONDFUL_PT_main(Panel):
             actions.operator("wondful.open_output_directory", text="打开文件夹", icon="FILE_FOLDER")
 
         # ---- 高级 ---------------------------------------------------------------
-        # 1.2.3: one group at a time (模型 · 输出 · 产品 · 场景 · 多角度 · 诊断); running progress stays in ⑥ (场景粗模: ④ + one line in ⑥).
+        # 1.2.3: one group at a time (模型 · 输出 · 成片 · 产品 · 场景 · 多角度 · 诊断; 成片 1.2.4); running progress stays in ⑥ (场景粗模: ④ + one line in ⑥).
         layout.separator()
         advanced = layout.box()
         if not _disclosure(advanced.row(align=True), props, "ui_show_advanced", "高级", icon="PREFERENCES"):
@@ -1519,6 +1543,9 @@ class WONDFUL_PT_main(Panel):
                     _hint(layers, "需要先在 ② 选择产品集合", acells)
             if getattr(props, "last_layers_note", ""):
                 _note(layers, props.last_layers_note, acells, _state(props.last_layers_note), 2)
+
+        elif tab == "FINISH":
+            _draw_photo_finish(adv, context, props, busy)
 
         elif tab == "PRODUCT":
             _draw_iou_gate(adv, context, props, busy)

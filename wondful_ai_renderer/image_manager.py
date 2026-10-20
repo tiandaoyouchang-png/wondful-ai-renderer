@@ -57,6 +57,18 @@ def compute_target_size(view_w: int, view_h: int, long_edge: int = 2048) -> tupl
     return width, height, f"{width}x{height}"
 
 
+def _resample_pixels(image, src_w: int, src_h: int, dst_w: int, dst_h: int):
+    """Blender image pixels (RGBA float, bottom row first) resampled to dst size → flat float array."""
+    import numpy as np
+    from .layered_output import upscale
+    buf = np.empty(src_w * src_h * 4, np.float32)
+    image.pixels.foreach_get(buf)
+    out = upscale(buf.reshape(src_h, src_w, 4), dst_w, dst_h)
+    flat = array("f")
+    flat.frombytes(np.ascontiguousarray(np.clip(out, 0.0, 1.0), dtype=np.float32).tobytes())
+    return flat
+
+
 def enforce_aspect_ratio(src: str, dst: str, target_w: int, target_h: int) -> tuple[str, bool]:
     """Fit a generated image into the target canvas without crop or distortion.
 
@@ -84,10 +96,11 @@ def enforce_aspect_ratio(src: str, dst: str, target_w: int, target_h: int) -> tu
         fit_h = max(1, min(target_h, int(round(source_h * scale))))
         resized = (fit_w != source_w or fit_h != source_h)
         if resized:
-            source_image.scale(fit_w, fit_h)
-
-        source_pixels = array("f", [0.0]) * (fit_w * fit_h * 4)
-        source_image.pixels.foreach_get(source_pixels)
+            # 1.2.4: numpy Lanczos-3 when enlarging (was Blender's Image.scale), no sharpening
+            source_pixels = _resample_pixels(source_image, source_w, source_h, fit_w, fit_h)
+        else:
+            source_pixels = array("f", [0.0]) * (fit_w * fit_h * 4)
+            source_image.pixels.foreach_get(source_pixels)
         canvas_pixels = array("f", [0.0]) * (target_w * target_h * 4)
         offset_x = (target_w - fit_w) // 2
         offset_y = (target_h - fit_h) // 2
