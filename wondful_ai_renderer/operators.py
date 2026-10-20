@@ -2691,6 +2691,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         spec = getattr(self, "_detail", None)
         if not spec:
             return
+        from .result_worker import crop_regen_allowed
+        if not crop_regen_allowed(getattr(prefs, "alignment_max_attempts", 3)):
+            spec["edit_fn"] = None      # 1.2.5: 最多生成次数 = 1 → no extra image calls, Blender paste only
+            return
         try:
             from .cli_transport import is_cancellation_requested
             from .detail_refine import make_edit_fn
@@ -3271,14 +3275,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         provider_label = provider["label"]
         render_timeout = int(provider["render_timeout"])
         audit_timeout = int(provider["audit_timeout"])
-        planned_attempts = max(1, int(prefs.alignment_max_attempts if auto_alignment_retry else 1))
-        if gate_mask:
-            planned_attempts = gate_max     # regenerations are decided by the IoU gate only
+        # 1.2.5: 「最多生成次数」 (preferences) caps every regeneration path, the IoU gate included
+        planned_attempts = result_worker.generation_budget(
+            getattr(prefs, "alignment_max_attempts", result_worker.GATE_MAX), gate_on=bool(gate_mask),
+            gate_max=gate_max, strict_retry=auto_alignment_retry)
         self._provider_id = provider_id
         self._provider_label = provider_label
         timing_suffix = "strict" if auto_alignment_retry else ("fast" if render_mode == "FAST" else "standard")
         variant_count = render_variant_count(provider_id, props)
         self._variant_count = variant_count
+        print("[Wondful] " + result_worker.call_budget_note(
+            variant_count, planned_attempts,
+            crop_regen=result_worker.crop_regen_allowed(getattr(prefs, "alignment_max_attempts", 3))))
         self._completed_variants = Queue()
         self._exported_by_variant = {}
         self._exported_variant_records = {}
@@ -4406,6 +4414,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             from .detail_blockout import find_carrier as _find_carrier
             if _find_carrier() is not None:
                 detail_mode = "clay" if bool(getattr(props, "sb_detail_clay", False)) else "carrier"
+                if bool(getattr(props, "sb_detail_skyline", False)):
+                    detail_mode += "+sky"   # 远山剪影: measured far silhouette instead of the LLM 远景带
         made, wlog = [], {}
         old_cam = scene.camera
         views = {}
@@ -4457,7 +4467,10 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 pass
         geo_kind = views[master.name].get("geometry", "llm")      # 1.2.5: "detail" = projected onto the 细节粗模
         if geo_kind == "detail":
-            print("[Wondful] 多角度场景一致：投影承载面 = 细节粗模" + ("（白模也用细节粗模）" if detail_mode == "clay" else ""))
+            print("[Wondful] 多角度场景一致：投影承载面 = 细节粗模"
+                  + ("（白模也用细节粗模）" if detail_mode.startswith("clay") else "")
+                  + (" + 远山剪影" if LAST_CLAY_INFO.get("detail_skyline") else
+                     ("（远山剪影不可用，沿用 AI 远景带）" if detail_mode.endswith("+sky") else "")))
         centre = None
         b = MV.product_bounds(coll)
         if b is not None:
@@ -4494,7 +4507,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         grade_on = bool(getattr(props, "mv_colour_match", True))      # 1.2.4 统一调色
         finish_level = str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE")   # 1.2.4 照片质感
         detail_edit = None
-        if paste:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
+        from .result_worker import crop_regen_allowed as _crop_ok
+        paste_regen = _crop_ok(getattr(prefs, "alignment_max_attempts", 3))   # 1.2.5: 最多生成次数 = 1 → paste only
+        from .multiview import camera_calls as _camera_calls
+        mv_calls = _camera_calls(getattr(prefs, "alignment_max_attempts", 2))  # per camera, ≤ 最多生成次数
+        if paste and paste_regen:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
             try:
                 from .cli_transport import is_cancellation_requested as _mv_cancel
                 from .detail_refine import make_edit_fn
@@ -4590,7 +4607,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                         "edit_fn": detail_edit, "vehicle": vehicle}
                 matid = spec["matid"] if spec["matid"] and Path(spec["matid"]).is_file() else ""
                 tries = []
-                for n in range(1, MV.MAX_CALLS + 1):
+                for n in range(1, mv_calls + 1):
                     raw = pre + f"_try{n}_raw.png"
                     try:
                         r = CD.edit_image(prompt="", edit_base_path=base, reference_paths=env_refs, manifest=manifest,
@@ -4632,7 +4649,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     if t["image_quality"]:
                         print(f"[Wondful] 多角度场景一致：{rec['name']} 第 {n} 次 画质档 {t['image_quality']}")
                     if not t["product_violations"] and not t["env_violations"]:
-                        if n < MV.MAX_CALLS and RW.low_tier_retry(t["image_quality"], n, MV.MAX_CALLS, False):
+                        if n < mv_calls and RW.low_tier_retry(t["image_quality"], n, mv_calls, False):
                             continue        # 1.2.4: passed but "low" tier → the one retry this camera has
                         break
                 if not tries:

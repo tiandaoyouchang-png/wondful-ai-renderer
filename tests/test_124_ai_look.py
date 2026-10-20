@@ -222,7 +222,7 @@ class LowTierRetry(unittest.TestCase):
         self.assertIs(MV.choose([a, b]), b)
         self.assertEqual(MV.MAX_CALLS, 2)
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
-        self.assertIn("RW.low_tier_retry(t[\"image_quality\"], n, MV.MAX_CALLS, False)", ops)
+        self.assertIn("RW.low_tier_retry(t[\"image_quality\"], n, mv_calls, False)", ops)
         self.assertIn("result_worker.low_tier_retry(tier, attempt_index, planned_attempts, low_retry_used)", ops)
         self.assertIn('"image_quality": tier', ops)
 

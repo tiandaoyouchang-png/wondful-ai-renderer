@@ -1703,12 +1703,14 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         except Exception:
             pass
         detail = (detail or "").lower()
+        skyline = detail.endswith("+sky")          # 1.2.5 远山剪影 (高级 › 多角度)
+        detail = detail.split("+", 1)[0]
         if detail and (ground_mode in {"CREST", "CUSTOM"} or massing is None):
             LAST_CLAY_INFO["detail_blockout"] = "skipped: crest / custom ground" if massing is not None else ""
             detail = ""
         from .detail_blockout import detail_pass
         floor_objs = [blk for kind, blk in created if kind == "obj" and blk.type == "MESH"]
-        with detail_pass(massing if detail == "clay" else None, extra_hide=floor_objs) as dp:
+        with detail_pass(massing if detail == "clay" else None, extra_hide=floor_objs, skyline=skyline) as dp:
             if dp.active:
                 context.view_layer.update()
             _render_still(scene)
@@ -1721,11 +1723,12 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             try:
                 from .multiview import render_geometry_now
                 gw, gh = geometry_size or (width, height)
-                with detail_pass(massing if detail else None, extra_hide=floor_objs) as dp:
+                with detail_pass(massing if detail else None, extra_hide=floor_objs, skyline=skyline) as dp:
                     if dp.active:
                         context.view_layer.update()
                     LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
                     LAST_CLAY_INFO["detail_blockout"] = "carrier" if dp.active else LAST_CLAY_INFO.get("detail_blockout", "")
+                    LAST_CLAY_INFO["detail_skyline"] = bool(dp.active and dp.skyline_used)
                 context.view_layer.update()
             except Exception as exc:
                 LAST_CLAY_INFO["geometry"] = False

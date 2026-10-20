@@ -618,6 +618,12 @@ def _draw_iou_gate(adv, context, props, busy):
         row.enabled = not busy
         row.prop(props, "iou_gate_max", text="最多生成次数")
         _hint(box, "IoU ≥ 0.95，固定坐标；不过线自动重新生成", cells)
+        try:    # 1.2.5: the preference is the hard cap — say so when it is lower than this setting
+            cap = int(context.preferences.addons[__package__].preferences.alignment_max_attempts)
+        except Exception:
+            cap = 0
+        if 0 < cap < int(getattr(props, "iou_gate_max", 3) or 3):
+            _hint(box, f"偏好设置「最多生成次数」= {cap}，实际每张最多 {cap} 次", cells)
     note = getattr(props, "last_iou_note", "")
     if note:
         ok = "通过（" in note and "未通过" not in note
@@ -1034,6 +1040,7 @@ def _draw_multiview(adv, context, props, busy):
     sub = row.row(align=True)
     sub.enabled = not busy and bool(getattr(props, "sb_detail_carrier", True))
     sub.prop(props, "sb_detail_clay", text="白模也用")
+    sub.prop(props, "sb_detail_skyline", text="远山剪影")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:

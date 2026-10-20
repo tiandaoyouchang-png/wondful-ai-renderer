@@ -292,8 +292,9 @@ class WONDFUL_AddonPreferences(AddonPreferences):
     )
     alignment_max_attempts: IntProperty(
         name="最多生成次数",
-        description="包含第一次生成。建议 2，避免无意中过多消耗当前 Provider 的生图额度",
-        default=2,
+        description="每张图最多调用几次生图（含第一次）。轮廓验收重生成、严格对齐重试、画质档重试和多角度每个相机都不超过它；"
+                    "设为 1 = 每张只调用 1 次，细节修复也只用 Blender 回贴。张数在 ⑥ 另选",
+        default=3,
         min=1,
         max=3,
     )
@@ -357,7 +358,7 @@ class WONDFUL_AddonPreferences(AddonPreferences):
         col.prop(self, "auto_alignment_retry")
         if self.auto_alignment_retry:
             col.prop(self, "alignment_threshold")
-            col.prop(self, "alignment_max_attempts")
+        col.prop(self, "alignment_max_attempts")
 
         box = layout.box()
         box.label(text="运行依赖")
@@ -976,6 +977,9 @@ class WONDFUL_AISettings(PropertyGroup):
                                                 "换角度时照片贴得更准；没有精确模式时不起作用")
     sb_detail_clay: BoolProperty(name="白模也用细节粗模", default=False,
                                  description="多角度场景一致发给生图模型的白模也换成细节粗模（默认只用于投影，白模保持普通粗模）")
+    sb_detail_skyline: BoolProperty(name="远山剪影", default=False,
+                                    description="多角度投影时，远山用实测天际线的形状（只取天空边界的高度，强平滑、低面数，"
+                                                "不带实测表面细节）代替 AI 远景带；天际线被近景挡住太多或跳变大时自动沿用 AI 远景带")
     last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
     # live stage progress of one run (see sb_progress); elapsed seconds are written by the modal timer
     sb_stage: StringProperty(name="场景粗模阶段", default="", options={"SKIP_SAVE"})

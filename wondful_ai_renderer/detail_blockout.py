@@ -833,6 +833,162 @@ def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, b
             "seconds": round(time.time() - t0, 3)}
 
 
+# ============================================================================== far skyline silhouette (远山剪影)
+# User 2026-10-20: 「远山可以相对粗糙一些 只保留形即可」. Only the SHAPE of the far range comes from the
+# measurement: the sky boundary's elevation angle per azimuth (direction only, so MoGe's noisy far depth never
+# reaches the surface), strongly smoothed, at one constant distance, as a low-poly closed ridge with a crest
+# thickness and a back slope. Unreliable measurement (near objects hide the sky boundary, big jumps) → the LLM
+# 远景带 stay. Optional: 高级 › 多角度 「远山剪影」 (default off until the real-generation test decides).
+
+SKY_TAG = "wondful_detail_skyline"
+SKY_BIN_DEG = 1.0          # azimuth bin of the raw silhouette
+SKY_SMOOTH_DEG = 2.5       # gaussian sigma (deg of azimuth): bumps narrower than ~2–3° are removed
+SKY_MIN_VALID = 0.5        # share of the photo's azimuth bins whose sky boundary is far-field
+SKY_JUMP_DEG = 3.0         # adjacent-bin elevation jump counted as a break
+SKY_MAX_JUMP_SHARE = 0.06
+SKY_TRI_BUDGET = 2000
+SKY_STEP_OUT = 6.0         # azimuth step outside the photo (mirrored wrap)
+SKY_DEPTH = 0.35           # ridge depth (front foot → back foot) as a share of the distance
+# cross-section (range offset × depth, height share): front foot, front shoulder, crest front, crest back, back foot
+SKY_SECTION = ((-0.45, 0.0), (-0.18, 0.72), (0.0, 1.0), (0.08, 1.0), (0.55, 0.0))
+
+
+def measured_skyline(geo, r_split=R_SPLIT, z_offset=0.0):
+    """Sky-boundary silhouette of one measurement → dict(ok, reason, az, el (deg, smoothed), raw, dist, ...).
+
+    Per column the first non-sky pixel under sky gives a direction (azimuth, elevation); it counts only when that
+    pixel is far field (horizontal range ≥ ``r_split``), otherwise the near object hides the far range there."""
+    P = np.asarray(geo["P"], np.float64)
+    mask = np.asarray(geo["mask"], bool)
+    cam_h = float(geo["cam"]["height_m"])
+    H, W = mask.shape
+    out = {"ok": False, "reason": ""}
+    top_sky = ~mask[0]
+    first = np.argmax(mask, axis=0)
+    has = mask.any(axis=0) & top_sky
+    cols = np.nonzero(has)[0]
+    if len(cols) < W * 0.2:
+        out["reason"] = "画面顶部几乎没有天空"
+        return out
+    rows = first[cols]
+    top = P[rows, cols]                          # the boundary pixel: its DIRECTION only (depth-free)
+    rng = np.median(np.stack([np.hypot(*P[np.clip(rows + k, 0, H - 1), cols][:, :2].T) for k in range(3)]), 0)
+    rt = np.maximum(np.hypot(top[:, 0], top[:, 1]), 1e-6)
+    az = np.degrees(np.arctan2(top[:, 0], top[:, 1]))
+    el = np.degrees(np.arctan2(top[:, 2] - cam_h, rt))
+    far = rng >= float(r_split)
+    # photo azimuth span from every column's ray direction (sky or not)
+    mid = np.nonzero(mask[H // 2])[0]
+    a_all = np.degrees(np.arctan2(P[H // 2, :, 0], P[H // 2, :, 1]))
+    a0, a1 = float(np.min(a_all[mid])) if len(mid) else float(az.min()), float(np.max(a_all[mid])) if len(mid) else float(az.max())
+    a0, a1 = min(a0, float(az.min())), max(a1, float(az.max()))
+    edges = np.arange(a0, a1 + SKY_BIN_DEG, SKY_BIN_DEG)
+    nb = max(1, len(edges) - 1)
+    raw = np.full(nb, np.nan)
+    rr = np.full(nb, np.nan)
+    b = np.clip(np.searchsorted(edges, az, side="right") - 1, 0, nb - 1)
+    for i in range(nb):
+        sel = (b == i) & far
+        if sel.sum():
+            raw[i] = float(np.median(el[sel]))
+            rr[i] = float(np.median(rng[sel]))
+    valid = np.isfinite(raw)
+    share = float(valid.mean())
+    out.update({"valid_share": round(share, 3), "span_deg": [round(a0, 2), round(a1, 2)], "bins": int(nb)})
+    if share < SKY_MIN_VALID:
+        out["reason"] = f"天际线被近景挡住太多（远景只占 {share:.0%}）"
+        return out
+    v = raw[valid]
+    vm = median_filter1d(v, 3) if len(v) >= 3 else v
+    jumps = int((np.abs(np.diff(vm)) > SKY_JUMP_DEG).sum()) if len(vm) > 1 else 0
+    out["jumps"] = jumps
+    if jumps > max(2, int(SKY_MAX_JUMP_SHARE * len(vm))):
+        out["reason"] = f"实测天际线跳变太多（{jumps} 处 > {SKY_JUMP_DEG:.0f}°）"
+        return out
+    x = np.arange(nb, dtype=np.float64)
+    filled = np.interp(x, x[valid], vm)
+    sig = SKY_SMOOTH_DEG / SKY_BIN_DEG
+    k = np.arange(-int(3 * sig) - 1, int(3 * sig) + 2)
+    g = np.exp(-0.5 * (k / sig) ** 2)
+    g /= g.sum()
+    pad = len(k) // 2
+    sm = np.convolve(np.pad(filled, pad, mode="edge"), g, mode="valid")[:nb]
+    dist = float(np.clip(np.nanmedian(rr), 1.5 * float(r_split), 3000.0))
+    out.update({"ok": True, "az": (edges[:-1] + SKY_BIN_DEG / 2).tolist(), "el": sm.tolist(),
+                "raw": [None if not np.isfinite(t) else round(float(t), 3) for t in raw],
+                "dist": round(dist, 1), "cam_h": cam_h + float(z_offset),
+                "residual_deg": round(float(np.sqrt(np.mean((sm[valid] - vm) ** 2))), 3),
+                "el_range_deg": [round(float(sm.min()), 2), round(float(sm.max()), 2)]})
+    return out
+
+
+def _reflect(d, span):
+    t = np.mod(d, 2 * span)
+    return np.where(t > span, 2 * span - t, t)
+
+
+def skyline_profile(sk, az_query):
+    """Smoothed elevation (deg) at any azimuth: measured inside the photo, mirrored and cross-faded outside (the
+    same 360° wrap idea as the LLM 远景带), continuous all the way round."""
+    az = np.asarray(sk["az"], np.float64)
+    el = np.asarray(sk["el"], np.float64)
+    a0, a1 = float(az[0]), float(az[-1])
+    span = max(a1 - a0, 1.0)
+    q = np.asarray(az_query, np.float64)
+    rel = np.mod(q - a0, 360.0)                  # 0 … 360 from the left edge going right
+    inside = rel <= span
+    res = np.interp(a0 + np.minimum(rel, span), az, el)
+    gap = 360.0 - span
+    if gap > 1e-6:
+        d_r = rel - span                         # distance past the right edge
+        d_l = 360.0 - rel                        # distance before the left edge
+        right = np.interp(a1 - _reflect(d_r, span), az, el)
+        left = np.interp(a0 + _reflect(d_l, span), az, el)
+        w = np.clip(1.0 - d_r / gap, 0.0, 1.0)
+        out = np.where(inside, res, w * right + (1 - w) * left)
+        return out
+    return res
+
+
+def skyline_ridge(sk, foot_z=None, budget=SKY_TRI_BUDGET):
+    """Closed low-poly ridge ring (local analysis frame, camera at x = y = 0) → (V, F tris)."""
+    az = np.asarray(sk["az"], np.float64)
+    a0, a1 = float(az[0]), float(az[-1])
+    span = max(a1 - a0, 1.0)
+    D = float(sk["dist"])
+    cam_h = float(sk["cam_h"])
+    ns = len(SKY_SECTION)
+    per_seg = 2 * ns
+    n_out = int(math.ceil(max(0.0, 360.0 - span) / SKY_STEP_OUT))
+    n_in = max(8, min(int(math.ceil(span / SKY_BIN_DEG)), budget // per_seg - n_out))
+    a_in = np.linspace(a0, a1, n_in + 1)
+    a_out = np.linspace(a1, a0 + 360.0, n_out + 1)[1:-1] if n_out > 1 else np.zeros(0)
+    ring = np.r_[a_in, a_out]
+    el = skyline_profile(sk, ring)
+    crest = cam_h + D * np.tan(np.radians(el))
+    if foot_z is None:
+        foot_z = min(0.0, float(crest.min())) - 30.0
+    crest = np.maximum(crest, foot_z + 5.0)
+    dep = SKY_DEPTH * D
+    V = []
+    th = np.radians(ring)
+    for (dr, f) in SKY_SECTION:
+        r = D + dr * dep
+        z = foot_z + (crest - foot_z) * f
+        V.append(np.stack([r * np.sin(th), r * np.cos(th), z], -1))
+    V = np.stack(V, 1).reshape(-1, 3)            # vertex (i, j) = i * ns + j
+    n = len(ring)
+    F = []
+    for i in range(n):
+        i2 = (i + 1) % n
+        for j in range(ns):
+            j2 = (j + 1) % ns                    # j = ns-1 → 0 closes the bottom
+            a, b_, c, d = i * ns + j, i * ns + j2, i2 * ns + j2, i2 * ns + j
+            F.append((a, b_, c))
+            F.append((a, c, d))
+    return V, np.asarray(F, np.int64)
+
+
 # ============================================================================== near / far split of the LLM blocks
 
 def llm_role(env_type, dist_xy, r_split=R_SPLIT):
@@ -847,14 +1003,22 @@ def llm_role(env_type, dist_xy, r_split=R_SPLIT):
     return "replace" if float(dist_xy) < r_split else "keep"
 
 
+def is_far_band(env_type) -> bool:
+    """LLM 远景带 replaced by the 远山剪影 (mountain / hill / dune bands and their 360° wraps; not the sea)."""
+    t = str(env_type or "")
+    return t.startswith(FAR_TYPE_PREFIX) and t != "band_sea"
+
+
 def summary_text(res) -> str:
     if not res:
         return ""
     if not res.get("ok"):
         return f"细节粗模未生成（{res.get('reason', '')}，多角度沿用普通粗模）"
     s = res["stats"]
+    sk = res.get("skyline") or {}
+    far = "远景沿用 AI 远景带" + ("（远山剪影可用）" if sk.get("ok") else "")
     return (f"细节粗模 {s['tris'] // 1000}k 面：建筑 {s['buildings']} · 车辆道具 {s['props'] + s['slabs']} · "
-            f"树 {s['trees']} · 远景沿用 AI 远景带")
+            f"树 {s['trees']} · {far}")
 
 
 # ============================================================================== Blender side (main thread)
@@ -977,6 +1141,37 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT):
         sub.objects.link(ob)
         ob.hide_render = True
         ob.hide_viewport = True
+    # 远山剪影 (optional at render time): measured far silhouette ridge, hidden like the rest of the carrier
+    try:
+        sk = measured_skyline(geo, r_split=r_split, z_offset=z_offset)
+    except Exception as exc:
+        sk = {"ok": False, "reason": f"出错：{str(exc)[:60]}"}
+    if sk.get("ok"):
+        Vs, Fs = skyline_ridge(sk)
+        Vsw = (Vs @ Mw[:3, :3].T + Mw[:3, 3]).astype(np.float32)
+        Fs32 = Fs.astype(np.int32)
+        me = bpy.data.meshes.new("细节_远山剪影")
+        me.vertices.add(len(Vsw))
+        me.vertices.foreach_set("co", Vsw.ravel())
+        me.loops.add(Fs32.size)
+        me.loops.foreach_set("vertex_index", Fs32.ravel())
+        me.polygons.add(len(Fs32))
+        me.polygons.foreach_set("loop_start", np.arange(0, Fs32.size, 3, dtype=np.int32))
+        me.polygons.foreach_set("loop_total", np.full(len(Fs32), 3, np.int32))
+        me.update()
+        me.validate()
+        me.materials.append(mat)
+        ob = bpy.data.objects.new("细节_远山剪影", me)
+        ob[CARRIER_TAG] = 1
+        ob[SKY_TAG] = 1
+        ob["wondful_hint"] = "远山剪影"
+        sub.objects.link(ob)
+        ob.hide_render = True
+        ob.hide_viewport = True
+        sk["tris"] = int(len(Fs))
+    out["skyline"] = {k: v for k, v in sk.items() if k not in ("az", "el", "raw")}
+    print("[Wondful] 远山剪影：" + (f"可用（{sk['tris']} 面，距离 {sk['dist']:.0f} m，远景占 {sk['valid_share']:.0%}）"
+                                if sk.get("ok") else f"不可用，沿用 AI 远景带（{sk.get('reason', '')}）"))
     # mark the far LLM blocks (kept in a detail pass)
     kept = 0
     for ob in coll.all_objects:
@@ -1053,11 +1248,13 @@ class detail_pass:
     blocks it replaces (and ``extra_hide``, e.g. the temporary clay floor) are hidden; everything is restored on
     exit. A no-op when no carrier exists."""
 
-    def __init__(self, massing_coll, extra_hide=()):
+    def __init__(self, massing_coll, extra_hide=(), skyline=False):
         self.massing_coll = massing_coll
         self.extra = list(extra_hide or ())
+        self.skyline = bool(skyline)     # 远山剪影: the measured ridge stands in for the LLM 远景带 (not the sea)
         self.undo = []
         self.active = False
+        self.skyline_used = False
 
     def __enter__(self):
         if self.massing_coll is None:
@@ -1072,14 +1269,19 @@ class detail_pass:
         if not any(o.get(CARRIER_TAG) for o in objs):
             # the carrier belongs to a blockout outside this massing collection
             return self
+        sky = self.skyline and any(o.get(SKY_TAG) for o in objs)
         for o in objs:
             if o.get(CARRIER_TAG):
+                if o.get(SKY_TAG) and not sky:
+                    continue                    # 远山剪影 off: the ridge stays hidden
                 self.undo.append((o, o.hide_render, o.hide_viewport))
                 o.hide_render = False
                 o.hide_viewport = False
-            elif not o.hide_render and int(o.get(FAR_TAG, 0) or 0) == 0 and o.get("wondful_env_type") is not None:
+            elif not o.hide_render and o.get("wondful_env_type") is not None and (
+                    int(o.get(FAR_TAG, 0) or 0) == 0 or (sky and is_far_band(o.get("wondful_env_type")))):
                 self.undo.append((o, o.hide_render, o.hide_viewport))
                 o.hide_render = True
+        self.skyline_used = sky
         for o in self.extra:
             try:
                 self.undo.append((o, o.hide_render, o.hide_viewport))

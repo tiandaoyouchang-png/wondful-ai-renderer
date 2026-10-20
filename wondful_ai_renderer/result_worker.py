@@ -96,6 +96,40 @@ def is_low_tier(tier) -> bool:
     return str(tier or "").strip().lower() == "low"
 
 
+def generation_budget(pref_max, gate_on=False, gate_max=GATE_MAX, strict_retry=False) -> int:
+    """Image generations allowed per image (the first one included).
+
+    偏好设置「最多生成次数」 (``pref_max``) is the hard quota cap for every path: the 轮廓验收 regenerations
+    (``gate_max``), the 严格对齐 audit retry and the low-tier retry all stay inside it. Before 1.2.5 the gate
+    replaced the preference entirely, so 「最多生成次数 = 1」 still allowed 3 generations per image."""
+    try:
+        cap = max(1, min(GATE_MAX, int(pref_max)))
+    except (TypeError, ValueError):
+        cap = GATE_MAX
+    if gate_on:
+        try:
+            g = max(1, min(GATE_MAX, int(gate_max)))
+        except (TypeError, ValueError):
+            g = GATE_MAX
+        return min(g, cap)
+    return cap if strict_retry else 1
+
+
+def crop_regen_allowed(pref_max) -> bool:
+    """细节修复 crop regeneration costs extra image calls: off when 「最多生成次数」 is 1 (Blender paste stays)."""
+    try:
+        return int(pref_max) >= 2
+    except (TypeError, ValueError):
+        return True
+
+
+def call_budget_note(variants, attempts, crop_regen=True) -> str:
+    """Log line: the most image calls one 「生成」 can spend."""
+    v, a = max(1, int(variants)), max(1, int(attempts))
+    extra = "（另含细节修复局部重生成）" if crop_regen else "（细节修复只用 Blender 回贴）"
+    return f"生图预算：{v} 张 × 每张最多 {a} 次 = 最多 {v * a} 次{extra}"
+
+
 def low_tier_retry(tier, attempt_index, planned_attempts, used) -> bool:
     """Whether a generation that already passed its checks is regenerated once because the backend
     reported the ``low`` quality tier. Inside the existing budget only: never past ``planned_attempts``,

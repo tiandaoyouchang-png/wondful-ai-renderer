@@ -41,6 +41,14 @@ SCALE_PCT = 1.5            # … or was scaled
 ENV_GEOM_DE = 15.0         # environment: geometry-pixel reprojection ΔE vs the master
 ENV_MIN_COVIS = 0.5        # … only judged when the views share at least this much of the frame
 MAX_CALLS = 2              # one call + at most one retry per camera
+
+
+def camera_calls(pref_max) -> int:
+    """Image calls per 多角度 camera: MAX_CALLS, capped by 偏好设置「最多生成次数」 (1.2.5)."""
+    try:
+        return max(1, min(MAX_CALLS, int(pref_max)))
+    except (TypeError, ValueError):
+        return MAX_CALLS
 MASTER_BIAS = 0.10         # the master wins ties between equally head-on sources
 AUX_TAG = "wondful_mv_aux"
 POOL_FILE = "pool.json"

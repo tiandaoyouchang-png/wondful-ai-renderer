@@ -121,11 +121,13 @@ def main2():
                 raise RuntimeError("nogen")
             MV.estimate_light = _nolight
         prefs = bpy.context.preferences.addons["wondful_ai_renderer"].preferences
-        prefs.alignment_max_attempts = 1
+        prefs.alignment_max_attempts = 1                  # 1.2.5: hard cap — gate / low-tier / mv retries stay ≤ 1
         coll = build_scene()
         sc = bpy.context.scene
         props = sc.wondful_ai
         props.product_collection = coll
+        props.render_count = "1"                          # 张数 1 (default 4 → 4 variants = 4 calls)
+        props.iou_gate_max = 1
         bpy.ops.wondful.load_reference(ref_kind="STYLE", filepath=REF)
         props.output_directory = os.path.join(RUN, "out")
         props.sb_set_camera = True
