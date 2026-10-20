@@ -388,8 +388,9 @@ class SceneStyle(unittest.TestCase):
 
     def test_completion_hints_carry_the_look(self):
         self.assertIn("画风", DBk.inferred_hint(8, VOXEL))
-        self.assertIn("体素方块", DBk.inferred_hint(10, VOXEL))         # 电杆
-        self.assertIn("招牌", DBk.inferred_hint(8, NIGHT_AN))
+        self.assertIn("体素方块", DBk.inferred_hint(10, VOXEL)[:20])    # 电杆; in front (names are cut at 60)
+        self.assertTrue(DBk.inferred_hint(8, NIGHT_AN).startswith("【夜景、立面亮着招牌灯光】"))
+        self.assertNotIn("招牌", DBk.inferred_hint(11, NIGHT_AN))        # a curb gets no signs
         self.assertEqual(DBk.inferred_hint(10, REAL), DBk.INFER_HINT[10])
         self.assertEqual(DBk.inferred_hint(10, None), DBk.INFER_HINT[10])
         src = (PKG / "detail_blockout.py").read_text(encoding="utf-8")
@@ -440,3 +441,11 @@ class SimplePromptStyle(unittest.TestCase):
         self.assertIn("direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or \"\")", ops)
         self.assertIn("style_text=direct_style_text,", ops)
         self.assertIn("massing_text=text, keep_text=keep_text, style_text=style_line)", ops)
+
+
+class BlockedHint(unittest.TestCase):
+    def test_hint_search_is_wider_and_never_applied(self):
+        self.assertGreater(min(abs(a) for a in MV.POSE_AZ_SUGGEST), max(MV.POSE_AZ))
+        src = (PKG / "multiview.py").read_text(encoding="utf-8")
+        i = src.index('out["suggest"] =')
+        self.assertLess(i, src.index("    if apply:\n        cam_obj.matrix_world"))

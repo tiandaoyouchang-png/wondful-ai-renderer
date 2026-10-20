@@ -1934,6 +1934,7 @@ OCCLUDE_MAX = 0.20                 # share of the product silhouette hidden by t
 POSE_RADII = (0.9, 0.8, 0.7, 0.6, 0.5, 0.42, 0.35, 0.3, 0.25)      # step 1: closer along the line to the product
 POSE_AZ = (5, -5, 10, -10, 15, -15, 20, -20, 30, -30)               # step 2: small azimuth nudges (degrees)
 POSE_DH = (0.0, 1.0, -0.5, 2.0)                                      # … and height nudges (metres)
+POSE_AZ_SUGGEST = (40, -40, 50, -50, 60, -60, 75, -75, 90, -90)      # blocked: the nearest clear azimuth, as a hint only
 POSE_MIN_LENS = 0.6                # the lens may widen to this share of its focal length to keep the product framed
 POSE_MIN_MM = 12.0
 POSE_FRAME = 0.94                  # product extent must stay inside this share of the frame (both axes)
@@ -2135,6 +2136,15 @@ def adjust_camera_for_occlusion(context, cam_obj, product_coll, max_occ=OCCLUDE_
     if best is None:
         out["status"] = "blocked"
         out["message"] = f"{cam_obj.name}：产品被遮挡 {first['occ'] * 100:.0f}%，附近没有找到不被遮挡的机位，已跳过（请调整相机）"
+        # a hint for the user (never applied: a pose this far from the camera is a different view)
+        far, _n = plan_clear_pose([c for c in pose_candidates(tuple(pos0), tuple(aim), half + 1.2, az=POSE_AZ_SUGGEST,
+                                                              dh=(0.0, 1.0)) if abs(c["d_az"]) > max(POSE_AZ)],
+                                  evaluate, max_occ)
+        if far is not None:
+            out["suggest"] = {"d_az_deg": far["d_az"], "dist": far["dist"], "d_height": far["dh"],
+                              "lens": round(lens0 * float(far["lens_scale"]), 1)}
+            out["message"] += (f"；最近的可用机位：方位 {far['d_az']:+.0f}°、距离 {far['dist']:.1f} m"
+                               + (f"、焦距 {lens0 * float(far['lens_scale']):.0f} mm" if far["lens_scale"] < 0.999 else ""))
         return out
     pos = Vector(best["pos"])
     R = _look_at(pos, aim)

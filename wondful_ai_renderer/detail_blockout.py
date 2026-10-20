@@ -1265,10 +1265,10 @@ def inferred_hint(c, analysis=None) -> str:
     """Design hint of a 场景补全 part: the generic class hint + (1.2.6) the scene's look from the ④ analysis
     (画风 for a voxel / cartoon reference, lit signs for a night street) so a pole or an inferred house is not drawn
     as a plain photoreal one."""
-    from .scene_style import hint_suffix
+    from .scene_style import hint_prefix
     base = INFER_HINT.get(int(c), C_NAME.get(int(c), ""))
     try:
-        return base + hint_suffix(analysis)
+        return hint_prefix(analysis, building=int(c) in (8, 12)) + base
     except Exception:
         return base
 

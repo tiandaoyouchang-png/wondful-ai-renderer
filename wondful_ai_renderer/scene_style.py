@@ -85,13 +85,14 @@ def master_lock(analysis, brief="") -> str:
     return "".join(parts)
 
 
-def hint_suffix(analysis) -> str:
-    """Appended to the generic 场景补全 block hints (电杆、推测建筑…) so they carry the scene's look."""
+def hint_prefix(analysis, building=True) -> str:
+    """Put IN FRONT of the generic 场景补全 block hints (电杆、推测建筑…; block names are cut at 60 characters, so a
+    suffix would be lost) so they carry the scene's look: 画风 for every part, lit signs only for buildings."""
     text = analysis_text(analysis)
     style = art_style(text)
     out = []
     if style:
-        out.append(f"画风：{style_phrase(style)}，与主视角一致")
-    if is_night(text):
-        out.append("夜景：与主视角同样亮着的招牌和灯光")
-    return ("（" + "；".join(out) + "）") if out else ""
+        out.append(f"{style_phrase(style[:2])}画风")
+    if building and is_night(text):
+        out.append("夜景、立面亮着招牌灯光")
+    return ("【" + "，".join(out) + "】") if out else ""
