@@ -1036,6 +1036,7 @@ def _draw_multiview(adv, context, props, busy):
     row = box.row(align=True)
     row.enabled = not busy
     row.prop(props, "mv_colour_match", text="统一调色")
+    row.prop(props, "mv_avoid_occlusion", text="被遮挡就调视角")
     # 1.2.5 细节粗模 (needs ④ 精确模式)
     row = box.row(align=True)
     row.enabled = not busy

@@ -1185,7 +1185,7 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, 
             if inf_coll is None:
                 inf_coll = _inferred_collection(coll)
             _link_mesh(inf_coll, f"补全_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=False,
-                       tags=(INFER_TAG,), hint=INFER_HINT.get(int(c), C_NAME.get(int(c), "")))
+                       tags=(INFER_TAG,), hint=inferred_hint(int(c), analysis))
             continue
         ob = _link_mesh(sub, f"细节_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=True, tags=(CARRIER_TAG,),
                         hint=C_NAME.get(int(c), ""))
@@ -1259,6 +1259,18 @@ INFER_COLLECTION = "Wondful 场景补全（推测）"
 INFER_HINT = {8: "与主视角同一条街的房屋（主视角以外，按看到的街道推测补全）：同样的类型、颜色范围、层数、窗户和屋顶，不要画成空白墙",
               9: "与主视角同样的修剪树篱 / 行道树（推测补全）", 10: "与主视角同样的电线杆（推测补全）",
               11: "与主视角同样的路沿（推测补全）", 12: "房屋窗户（推测补全）"}
+
+
+def inferred_hint(c, analysis=None) -> str:
+    """Design hint of a 场景补全 part: the generic class hint + (1.2.6) the scene's look from the ④ analysis
+    (画风 for a voxel / cartoon reference, lit signs for a night street) so a pole or an inferred house is not drawn
+    as a plain photoreal one."""
+    from .scene_style import hint_suffix
+    base = INFER_HINT.get(int(c), C_NAME.get(int(c), ""))
+    try:
+        return base + hint_suffix(analysis)
+    except Exception:
+        return base
 
 
 def _inferred_collection(parent):
@@ -1448,7 +1460,7 @@ def complete_llm_in_blender(context, info, analysis=None):
     for c in np.unique(C):
         sel = C == c
         _link_mesh(sub, f"补全_{C_NAME.get(int(c), str(c))}", Vw, F[sel], mat, hidden=False, tags=(INFER_TAG,),
-                   hint=INFER_HINT.get(int(c), C_NAME.get(int(c), "")))
+                   hint=inferred_hint(int(c), analysis))
     import json as _json
     lw = SC.layout_to_world(layout, Mw)
     lw["stats"] = cst
