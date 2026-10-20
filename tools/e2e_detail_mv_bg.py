@@ -126,6 +126,10 @@ def main2():
             _orig_edit = CD2.edit_image
 
             def _counted(**kw):
+                cap = int(os.environ.get("DMV_MAX_CALLS", "12"))
+                done = sum(1 for _ in open(os.environ["DMV_CALLS"], encoding="utf-8")) if os.path.isfile(os.environ["DMV_CALLS"]) else 0
+                if done >= cap:
+                    raise RuntimeError(f"image-call budget {cap} reached (ledger)")
                 with open(os.environ["DMV_CALLS"], "a", encoding="utf-8") as fh:
                     fh.write(f"{time.strftime('%H:%M:%S')} {os.path.basename(RUN)} {kw.get('tag', '')}\n")
                 return _orig_edit(**kw)
