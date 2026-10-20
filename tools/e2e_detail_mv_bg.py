@@ -120,6 +120,24 @@ def main2():
             def _nolight(*a, **k):
                 raise RuntimeError("nogen")
             MV.estimate_light = _nolight
+        if os.environ.get("DMV_CALLS"):
+            # strict image-call ledger: one line per edit_image call (shared across runs via the file)
+            from wondful_ai_renderer import codex_direct as CD2
+            _orig_edit = CD2.edit_image
+
+            def _counted(**kw):
+                with open(os.environ["DMV_CALLS"], "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%H:%M:%S')} {os.path.basename(RUN)} {kw.get('tag', '')}\n")
+                return _orig_edit(**kw)
+            CD2.edit_image = _counted
+            _orig_gwf = CD2.generate_with_fallback
+
+            def _no_fallback(kwargs, **kw):
+                def _refuse(**_k):
+                    raise RuntimeError("codex exec fallback disabled (image-call budget)")
+                kw["fallback"] = _refuse
+                return _orig_gwf(kwargs, **kw)
+            CD2.generate_with_fallback = _no_fallback
         prefs = bpy.context.preferences.addons["wondful_ai_renderer"].preferences
         prefs.alignment_max_attempts = 1                  # 1.2.5: hard cap — gate / low-tier / mv retries stay ≤ 1
         coll = build_scene()
@@ -190,8 +208,9 @@ def main2():
         z_off = float(info["cam_local_z"]) - float(geo["cam"]["height_m"])
         bvhA = measured_bvh(geo, Matrix(info["world"]), z_off)
         for arm in ARMS:
-            props.sb_detail_carrier = arm in ("carrier", "clay")
+            props.sb_detail_carrier = arm in ("carrier", "clay", "sky")
             props.sb_detail_clay = arm == "clay"
+            props.sb_detail_skyline = arm == "sky"          # 1.2.5 远山剪影
             for o in sc.objects:
                 o.select_set(False)
             oc.select_set(True)
