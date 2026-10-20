@@ -616,9 +616,45 @@ def _crop_patch(col, ok, min_px=24, need=0.75, rows_fixed=False, min_valid=0.8):
     return C
 
 
+PATCH_MAX_ANISO = 0.45       # structure-tensor anisotropy above this = a smear (rectified across a depth step)
+PATCH_MAX_LOWSTD = 14.0      # grey std of the patch's low frequencies (a shadow / a kerb in it)
+PATCH_MAX_DE = 12.0          # colour distance (ΔE) of an extra patch to the best one
+PATCH_MIN_DETAIL = 0.5       # an extra patch keeps ≥ this share of the best one's fine detail (else a blur)
+
+
+def patch_quality(C, ref=None):
+    """Is ``C`` a usable texture sample (and, given the best patch ``ref``, a consistent extra one)?"""
+    C = np.asarray(C, np.float32)[..., :3]
+    g = C.mean(-1)
+    r = max(2, min(g.shape) // 5)
+    low = blur(g, r)
+    hi = g - low
+    gx = np.zeros_like(g)
+    gy = np.zeros_like(g)
+    gx[:, 1:-1] = g[:, 2:] - g[:, :-2]
+    gy[1:-1] = g[2:] - g[:-2]
+    jxx, jyy, jxy = float((gx * gx).mean()), float((gy * gy).mean()), float((gx * gy).mean())
+    tr = jxx + jyy
+    aniso = math.sqrt((jxx - jyy) ** 2 + 4 * jxy * jxy) / tr if tr > 1e-6 else 0.0
+    q = {"aniso": aniso, "lowstd": float(low.std()), "detail": float(hi.std()), "lab": lab(C.reshape(-1, 3).mean(0))}
+    ok = aniso <= PATCH_MAX_ANISO and q["lowstd"] <= PATCH_MAX_LOWSTD
+    if ok and ref is not None:
+        qr = patch_quality(ref)
+        ok = (float(np.linalg.norm(q["lab"] - qr["lab"])) <= PATCH_MAX_DE
+              and q["detail"] >= PATCH_MIN_DETAIL * qr["detail"])
+    q["ok"] = bool(ok)
+    return q
+
+
+def _greenish(C):
+    """Foliage-like sample: green-leaning and darker than a painted wall (a pale green house is not a hedge)."""
+    L, a, _b = (float(x) for x in lab(np.asarray(C, np.float32)[..., :3].reshape(-1, 3).mean(0)))
+    return L < 62.0 and a < -5.0
+
+
 def master_patches(mv, layout):
     """Style patches rectified from the master view: facades (≤ 4, distinct colours), road, sidewalk, greenery."""
-    out = {"facade": [], "road": None, "side": None, "veg": None}
+    out = {"facade": [], "road": None, "side": None, "veg": None, "road_all": [], "side_all": [], "veg_all": []}
     if mv.get("img") is None or not layout:
         return out
     cam_o = _mat(mv["cam"])[:3, 3]
@@ -665,7 +701,7 @@ def master_patches(mv, layout):
         pick = rs.choice(len(ys), min(60, len(ys)), replace=False)
         side = 2.0
         n_g = int(side / FILL_MPP_GROUND)
-        best = {"road": (0.0, None), "side": (0.0, None)}
+        cands = {"road": [], "side": []}
         for k in pick:
             q = P[ys[k], xs[k], :3]
             key = "road"
@@ -680,11 +716,24 @@ def master_patches(mv, layout):
             col, ok = _rectify(mv, origin, np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), n_g, n_g, FILL_MPP_GROUND,
                                0.25)
             sc = float(ok.mean()) - 0.004 * float(rng[ys[k], xs[k]])
-            if ok.mean() > 0.85 and sc > best[key][0]:
+            if ok.mean() > 0.85:
+                cands[key].append((sc, q, col, ok))
+        for key in ("road", "side"):
+            # 1.2.6: up to MAX_GROUND_PATCHES patches from distinct spots (best first) instead of one; the extra
+            # ones must look like the best one (no smeared curb / step rectifications, shadows, blur, other colour)
+            got, at = [], []
+            for sc, q, col, ok in sorted(cands[key], key=lambda c: -c[0]):
+                if any(float(np.linalg.norm(q[:2] - a[:2])) < side * 0.9 for a in at):
+                    continue
                 C = _crop_patch(col, ok, min_px=n_g // 2, need=0.7)
-                if C is not None:
-                    best[key] = (sc, C)
-        out["road"], out["side"] = best["road"][1], best["side"][1]
+                # the best one is kept as before (a road with no sample would stay clay)
+                if C is not None and (not got or patch_quality(C, got[0])["ok"]):
+                    got.append(C)
+                    at.append(q)
+                if len(got) >= MAX_GROUND_PATCHES:
+                    break
+            out[key] = got[0] if got else None
+            out[key + "_all"] = got
     for v in layout.get("veg_refs", []):
         xy = np.asarray(v["xy"], np.float64)
         r = float(v["r"])
@@ -699,20 +748,366 @@ def master_patches(mv, layout):
         nv = max(8, int((top - bot) / FILL_MPP_FACADE))
         col, ok = _rectify(mv, origin, np.r_[tg, 0.0], np.array([0.0, 0.0, -1.0]), nu, nv, FILL_MPP_FACADE, r + 0.8)
         C = _crop_patch(col, ok, min_px=8, need=0.6)
-        if C is not None and (out["veg"] is None or C.size > out["veg"].size):
-            out["veg"] = C
+        if C is not None and min(C.shape[:2]) >= 12 and _greenish(C):
+            out["veg_all"].append(C)
+    out["veg_all"].sort(key=lambda C: -C.size)
+    out["veg_all"] = out["veg_all"][:MAX_GROUND_PATCHES]
+    out["veg"] = out["veg_all"][0] if out["veg_all"] else None
     return out
 
 
+# ------------------------------------------------- 1.2.6 de-tiling: histogram-preserving stochastic texture fill
+# 1.2.5 mirrored one small master patch per class across the whole uncovered area: a visible checkerboard on the
+# road (2026-10-20 orbit 144° / 216°). Now every class is a stochastic texture: up to MAX_GROUND_PATCHES master
+# patches, flattened (their light gradient removed), Gaussianised per decorrelated colour channel, and blended on a
+# world-space triangle grid where each vertex takes a random patch, position, quarter turn and flip (Heitz & Neyret
+# 2018, "High-performance by-example noise using a histogram-preserving blending operator"). The variance-
+# preserving blend keeps the patch's contrast and colour histogram, so there is no blur and no seam; a faint low-
+# frequency colour drift (world metres) replaces the flat look. Facades blend 1D strips along the wall with a random
+# offset / flip per strip and a per-building tint, so two buildings of one patch differ. Flat shading, no lighting.
+
+FILL_CELL_M = 0.55          # triangle-grid edge on the ground (m); a patch needs ≥ 2 cells + margin
+FILL_VEG_CELL_M = 0.45
+FILL_STRIP_M = 2.6          # facade strip length (m); blended over FILL_STRIP_BAND of it
+FILL_STRIP_BAND = 0.25
+FILL_LOWFREQ_M = 7.0        # low-frequency colour drift: wavelength (m) …
+FILL_LOWFREQ_AMP = 0.045    # … and amplitude (fraction of the colour)
+FILL_TINT = (0.06, 0.025)   # per-building brightness / per-channel tint (±)
+MAX_GROUND_PATCHES = 6
+FILL_LOD_R = (1, 2, 4, 8, 16)   # box radii of the prefiltered levels 1…5
+_NQ = 256
+
+
+def _ppf(p):
+    """Inverse standard normal CDF (scalar, Newton on math.erf)."""
+    x = 0.0
+    for _ in range(60):
+        c = 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+        d = math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+        step = (c - p) / max(d, 1e-12)
+        x -= max(-2.0, min(2.0, step))
+        if abs(step) < 1e-10:
+            break
+    return x
+
+
+_PQ = (np.arange(_NQ) + 0.5) / _NQ
+_GQ = np.array([_ppf(float(p)) for p in _PQ])
+
+
+def _rnd(i, j, salt, k=0):
+    """Deterministic uniform [0, 1) per integer lattice point (i, j), salt and stream k."""
+    m = np.uint64(0xFFFFFFFF)
+    x = (np.asarray(i, np.int64).astype(np.uint64) * np.uint64(0x9E3779B1)) & m
+    x ^= (np.asarray(j, np.int64).astype(np.uint64) * np.uint64(0x85EBCA77)) & m
+    sv = np.asarray(salt, np.int64).astype(np.uint64)
+    x ^= (sv * np.uint64(0x27D4EB2F) + np.uint64((int(k) * 0x165667B1 + 0x5BD1E995) & 0xFFFFFFFF)) & m
+    for mul in (0x2C1B3C6D, 0x297A2D39, 0x7FEB352D):
+        x ^= x >> np.uint64(15)
+        x = (x * np.uint64(mul)) & m
+    x ^= x >> np.uint64(16)
+    return (x & np.uint64(0xFFFFFF)).astype(np.float64) / float(1 << 24)
+
+
+def value_noise(x, y, salt=0):
+    """Smooth value noise in [-1, 1] at lattice spacing 1 (two octaves)."""
+    out = 0.0
+    for amp, f, k in ((0.7, 1.0, 0), (0.3, 2.3, 1)):
+        xs, ys = np.asarray(x, np.float64) * f, np.asarray(y, np.float64) * f
+        i0, j0 = np.floor(xs), np.floor(ys)
+        fx, fy = xs - i0, ys - j0
+        fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+        i0, j0 = i0.astype(np.int64), j0.astype(np.int64)
+        r = [[_rnd(i0 + a, j0 + b, salt, 7 + k) for a in (0, 1)] for b in (0, 1)]
+        v = (r[0][0] * (1 - fx) + r[0][1] * fx) * (1 - fy) + (r[1][0] * (1 - fx) + r[1][1] * fx) * fy
+        out = out + amp * (2.0 * v - 1.0)
+    return out
+
+
+def _flatten(p):
+    """Remove a patch's low-frequency light gradient (mirror-tiled it became the checkerboard)."""
+    p = np.asarray(p, np.float32)[..., :3]
+    r = max(2, min(p.shape[:2]) // 5)
+    return p - blur(p, r) + p.reshape(-1, 3).mean(0)
+
+
+def make_synth(patches, mpp, cell_m=FILL_CELL_M, rotate=True, flatten=True):
+    """Stochastic texture from master patches (list of H×W×3), or None. Texel size ``mpp`` metres."""
+    ps = [np.asarray(p, np.float32)[..., :3] for p in (patches or []) if p is not None and min(np.shape(p)[:2]) >= 12]
+    if not ps:
+        return None
+    if flatten:
+        # each patch loses its light gradient and takes the pooled mean colour: patches from a sunnier and a
+        # shadier spot would otherwise mottle the ground at the grid-cell scale (the slow drift is added later)
+        ps = [_flatten(p) for p in ps]
+        pm = np.concatenate([p.reshape(-1, 3) for p in ps]).mean(0)
+        ps = [p - p.reshape(-1, 3).mean(0) + pm for p in ps]
+    allpx = np.concatenate([p.reshape(-1, 3) for p in ps]).astype(np.float64)
+    mu = allpx.mean(0)
+    _ev, E = np.linalg.eigh(np.cov((allpx - mu).T) + np.eye(3) * 1e-3)
+    Y = (allpx - mu) @ E
+    qx = np.stack([np.quantile(Y[:, c], _PQ) for c in range(3)])
+    qx = qx + np.arange(_NQ)[None] * 1e-6                  # strictly increasing (flat patches)
+    G = []
+    for p in ps:
+        y = (p.reshape(-1, 3).astype(np.float64) - mu) @ E
+        g = np.stack([np.interp(y[:, c], qx[c], _GQ) for c in range(3)], -1)
+        G.append(g.reshape(p.shape).astype(np.float32))
+    # one atlas (patches side by side, 4 px apart) × prefiltered levels (footprint 2^l texels): far pixels average
+    # the texture instead of aliasing into grit; one trilinear gather serves every patch
+    Ha = max(p.shape[0] for p in G)
+    xo = np.cumsum([0] + [p.shape[1] + 4 for p in G])
+    atlas = np.zeros((len(FILL_LOD_R) + 1, Ha, int(xo[-1]), 3), np.float32)
+    for k, Gp in enumerate(G):
+        lv = [Gp] + [blur(Gp, r) for r in FILL_LOD_R]
+        for li, a in enumerate(lv):
+            atlas[li, :Gp.shape[0], xo[k]:xo[k] + Gp.shape[1]] = a
+    small = min(min(p.shape[:2]) for p in ps)
+    cell = max(3.0, min(cell_m / mpp, (small - 4) / 2.0))
+    return {"G": G, "atlas": atlas, "xo": xo[:-1].astype(np.float64),
+            "pw": np.array([p.shape[1] for p in G], np.float64), "ph": np.array([p.shape[0] for p in G], np.float64),
+            "mu": mu, "E": E, "qx": qx, "cell": cell, "rotate": bool(rotate), "mpp": float(mpp),
+            "mean": mu.copy()}
+
+
+def _degauss(S, g):
+    y = np.stack([np.interp(g[:, c], _GQ, S["qx"][c]) for c in range(3)], -1)
+    return y @ S["E"].T + S["mu"]
+
+
+def _tri(S, x, y, lod):
+    """Trilinear texel of the atlas: atlas pixel (x, y), fractional level ``lod`` (None = level 0)."""
+    A = S["atlas"]
+    L, Ha, Wa = A.shape[:3]
+    x = np.clip(x, 0, Wa - 1.001)
+    y = np.clip(y, 0, Ha - 1.001)
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+
+    def at(li):
+        return ((A[li, y0, x0] * (1 - fx) + A[li, y0, x0 + 1] * fx) * (1 - fy)
+                + (A[li, y0 + 1, x0] * (1 - fx) + A[li, y0 + 1, x0 + 1] * fx) * fy)
+    if lod is None:
+        return at(0)
+    lod = np.clip(lod, 0, L - 1)
+    l0 = np.minimum(np.floor(lod).astype(np.int64), L - 2)
+    fl = (lod - l0)[:, None]
+    return at(l0) * (1 - fl) + at(l0 + 1) * fl
+
+
+def _sample_g(S, pidx, cu, cv, du, dv, rot, flip, lod=None):
+    """Gaussianised texel of patch pidx at centre (cu, cv) + local (du, dv) turned by rot·90° / flipped."""
+    du = np.where(flip, -du, du)
+    for k in range(4):
+        sel = rot == k
+        if k == 1:
+            du[sel], dv[sel] = -dv[sel], du[sel].copy()
+        elif k == 2:
+            du[sel], dv[sel] = -du[sel], -dv[sel]
+        elif k == 3:
+            du[sel], dv[sel] = dv[sel], -du[sel].copy()
+    w, h = S["pw"][pidx], S["ph"][pidx]
+    x = S["xo"][pidx] + np.clip(np.clip(cu * (w - 1), 1, w - 2) + du, 0, w - 1.001)
+    y = np.clip(np.clip(cv * (h - 1), 1, h - 2) + dv, 0, h - 1.001)
+    return _tri(S, x, y, lod)
+
+
+def synth_ground(S, u, v, salt=0, lod=None):
+    """Texture S at texel coordinates (u, v) (any shape → shape + (3,)): triangle-grid histogram-preserving blend.
+    ``lod``: per point log2 of the pixel footprint in texels (prefiltered level)."""
+    u = np.asarray(u, np.float64).ravel()
+    v = np.asarray(v, np.float64).ravel()
+    lod = None if lod is None else np.asarray(lod, np.float64).ravel()
+    c = S["cell"]
+    b = v / (0.8660254 * c)
+    a = u / c - 0.5 * b
+    a0, b0 = np.floor(a), np.floor(b)
+    fa, fb = a - a0, b - b0
+    upper = fa + fb > 1.0
+    # three lattice vertices + barycentric weights of the equilateral triangle the point lies in
+    verts = [(np.where(upper, a0 + 1, a0), np.where(upper, b0 + 1, b0)), (a0 + 1, b0), (a0, b0 + 1)]
+    w = [np.where(upper, fa + fb - 1, 1 - fa - fb), np.where(upper, 1 - fb, fa), np.where(upper, 1 - fa, fb)]
+    n = len(S["G"])
+    acc = np.zeros(u.shape + (3,), np.float64)
+    wsum = np.zeros(u.shape, np.float64)
+    for (va, vb), wi in zip(verts, w):
+        ia, ib = va.astype(np.int64), vb.astype(np.int64)
+        vu = (va + 0.5 * vb) * c
+        vv = vb * 0.8660254 * c
+        pidx = np.minimum((_rnd(ia, ib, salt, 0) * n).astype(np.int64), n - 1)
+        rot = (_rnd(ia, ib, salt, 1) * 4).astype(np.int64) if S["rotate"] else np.zeros(ia.shape, np.int64)
+        flip = _rnd(ia, ib, salt, 2) < 0.5
+        cu, cv = _margin(S, pidx, _rnd(ia, ib, salt, 3), _rnd(ia, ib, salt, 4))
+        g = _sample_g(S, pidx, cu, cv, u - vu, v - vv, rot, flip, lod)
+        acc += wi[:, None] * g
+        wsum += wi * wi
+    g = acc / np.sqrt(np.maximum(wsum, 1e-6))[:, None]
+    return _degauss(S, g)
+
+
+def _margin(S, pidx, ru, rv):
+    """Random patch position (fractions) that keeps a full cell of margin from every edge."""
+    m = S["cell"] + 1.5
+    w, h = S["pw"][pidx] - 1, S["ph"][pidx] - 1
+    lo_u, hi_u = np.minimum(m / w, 0.5), np.maximum(1 - m / w, 0.5)
+    lo_v, hi_v = np.minimum(m / h, 0.5), np.maximum(1 - m / h, 0.5)
+    return lo_u + ru * (hi_u - lo_u), lo_v + rv * (hi_v - lo_v)
+
+
+def synth_strips(S, s, v, salt=0, strip_px=None, band=FILL_STRIP_BAND, lod=None):
+    """Facade texture: patch rows fixed (v = patch row, mirrored above the top), columns from 1D strips along the
+    wall (s texels), each with a random patch column offset and flip, blended histogram-preserving at the joints."""
+    s = np.asarray(s, np.float64).ravel()
+    v = np.asarray(v, np.float64).ravel()
+    lod = None if lod is None else np.asarray(lod, np.float64).ravel()
+    Gp = S["G"][0]
+    h, w = Gp.shape[:2]
+    L = float(strip_px or FILL_STRIP_M / S["mpp"])
+    # a strip is at most 40 % of the patch, so its random column offset spans more than a strip (a narrow patch
+    # would otherwise repeat every strip)
+    L = max(4.0, min(L, (w - 2) / 2.5))
+    x = s / L
+    k0 = np.floor(x)
+    f = x - k0
+    vm = _mirror(v, h).astype(np.float64)
+    acc = np.zeros(s.shape + (3,), np.float64)
+    wsum = np.zeros(s.shape, np.float64)
+    # strip k covers [k·L, (k+1)·L); strip k−1 runs on over the first band·L of it and fades out there
+    wc = np.clip(f / band, 0, 1)
+    for dk, wi in ((0, wc), (-1, 1.0 - wc)):
+        k = (k0 + dk).astype(np.int64)
+        loc = s - k * L
+        off = _rnd(k, 0, salt, 5) * max(0.0, w - 2 - L * (1 + band))
+        flip = _rnd(k, 0, salt, 6) < 0.5
+        col = np.where(flip, (w - 2) - (off + loc), off + loc)
+        g = _tri(S, np.clip(col, 0, w - 1.001), vm, lod)
+        acc += wi[:, None] * g
+        wsum += wi * wi
+    g = acc / np.sqrt(np.maximum(wsum, 1e-6))[:, None]
+    return _degauss(S, g)
+
+
+def tile_periodicity(gray, mask=None, min_lag=8, hp=None, min_overlap=0.25):
+    """How strongly a texture repeats: the highest normalised autocorrelation at lags ≥ ``min_lag`` px whose
+    overlap is ≥ ``min_overlap`` of the valid area (≈1 exact tiling / mirror tiling, ≈0.1–0.3 natural texture).
+    ``hp`` (px) high-passes first so slow light / colour drift does not count."""
+    X = np.asarray(gray, np.float64)
+    M = np.ones(X.shape) if mask is None else np.asarray(mask, np.float64)
+    if M.sum() < 4 * min_lag * min_lag:
+        return float("nan")
+    if hp:
+        X = X - blur((X * M).astype(np.float32), int(hp)) / np.maximum(blur(M.astype(np.float32), int(hp)), 1e-3)
+    X = (X - (X * M).sum() / M.sum()) * M
+    sh = (2 * X.shape[0], 2 * X.shape[1])
+    F, FM, E = np.fft.rfft2(X, sh), np.fft.rfft2(M, sh), np.fft.rfft2(X * X, sh)
+    num = np.fft.irfft2(F * np.conj(F), sh)
+    e1 = np.fft.irfft2(E * np.conj(FM), sh)
+    e2 = np.fft.irfft2(FM * np.conj(E), sh)
+    cnt = np.fft.irfft2(FM * np.conj(FM), sh)
+    ncc = num / np.sqrt(np.maximum(e1 * e2, 1e-9))
+    dy = np.fft.fftfreq(sh[0]) * sh[0]
+    dx = np.fft.fftfreq(sh[1]) * sh[1]
+    lag = np.hypot(dy[:, None], dx[None, :])
+    ok = (lag >= min_lag) & (cnt >= min_overlap * M.sum())
+    return float(np.clip(ncc[ok].max(), -1, 1)) if ok.any() else float("nan")
+
+
+def ground_resample(vk, img, region, layout, mpp=0.1, extent_m=30.0, max_foot=2.0):
+    """Perspective-corrected view of a base's ground: a world grid (street-aligned, ``mpp`` m, ±extent around the
+    camera) at the height of the region's dominant horizontal plane, each point projected into the view and sampled from ``img`` (grey) where the
+    view really sees that point (position pass within 0.2 m), it lies in ``region`` and the pixel is no coarser
+    than ``max_foot`` grid cells. → (grey grid, valid mask)."""
+    P = np.asarray(vk["pos"], np.float64)
+    H, W = P.shape[:2]
+    up = (P[..., 3] > 0.5) & (_unit_n(vk["nrm"])[..., 2] > 0.8) & np.asarray(region, bool)
+    gz = (layout or {}).get("ground_z")
+    if up.any():                               # the region's dominant horizontal plane (usually the ground)
+        gz = float(np.median(P[..., 2][up]))
+    gz = float(gz or 0.0)
+    st = (layout or {}).get("street")
+    t = np.asarray(st["t"], np.float64) if st else np.array([1.0, 0.0])
+    t = t / max(np.linalg.norm(t), 1e-9)
+    nrm2 = np.array([t[1], -t[0]])
+    cam_o = _mat(vk["cam"])[:3, 3]
+    n = int(2 * extent_m / mpp)
+    a = (np.arange(n) - n / 2 + 0.5) * mpp
+    Q = cam_o[:2] + a[None, :, None] * t + a[:, None, None] * nrm2
+    Q = np.dstack([Q, np.full(Q.shape[:2], float(gz))])
+    u, v, z = project(vk["cam"], Q, W, H)
+    inside = (z > 0) & (u >= 0) & (u <= W - 1) & (v >= 0) & (v <= H - 1)
+    ui = np.clip(np.round(u).astype(int), 0, W - 1)
+    vi = np.clip(np.round(v).astype(int), 0, H - 1)
+    S = P[vi, ui]
+    foot = pixel_footprint(P)
+    ok = (inside & (S[..., 3] > 0.5) & (np.linalg.norm(S[..., :3] - Q, axis=-1) < 0.2)
+          & np.asarray(region, bool)[vi, ui] & (foot[vi, ui] <= max_foot * mpp))
+    g = bilinear(np.asarray(img, np.float32)[..., :3].mean(-1, keepdims=True), u, v)[..., 0]
+    return np.where(ok, g, 0.0), ok
+
+
+def fill_periodicity(vk, base, region, layout, mpp=0.1):
+    """Repetition of a base's ground region (H×W bool): ``tile_periodicity`` of the perspective-corrected ground
+    (``ground_resample``), high-passed at 2 m, lags ≥ 1 m. NaN when the region is too small to tell."""
+    g, ok = ground_resample(vk, base, region, layout, mpp)
+    if ok.sum() < 400:
+        return float("nan")
+    return tile_periodicity(g, ok, min_lag=int(round(1.0 / mpp)), hp=int(round(2.0 / mpp)), min_overlap=0.2)
+
+
+def pixel_footprint(P, cap=2.0):
+    """World size (m) of each pixel: the smaller of its right / down neighbour steps on the same surface (a depth
+    jump on one side does not count), capped at ``cap``."""
+    P = np.asarray(P, np.float64)
+    hit = P[..., 3] > 0.5
+    big = np.full(hit.shape, cap)
+    dx, dy = big.copy(), big.copy()
+    sx = np.linalg.norm(P[:, 1:, :3] - P[:, :-1, :3], axis=-1)
+    sy = np.linalg.norm(P[1:, :, :3] - P[:-1, :, :3], axis=-1)
+    okx = hit[:, 1:] & hit[:, :-1]
+    oky = hit[1:] & hit[:-1]
+    dx[:, :-1] = np.where(okx, sx, cap)
+    dx[:, -1] = dx[:, -2]
+    dy[:-1] = np.where(oky, sy, cap)
+    dy[-1] = dy[-2]
+    # a pixel's own footprint is the larger axis, but an edge (one side jumps) takes the other side's step
+    lx = np.minimum(dx, np.roll(dx, 1, 1))
+    ly = np.minimum(dy, np.roll(dy, 1, 0))
+    return np.minimum(np.maximum(lx, ly), cap)
+
+
+def fill_synths(patches):
+    """The stochastic textures of a master patch set (built once, cached in the dict)."""
+    if patches.get("_synth") is not None:
+        return patches["_synth"]
+
+    def lst(key):
+        got = [p for p in (patches.get(key + "_all") or []) if p is not None]
+        return got or ([patches[key]] if patches.get(key) is not None else [])
+    road, side, veg = lst("road"), lst("side"), lst("veg")
+    road, side = road or side, side or road
+    if not veg:                 # no greenery sample: a dark green with leaf-sized noise (deterministic)
+        rs = np.random.default_rng(5)
+        n = blur(rs.normal(0, 1, (48, 48)).astype(np.float32), 1, passes=1)
+        veg = [np.clip(np.array((58, 78, 46), np.float32) * (1 + 0.35 * n / max(float(n.std()), 1e-6))[..., None], 0, 255)]
+    S = {"road": make_synth(road, FILL_MPP_GROUND), "side": make_synth(side, FILL_MPP_GROUND),
+         "curb": make_synth([np.clip(np.asarray(p, np.float32) * 1.12 + 6, 0, 255) for p in side], FILL_MPP_GROUND),
+         "veg": make_synth(veg, FILL_MPP_FACADE, cell_m=FILL_VEG_CELL_M, rotate=False),
+         # facades keep their rows (shop front at the foot, windows above): no flattening, no turning
+         "facade": [make_synth([p], FILL_MPP_FACADE, rotate=False, flatten=False) for p in (patches.get("facade") or [])]}
+    patches["_synth"] = S
+    return S
+
+
 def style_fill(vk, cls, style, patches, layout):
-    """(fill image H×W×3, fill mask) for view k from the master patches, tiled in world units."""
+    """(fill image H×W×3, fill mask) for view k from the master patches: stochastic, world-space textures."""
     P = np.asarray(vk["pos"], np.float64)
     H, W = P.shape[:2]
     N = _unit_n(vk["nrm"])
     out = np.zeros((H, W, 3), np.float32)
     have = np.zeros((H, W), bool)
     gz = (layout or {}).get("ground_z")
-    gz = float(gz) if gz is not None else float(np.percentile(P[..., 2][(P[..., 3] > 0.5) & (N[..., 2] > 0.8)], 30))         if ((P[..., 3] > 0.5) & (N[..., 2] > 0.8)).any() else 0.0
+    gz = float(gz) if gz is not None else float(np.percentile(P[..., 2][(P[..., 3] > 0.5) & (N[..., 2] > 0.8)], 30)) \
+        if ((P[..., 3] > 0.5) & (N[..., 2] > 0.8)).any() else 0.0
     st = (layout or {}).get("street")
     if st:
         t = np.asarray(st["t"], np.float64)
@@ -721,44 +1116,53 @@ def style_fill(vk, cls, style, patches, layout):
         go = (P[..., :2] - a0) @ np.array([t[1], -t[0]])
     else:
         gs, go = P[..., 0], P[..., 1]
+    S = fill_synths(patches)
+    foot = pixel_footprint(P)
+    lod_g = np.log2(np.maximum(foot / FILL_MPP_GROUND, 1.0))
+    lod_f = np.log2(np.maximum(foot / FILL_MPP_FACADE, 1.0))
+    drift = 1.0 + FILL_LOWFREQ_AMP * value_noise(gs / FILL_LOWFREQ_M, go / FILL_LOWFREQ_M, 11)
 
-    def put(sel, patch, pu, pv):
-        if patch is None or not sel.any():
+    def put(sel, col, mod=None):
+        if col is None or not sel.any():
             return
-        h, w = patch.shape[:2]
-        u, v = pu[sel] - 0.5, pv[sel] - 0.5          # bilinear on the mirrored tiling (no blocky near texels)
-        fu, fv = u - np.floor(u), v - np.floor(v)
-        u0, v0 = np.floor(u), np.floor(v)
-        acc = 0.0
-        for dv, wv in ((0, 1 - fv), (1, fv)):
-            for du, wu in ((0, 1 - fu), (1, fu)):
-                acc = acc + patch[_mirror(v0 + dv, h), _mirror(u0 + du, w)] * (wv * wu)[:, None]
-        out[sel] = acc
+        c = col if mod is None else col * mod[sel][:, None]
+        out[sel] = np.clip(c, 0, 255)
         have[sel] = True
-    road = patches.get("road")
-    side = patches.get("side") if patches.get("side") is not None else road
-    put(cls == CLS_ROAD, road if road is not None else side, gs / FILL_MPP_GROUND, go / FILL_MPP_GROUND)
-    put(cls == CLS_SIDE, side, gs / FILL_MPP_GROUND, go / FILL_MPP_GROUND)
-    if side is not None:
-        put(cls == CLS_CURB, np.clip(side * 1.12 + 6, 0, 255), gs / FILL_MPP_GROUND, (P[..., 2] - gz) / FILL_MPP_GROUND)
+
+    g = FILL_MPP_GROUND
+    for cl, key, salt in ((CLS_ROAD, "road", 1), (CLS_SIDE, "side", 2)):
+        sel = cls == cl
+        if sel.any() and S[key] is not None:
+            put(sel, synth_ground(S[key], gs[sel] / g, go[sel] / g, salt, lod_g[sel]), drift)
+    sel = cls == CLS_CURB
+    if sel.any() and S["curb"] is not None:
+        put(sel, synth_ground(S["curb"], gs[sel] / g, (P[..., 2] - gz)[sel] / g, 3, lod_g[sel]), drift)
     tan = facade_tangent(P, N)
     s = (P[..., :2] * tan).sum(-1)
-    fac = patches.get("facade") or []
+    fac = [f for f in S["facade"] if f is not None]
     zbase = np.full((H, W), gz)
     for b in (layout or {}).get("boxes", []):
         if b.get("kind") == "building":
             inside = (cls == CLS_FACADE) & in_box(P, b)
             zbase[inside] = float(b["z"][0]) + 0.5
-    for k, patch in enumerate(fac):
+    zr = P[..., 2] - zbase
+    for k, Sk in enumerate(fac):
         sel = (cls == CLS_FACADE) & (style % len(fac) == k)
-        h = patch.shape[0]
-        zr = P[..., 2] - zbase
-        # bottom row of the patch = the facade's foot; above the patch height the upper storeys repeat
-        put(sel, patch, s / FILL_MPP_FACADE, (h - 1) - zr / FILL_MPP_FACADE)
-    veg = patches.get("veg")
-    if veg is None:
-        veg = np.full((8, 8, 3), (58, 78, 46), np.float32)
-    put(cls == CLS_VEG, veg, s / FILL_MPP_FACADE, -P[..., 2] / FILL_MPP_FACADE)
+        if not sel.any():
+            continue
+        sty = style[sel]
+        h = Sk["G"][0].shape[0]
+        # bottom row of the patch = the facade's foot; above the patch height the upper storeys repeat. Each
+        # building (style id) gets its own strip offsets / flips and a small tint, so neighbours differ
+        col = synth_strips(Sk, s[sel] / FILL_MPP_FACADE, (h - 1) - zr[sel] / FILL_MPP_FACADE, salt=sty, lod=lod_f[sel])
+        tint = (1.0 + FILL_TINT[0] * (2 * _rnd(sty, 0, 0, 8) - 1))[:, None] \
+            + FILL_TINT[1] * (2 * np.stack([_rnd(sty, 0, 0, 9 + c) for c in range(3)], -1) - 1)
+        vn = 1.0 + 0.6 * FILL_LOWFREQ_AMP * value_noise(s[sel] / FILL_LOWFREQ_M, P[..., 2][sel] / FILL_LOWFREQ_M, 12)
+        put(sel, col * tint * vn[:, None])
+    sel = cls == CLS_VEG
+    if sel.any() and S["veg"] is not None:
+        put(sel, synth_ground(S["veg"], s[sel] / FILL_MPP_FACADE, -P[..., 2][sel] / FILL_MPP_FACADE, 4, lod_f[sel]),
+            drift)
     pole = cls == CLS_POLE
     out[pole] = (96, 96, 98)
     have |= pole
