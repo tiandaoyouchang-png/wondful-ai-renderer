@@ -3210,6 +3210,19 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 if direct_simple_brief is None and Path(self._session.viewport_reference).is_file():
                     direct_simple_base = str(self._session.viewport_reference)
                     direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
+            # 1.2.6 风格与光线锁定: the ④ analysis' 画风 (voxel, cartoon…) / night lighting also locks the 主视角
+            direct_style_text = ""
+            if direct_simple_brief is not None:
+                try:
+                    from .scene_style import master_lock as _master_lock
+                    from .multiview import scene_blockout_exists as _sb_exists
+                    from .massing import SB_TEXT as _SB_TEXT
+                    _txt = bpy.data.texts.get(_SB_TEXT)
+                    if _txt is not None and _sb_exists(context.scene):
+                        direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or "")
+                except Exception as exc:
+                    print(f"[Wondful] 风格锁定读取失败：{exc}")
+            direct_state["style_lock"] = direct_style_text[:200]
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
             direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
                                              for r in direct_building_refs]
@@ -3227,6 +3240,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     massing_text=direct_massing_text,
                     building_refs=direct_building_refs or None,
                     keep_text=direct_keep_text,
+                    style_text=direct_style_text,
                 )
         if self._detail and not Path(self._detail["detail"]).is_file():
             # no clay base this run (other canvas / provider): render the detail pass on its own
@@ -4440,6 +4454,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         made, wlog = [], {}
         old_cam = scene.camera
         views = {}
+        cam_snaps = []          # 1.2.6 被遮挡就调视角: cameras moved for the passes, restored in ``finally``
+        occlusion = {}
         t_prep = time.time()
         # 1.2.5 场景补全: the ④ blockout already continues the street → no filler buildings, style fill per pixel
         completion = None
@@ -4456,10 +4472,29 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     made, wlog = MV.widen_blockout(context, massing_coll, coll, master, fillers=not has_inferred)
                 except Exception as exc:
                     print(f"[Wondful] 多角度场景一致：加宽体块失败：{exc}")
+            avoid = bool(getattr(props, "mv_avoid_occlusion", True))
             for cam in [master] + others:
                 scene.camera = cam
                 context.view_layer.update()
                 pre = pool / MV.safe_name(cam.name)
+                if cam != master and avoid:
+                    # 1.2.6: ray-check the product through the blockout BEFORE any image call; move the camera
+                    # (temporarily — restored below, the pose used is recorded) or skip it
+                    try:
+                        snap = MV.snapshot_camera(cam)
+                        occ = MV.adjust_camera_for_occlusion(context, cam, coll)
+                        if occ.get("status") == "adjusted":
+                            cam_snaps.append(snap)
+                        occlusion[cam.name] = occ
+                        if occ.get("message"):
+                            print(f"[Wondful] 多角度场景一致：{occ['message']}")
+                        if occ.get("status") == "blocked":
+                            views[cam.name] = {"name": cam.name, "cam": MV.scene_camera_record(scene, cam),
+                                               "occluded": occ, "obstacle": 1.0, "hidden": 1.0,
+                                               "files": {}, "prefix": str(pre), "geometry": "llm", "massing_text": ""}
+                            continue
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：遮挡调机位失败：{exc}")
                 files = {k: f"{pre}_{k}.png" for k in ("clay", "mask", "detail", "keep", "matid")}
                 ok = render_clay_base(context, files["clay"], coll, ground=getattr(props, "clay_ground", "AUTO"),
                                       crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
@@ -4484,17 +4519,33 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                                    "geometry": "detail" if LAST_CLAY_INFO.get("detail_blockout") == "carrier" else "llm",
                                    "massing_text": str(LAST_CLAY_INFO.get("massing_text", "") or ""),
                                    "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
+                if cam.name in occlusion:
+                    views[cam.name]["occlusion"] = occlusion[cam.name]
         except Exception as exc:
             self.report({"ERROR"}, f"多角度场景一致准备失败：{exc}")
             props.last_mv_note = f"多角度场景一致准备失败：{exc}"
             return {"CANCELLED"}
         finally:
             scene.camera = old_cam
+            for snap in reversed(cam_snaps):
+                MV.restore_camera(snap)
             MV.remove_aux(made)
             try:
                 context.view_layer.update()
             except Exception:
                 pass
+        # 1.2.6: the ④ analysis (scene kind, style words) — outdoor never gets 室内 wording / 房间 light
+        sb_kind, sb_analysis = "", {}
+        try:
+            from . import massing as _MSk
+            if massing_coll is not None:
+                sb_kind = _MSk.blockout_kind(_MSk.massing_objects(massing_coll, coll))
+            _txt = bpy.data.texts.get(_MSk.SB_TEXT)
+            if _txt is not None and sb_kind:
+                sb_analysis = json.loads(_txt.as_string())
+        except Exception as exc:
+            print(f"[Wondful] 多角度场景一致：读取场景分析失败：{exc}")
+        outdoor = True if sb_kind == "outdoor" else (False if sb_kind == "interior" else None)
         geo_kind = views[master.name].get("geometry", "llm")      # 1.2.5: "detail" = projected onto the 细节粗模
         if geo_kind == "detail":
             print("[Wondful] 多角度场景一致：投影承载面 = 细节粗模"
@@ -4606,6 +4657,15 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     light_note = f"光照估计失败（未锁定光照）：{str(exc)[:60]}"
             master_view = MV.load_view(pool, entry_m)
             sources = [master_view] + [MV.load_view(pool, e) for e in reused_src]
+            # 1.2.6 风格与光线锁定: the 主视角's measured look (night, light sources, their colours) + the analysis words
+            style, style_line = {}, ""
+            try:
+                style = MV.master_style(master_view["img"], master_view.get("sky"), master_view["mask"])
+                style_line = MV.style_lock_text(style, sb_analysis, light, brief=brief)
+                print(f"[Wondful] 多角度场景一致：主视角风格 {style}")
+            except Exception as exc:
+                print(f"[Wondful] 多角度场景一致：主视角风格读取失败：{exc}")
+            night = bool(style.get("night"))
             patches = None
             fill_words = ""
             if completion:
@@ -4627,9 +4687,16 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             for i, rec in enumerate(order, start=1):
                 v = views[rec["name"]]
                 res = {"name": rec["name"], "ok": False, "calls": 0, "obstacle": v["obstacle"], "hidden": v["hidden"]}
+                if v.get("occlusion"):
+                    res["occlusion"] = v["occlusion"]
                 results.append(res)
                 if stop:
                     res["error"] = stop
+                    continue
+                if v.get("occluded"):      # 1.2.6: no clear pose → no image call
+                    res["occlusion"] = v["occluded"]
+                    res["error"] = "产品被遮挡，已跳过/请调整相机"
+                    res["skipped_occluded"] = True
                     continue
                 if cancelled():
                     raise RuntimeError("任务已取消")
@@ -4658,8 +4725,10 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 base = pre + "_base.png"
                 write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
                 res["projection"] = st
-                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec), [s["name"] for s in sources],
-                                    fill_line=fill_line)
+                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec, outdoor=outdoor),
+                                    [s["name"] for s in sources], fill_line=fill_line, style_line=style_line)
+                res["prompt_interior"] = "室内物体" in text
+                res["style"] = {"night": night, "colours": style.get("colours", []), "emissive": style.get("emissive")}
                 Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
                 work = Path(pre + "_work")
                 work.mkdir(exist_ok=True)
@@ -4676,7 +4745,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                                           output_path=raw, size=size, model=model, client_version=client_version,
                                           log_dir=str(pool), tag=f"mv_{MV.safe_name(rec['name'])}_try{n}",
                                           cancel_check=cancelled, simple_brief=brief, vehicle=vehicle,
-                                          massing_text=text, keep_text=keep_text)
+                                          massing_text=text, keep_text=keep_text, style_text=style_line)
                     except CD.DirectEditError as exc:
                         res["calls"] += 1
                         if exc.kind == "cancelled":
@@ -4711,8 +4780,12 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     if t["image_quality"]:
                         print(f"[Wondful] 多角度场景一致：{rec['name']} 第 {n} 次 画质档 {t['image_quality']}")
                     if not t["product_violations"] and not t["env_violations"]:
-                        if n < mv_calls and RW.low_tier_retry(t["image_quality"], n, mv_calls, False):
+                        # 1.2.6: not for night scenes — the low tier there came with large dark walls and the
+                        # retry never improved them (real cyber orbit test)
+                        if n < mv_calls and not night and RW.low_tier_retry(t["image_quality"], n, mv_calls, False):
                             continue        # 1.2.4: passed but "low" tier → the one retry this camera has
+                        if n < mv_calls and night and RW.is_low_tier(t["image_quality"]):
+                            res["low_tier_kept"] = "夜景暗部，画质档 low 不重试"
                         break
                 if not tries:
                     continue
@@ -4734,7 +4807,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 if grade_on:     # 1.2.4 统一调色: co-visible environment pixels vs the 主视角, environment only
                     try:
                         img_full = read_png(final).astype(np.float32)[..., :3]
-                        g = MV.fit_grade(master_view, vk, resize(img_full, ww, wh))
+                        g = MV.fit_grade(master_view, vk, resize(img_full, ww, wh), night=night)
                         if g:
                             graded = MV.apply_grade(img_full, g, mfull)
                             gp = pre + "_graded.png"
@@ -4812,14 +4885,15 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 r["export_error"] = str(exc)
         notes = [MV.summary_line(summary.get("results", []))]
         warn = [f"{r['name']} 遮挡 {r['obstacle'] * 100:.0f}%" for r in summary.get("results", [])
-                if (r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25]
+                if ((r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25) and not r.get("skipped_occluded")]
         if warn:
             notes.append("注意：产品前方有遮挡物（" + "、".join(warn) + "），可移动相机")
         if info.get("skipped"):
             notes.append("已跳过正交相机：" + "、".join(info["skipped"]))
         if summary.get("light_note"):
             notes.append(summary["light_note"])
-        failed = [f"{r['name']}：{r.get('error')}" for r in summary.get("results", []) if not r.get("ok") and r.get("error")]
+        failed = [f"{r['name']}：{r.get('error')}" for r in summary.get("results", [])
+                  if not r.get("ok") and r.get("error") and not r.get("skipped_occluded")]
         if failed:
             notes.append("未完成：" + "；".join(failed)[:160])
         props.last_mv_note = " · ".join(n for n in notes if n)

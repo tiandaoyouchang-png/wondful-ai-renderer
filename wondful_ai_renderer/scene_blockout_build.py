@@ -1004,6 +1004,7 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     remove_existing()
     coll = bpy.data.collections.new(SB.COLLECTION_NAME)
     coll["wondful_scene_blockout"] = 1
+    coll["wondful_sb_kind"] = "interior" if S.get("scene_kind") == "interior" else "outdoor"   # 1.2.6: 室内/室外 authority
     (parent_collection or scene.collection).children.link(coll)
     prod = product_info(product_collection, exclude=massing_objects)
     spot = S["product_spot"]

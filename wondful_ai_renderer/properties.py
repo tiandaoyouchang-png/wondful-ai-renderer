@@ -937,6 +937,12 @@ class WONDFUL_AISettings(PropertyGroup):
         description="临时补齐主视角以外的环境：室内补上看不到的墙，建筑场景在外圈补朴素的普通楼；渲染完自动删除",
         default=True,
     )
+    mv_avoid_occlusion: BoolProperty(
+        name="被遮挡就调视角",
+        description="生图前先用射线检查产品是否被环境体块挡住（超过 20% 轮廓）：挡住时临时把相机沿原方向移近、"
+                    "再微调方位 / 高度（必要时放宽焦距）直到看得见，原相机不改；找不到不被挡的机位就跳过，不花生图次数",
+        default=True,
+    )
     mv_env_check: BoolProperty(
         name="环境一致性检查",
         description="只看建筑 / 地面 / 室内墙地（不看天空）：与主视角色差超过 15 且两个视角共同可见超过一半时，重试 1 次。"

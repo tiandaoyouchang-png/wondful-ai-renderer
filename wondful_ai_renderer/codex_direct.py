@@ -686,8 +686,13 @@ def photo_rewrite(text: str, vehicle: bool = False) -> str:
     return out
 
 
+def ending_styled(style) -> str:
+    """1.2.6: the closing line for a non-photoreal reference (replaces ENDING_CG's 「照片质感真实自然」)."""
+    return f"地面接触阴影、反射和环境光与新场景一致，整个环境保持{style}画风（与环境参考一致），不要画成写实照片。只输出一张图。"
+
+
 def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
-                        massing_text="", building_text="", keep_text=""):
+                        massing_text="", building_text="", keep_text="", style_text=""):
     """Short edit prompt for the simple path: only the clay canvas is sent.
 
     The environment reference is read separately and arrives here as text
@@ -697,15 +702,23 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     ``massing_text`` (1.2.0 环境体块) describes the grey-blue context blocks of the clay base;
     ``building_text`` maps the attached 建筑参考 images (图 2…) to their blocks.
     ``keep_text`` (1.2.0 细节回贴): plates / badges / logos whose text must stay exactly as is.
+    ``style_text`` (1.2.6 风格与光线锁定): the reference look (``scene_style.master_lock`` / the 多角度 lock). When it,
+    the environment description or the brief names a non-photoreal style (voxel, pixel, cartoon…) the hard-coded
+    photoreal wording is replaced by that style; realistic scenes keep their wording unchanged.
     """
     from .product_kind import words
+    from .scene_style import art_style, style_phrase
+    style = style_phrase(art_style(style_text, env_text, brief))
     w = words(bool(vehicle))
     scene = (brief or "").strip()
     env_text = (env_text or "").strip()
     subj = w["subj"]
     building_text = (building_text or "").strip() if (massing_text or "").strip() else ""
     canvas = "图 1（Blender 白模渲染图）" if building_text else "这张 Blender 白模渲染图"
-    lines = [f"把{canvas}直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
+    if style:
+        lines = [f"把{canvas}直接编辑成一张商业广告图，环境画风与环境参考一致（{style}风格，不是写实照片），{subj}与环境自然融合。"]
+    else:
+        lines = [f"把{canvas}直接编辑成一张写实的商业广告摄影照片，{subj}与环境自然融合。"]
     lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
                  "不增减、不改形任何部件，不重新设计造型；"
                  "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
@@ -737,7 +750,8 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         # a cached / hand-written description may still carry a car paragraph: drop it
         env_text = "\n".join(p for p in env_text.splitlines() if not p.strip().startswith("车身质感")).strip()
     if env_text:
-        lines.append("目标环境（来自环境参考图的文字描述，只用于环境、地面、天气、光线方向、色温和氛围）：" + env_text)
+        lines.append("目标环境（来自环境参考图的文字描述，只用于环境、地面、天气、光线方向、色温" + ("、画风" if style else "")
+                     + "和氛围）：" + env_text)
         tag = next((t for t in ("车身质感", "表面质感") if t in env_text), "")
         src = "白模原图"
         if tag and vehicle:
@@ -755,9 +769,12 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         lines.append("场景要求：" + scene + "。")
     elif not env_text and fallback_prompt:
         lines.append("场景要求：" + fallback_prompt.strip()[:400])
-    lines.append(ENDING_CG)
+    style_text = (style_text or "").strip()
+    if style_text and style_text not in massing_text:
+        lines.append(style_text)
+    lines.append(ending_styled(style) if style else ENDING_CG)
     text = "\n".join(lines)
-    return photo_rewrite(text, vehicle=bool(vehicle)) if PHOTO_PROMPT else text
+    return photo_rewrite(text, vehicle=bool(vehicle)) if (PHOTO_PROMPT and not style) else text
 
 
 def build_payload(prompt, images, *, size, mask_path="", model="", quality="high", compat=False, instructions=""):
@@ -1119,7 +1136,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False, massing_text="", building_refs=None, keep_text=""):
+               exact_prompt=False, massing_text="", building_refs=None, keep_text="", style_text=""):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -1185,7 +1202,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
                                    vehicle=bool(vehicle), massing_text=massing_text,
-                                   building_text=_building_text(attached_refs, vehicle), keep_text=keep_text)
+                                   building_text=_building_text(attached_refs, vehicle), keep_text=keep_text,
+                                   style_text=style_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
@@ -1340,7 +1358,7 @@ def short_reason(exc) -> str:
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
                            simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text="",
-                           building_refs=None, keep_text=""):
+                           building_refs=None, keep_text="", style_text=""):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1377,6 +1395,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 massing_text=massing_text if use_simple else "",
                 building_refs=building_refs if use_simple else None,
                 keep_text=keep_text if use_simple else "",
+                style_text=style_text if use_simple else "",
             )
             state["direct_ok"] += 1
             return result

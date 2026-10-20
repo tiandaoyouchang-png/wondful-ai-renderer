@@ -921,7 +921,44 @@ def scene_note_of(objs) -> str:
     return ""
 
 
-def describe_blocks(context, objs, product_pts):
+SB_KIND_PROP = "wondful_sb_kind"          # ④ 场景粗模: the analysis scene_kind ("outdoor" / "interior") on its collection
+INFERRED_PROP = "wondful_detail_inferred"  # 场景补全 objects (detail_blockout.INFER_TAG): only built for outdoor analyses
+SB_COLLECTION_PROP = "wondful_scene_blockout"
+SB_TEXT = "wondful_scene_blockout.json"    # scene_blockout.TEXT_NAME (the analysis the blockout was built from)
+
+
+def blockout_kind(objs) -> str:
+    """Scene kind the ④ 场景粗模 analysis gave the blockout these blocks belong to: "outdoor", "interior",
+    or "" when unknown (a hand-made massing collection — then the shape / ray checks decide).
+
+    1.2.6 (室内误判): the analysis is the authority; 场景补全 objects exist only for outdoor analyses, so one
+    of them means outdoor. Older files without the collection tag fall back to the stored analysis text."""
+    from_sb = False
+    for o in objs or ():
+        try:
+            if o.get(INFERRED_PROP):
+                return "outdoor"
+            for c in getattr(o, "users_collection", ()) or ():
+                k = str(c.get(SB_KIND_PROP, "") or "")
+                if k in ("outdoor", "interior"):
+                    return k
+                from_sb = from_sb or bool(c.get(SB_COLLECTION_PROP))
+        except Exception:
+            continue
+    if from_sb:
+        try:
+            import bpy
+            txt = bpy.data.texts.get(SB_TEXT)
+            if txt is not None:
+                k = str(json.loads(txt.as_string()).get("scene_kind", "") or "")
+                if k in ("outdoor", "interior"):
+                    return k
+        except Exception:
+            pass
+    return ""
+
+
+def describe_blocks(context, objs, product_pts, kind=None):
     """Placement items (camera projection) for the prompt; blocks fully off-screen are skipped."""
     from bpy_extras.object_utils import world_to_camera_view
     from mathutils import Vector
@@ -946,6 +983,14 @@ def describe_blocks(context, objs, product_pts):
             top = top.parent
         groups.setdefault(top, []).append(o)
     interior, floor_z, room_top = scene_context([_world_bbox(m) for m in groups.values()], product_pts)
+    # 1.2.6: the ④ analysis decides when it exists (an outdoor street is never described as 室内物体, even when
+    # temporary walls or 场景补全 rows close it in on two sides); unknown → the shape check above
+    kind = blockout_kind(objs) if kind is None else str(kind or "")
+    if kind in ("outdoor", "interior") and interior != (kind == "interior"):
+        interior = kind == "interior"
+        if interior and room_top is None:
+            boxes = [b for b in (_box_of(_world_bbox(m)) for m in groups.values()) if b is not None]
+            room_top = max(b[5] for b in boxes) if boxes else None
     items = []
     for root, members in groups.items():
         pts = _world_bbox(members)

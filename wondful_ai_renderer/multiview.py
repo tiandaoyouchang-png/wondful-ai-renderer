@@ -1312,12 +1312,130 @@ def reproj_de(master, vk, img_k):
 
 # --------------------------------------------------------------------------- 1.2.4 统一调色
 
+# --------------------------------------------------------------------------- 1.2.6 风格与光线锁定
+# Real cyber orbit test 2026-10-20: the new views lost the neon signs and the night lighting and turned brown / grey
+# (emissive signs live only in master pixels, low projection coverage; the colour match pulled toward the master mean;
+# the prompt had no style lock; the low-tier retry fired on dark walls). The 主视角 look is measured here and locked.
+
+EMISSIVE_V = 0.8           # brightest channel ≥ this share with saturation ≥ EMISSIVE_S (saturated neon: pure red is only
+EMISSIVE_S = 0.45          #     L 53), or Lab L ≥ EMISSIVE_L_WHITE (white / warm-white lightboxes) = a light source / lit sign
+EMISSIVE_L_WHITE = 85.0
+NIGHT_MEDIAN_L = 34.0      # environment median L below this (and a dark or absent sky) = a night / dark scene
+NIGHT_SKY_L = 30.0
+HUE_NAMES = ((15, "红"), (40, "橙"), (70, "黄"), (160, "绿"), (200, "青"), (260, "蓝"), (300, "紫"), (345, "粉红"),
+             (361, "红"))
+SIGN_WORDS = (("neon", "霓虹灯"), ("lightbox", "灯箱"), ("light box", "灯箱"), ("lantern", "灯笼"),
+              ("billboard", "广告牌"), ("advertis", "广告牌"), ("sign", "招牌"), ("shop window", "橱窗"),
+              ("storefront", "店面灯光"), ("street lamp", "路灯"), ("streetlight", "路灯"), ("street light", "路灯"),
+              ("霓虹", "霓虹灯"), ("灯箱", "灯箱"), ("灯笼", "灯笼"), ("招牌", "招牌"), ("广告", "广告牌"), ("路灯", "路灯"))
+WET_WORDS = ("wet", "puddle", "rain", "湿", "积水", "雨")
+
+
+def emissive_mask(img):
+    """Pixels that are light sources / lit signs (bright and saturated, or near white) of an RGB 0..255 image."""
+    rgb = np.asarray(img, np.float32)[..., :3]
+    mx = rgb.max(-1)
+    sat = (mx - rgb.min(-1)) / np.maximum(mx, 1e-3)
+    return ((mx >= EMISSIVE_V * 255.0) & (sat >= EMISSIVE_S)) | (lab(rgb)[..., 0] >= EMISSIVE_L_WHITE)
+
+
+def _hue_deg(rgb):
+    rgb = np.asarray(rgb, np.float32)[..., :3] / 255.0
+    mx, mn = rgb.max(-1), rgb.min(-1)
+    d = np.maximum(mx - mn, 1e-6)
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    h = np.where(mx == r, ((g - b) / d) % 6, np.where(mx == g, (b - r) / d + 2, (r - g) / d + 4)) * 60.0
+    return h, (mx - mn) / np.maximum(mx, 1e-6)
+
+
+def master_style(img, sky=None, mask=None) -> dict:
+    """Measured look of the 主视角 environment: night (dark median + dark / no sky), emissive share and
+    the dominant colours of its light sources. ``img`` RGB 0..255, ``sky`` / ``mask`` (product) optional."""
+    img = np.asarray(img, np.float32)[..., :3]
+    env = np.ones(img.shape[:2], bool) if mask is None else np.asarray(mask) < 0.5
+    L = lab(img)[..., 0]
+    med = float(np.median(L[env])) if env.any() else 50.0
+    sk = None if sky is None else (np.asarray(sky, bool) & env)
+    sky_l = float(L[sk].mean()) if sk is not None and sk.sum() > 50 else None
+    night = med < NIGHT_MEDIAN_L and (sky_l is None or sky_l < NIGHT_SKY_L)
+    em = emissive_mask(img) & env
+    if sk is not None:
+        em &= ~sk
+    frac = float(em.sum()) / max(1, int(env.sum()))
+    colours = []
+    if em.sum() >= 30:
+        h, sat = _hue_deg(img[em])
+        col = sat > 0.35
+        if col.sum() >= 20:
+            names = []
+            for hv in h[col]:
+                for lim, nm in HUE_NAMES:
+                    if hv < lim:
+                        names.append(nm)
+                        break
+            uniq, cnt = np.unique(np.array(names), return_counts=True)
+            order = np.argsort(-cnt)
+            colours = [str(uniq[i]) for i in order if cnt[i] >= 0.08 * len(names)][:4]
+        if (~col).sum() >= 0.2 * len(col):
+            colours.append("暖白" if float(np.median(img[em][~col][:, 0] - img[em][~col][:, 2])) > 8 else "白")
+    return {"night": bool(night), "median_L": round(med, 1), "sky_L": None if sky_l is None else round(sky_l, 1),
+            "emissive": round(frac, 4), "colours": colours}
+
+
+def style_lock_text(style, analysis=None, light=None, brief="") -> str:
+    """风格与光线锁定 paragraph for every new view (must keep the 主视角's look). Generic: night scenes get the
+    light-source / sign lock, day scenes only the time-of-day / colour lock. ``analysis``: the ④ analysis JSON
+    (optional), ``light``: the master light estimate (optional)."""
+    style = style or {}
+    an = analysis or {}
+    pal = an.get("palette") or {}
+    texts = " ".join(str(x or "") for x in (an.get("environment_description"), an.get("scene_summary"),
+                                             an.get("environment_zh"), pal.get("lock_zh"), pal.get("ground_words"),
+                                             (light or {}).get("sky_words"))).lower()
+    night = bool(style.get("night")) or (light_kind(light or {}, True) == "night_artificial"
+                                        and float(style.get("median_L", 50) or 50) < 45)
+    parts = []
+    from .scene_style import analysis_text, art_style, style_phrase
+    art = art_style(analysis_text(an), brief)
+    lock = str(pal.get("lock_zh") or an.get("environment_zh") or "").strip()
+    if night:
+        signs = []
+        for en, zh in SIGN_WORDS:
+            if en in texts and zh not in signs:
+                signs.append(zh)
+        cols = "、".join(style.get("colours") or [])
+        src = "、".join(signs[:5]) or "招牌、灯箱、橱窗和路灯"
+        parts.append(
+            "风格与光线锁定（必须保持，与主视角同一场景同一时刻）：这是夜景，天空保持夜色，画面以人工光为主。"
+            f"主视角里的发光{src}" + (f"（主要颜色：{cols}）" if cols else "")
+            + "在这个角度同样要有：两侧建筑立面、店面上继续布满同类型、同样密度、真的在发光的招牌和灯光，"
+            "保留它们周围的局部亮光、光晕和强烈的明暗对比；暗处保持深色但看得清结构。"
+            "不要画成白天、黄昏或阴天，不要把招牌画成不发光的普通墙面或空白墙，不要整体提亮成灰色，也不要压成单一的棕灰色调。")
+    else:
+        parts.append("风格与光线锁定（必须保持，与主视角同一场景同一时刻）：时段、天气、色温、对比度和整体色调与主视角一致，"
+                     "不要改变时段或天气，不要整体偏色。")
+    if art:      # 1.2.6: a voxel / cartoon reference keeps its 画风 in every new view (never drawn photoreal)
+        parts.append(f"画风：整个环境是{style_phrase(art)}风格，与主视角一致（造型语言、材质和纹理表现同主视角），"
+                     "不要画成写实照片或普通写实建筑。")
+    if lock:
+        parts.append(f"场景基调：{lock}")
+    if any(w in texts for w in WET_WORDS):
+        parts.append("路面是湿的：保留灯光和招牌在路面上的倒影，倒影颜色与上方光源一致。")
+    elif night:
+        parts.append("路面干湿与主视角一致（主视角不是湿路就不要画成湿路或积水），只保留少量灯光反光。")
+    return "".join(parts)
+
+
 GRADE_STRENGTH = 0.75      # share of the fitted transform that is applied (research: 0.75)
 GRADE_MIN_PIXELS = 400     # co-visible environment pixels needed to fit at all
 GRADE_MAX_SHIFT = 12.0     # ΔE: a fit that would move the environment mean further is not trusted
 
 
-def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH):
+GRADE_NIGHT_STRENGTH = 0.4   # 1.2.6: night scenes — a weaker pull toward the master (local light differs per view)
+GRADE_MIN_GAIN = 0.95        # night: the L / a / b gains never flatten contrast or saturation below this
+
+
+def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH, night=False):
     """Colour transform of view k onto the 主视角, fitted on CO-VISIBLE ENVIRONMENT pixels only.
 
     Not a whole-image statistics match (that made v4 worse in the research: each view sees different
@@ -1326,7 +1444,11 @@ def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH):
     and a 4×3 affine Lab transform is least-squares fitted, refitted without the worst 20 %, and
     blended with the identity (``strength``). ``img_k``: view k at working size (H, W, 3, 0..255).
     Returns {"A": 4×3 list, "pixels", "dE_before", "dE_after", "shift"} or None (too little overlap,
-    no improvement or an implausible shift)."""
+    no improvement or an implausible shift).
+
+    ``night`` (1.2.6, 风格与光线锁定): light sources / lit signs (``emissive_mask``) of either image are left out of
+    the fit, the strength drops to GRADE_NIGHT_STRENGTH, the L / a / b gains stay ≥ GRADE_MIN_GAIN (no contrast /
+    saturation flattening toward the master mean) and ``apply_grade`` keeps local contrast and emissive pixels."""
     H, W = vk["pos"].shape[:2]
     B1 = lab(blur(np.asarray(master["img"], np.float32)[..., :3], 2))
     Bk = lab(blur(np.asarray(img_k, np.float32)[..., :3], 2))
@@ -1337,10 +1459,16 @@ def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH):
     sky_ok = sky_in & (msky[vi, ui] if msky is not None else False)
     env = ~dilate(np.asarray(vk["mask"]) > 0.5, 3)
     cov = (vis | sky_ok) & env
+    ref = bilinear(B1, U, V)
+    if night:
+        em_m = emissive_mask(np.asarray(master["img"], np.float32)[..., :3])
+        em_k = emissive_mask(img_k)
+        em_r = bilinear(em_m.astype(np.float32)[..., None], U, V)[..., 0] > 0.2
+        cov &= ~dilate(em_k, 2) & ~em_r
+        strength = min(strength, GRADE_NIGHT_STRENGTH)
     n = int(cov.sum())
     if n < GRADE_MIN_PIXELS:
         return None
-    ref = bilinear(B1, U, V)
     X = Bk[cov].astype(np.float64)
     Y = ref[cov].astype(np.float64)
     if n > 60000:      # deterministic subsample
@@ -1356,13 +1484,22 @@ def fit_grade(master, vk, img_k, strength=GRADE_STRENGTH):
         return None
     ident = np.vstack([np.eye(3), np.zeros((1, 3))])
     A = strength * A + (1 - strength) * ident
+    if night:
+        mu = X.mean(0)
+        for c in range(3):
+            if A[c, c] < GRADE_MIN_GAIN:      # keep the fitted mean, refuse the flattening
+                A[3, c] += (A[c, c] - GRADE_MIN_GAIN) * mu[c]
+                A[c, c] = GRADE_MIN_GAIN
     before = float(np.linalg.norm(X - Y, axis=1).mean())
     after = float(np.linalg.norm(Xa @ A - Y, axis=1).mean())
     shift = float(np.linalg.norm((Xa @ A).mean(0) - X.mean(0)))
     if not np.all(np.isfinite(A)) or after >= before or shift > GRADE_MAX_SHIFT:
         return None
-    return {"A": A.tolist(), "pixels": n, "dE_before": round(before, 2), "dE_after": round(after, 2),
-            "shift": round(shift, 2)}
+    out = {"A": A.tolist(), "pixels": n, "dE_before": round(before, 2), "dE_after": round(after, 2),
+           "shift": round(shift, 2)}
+    if night:
+        out["night"] = True
+    return out
 
 
 def apply_grade(img, grade, mask):
@@ -1374,12 +1511,24 @@ def apply_grade(img, grade, mask):
         return img.copy()
     A = np.asarray(grade["A"], np.float32)
     L = lab(img)
-    Lt = L.reshape(-1, 3) @ A[:3] + A[3]
-    out = lab_to_srgb(Lt.reshape(L.shape)) * 255.0
+    if grade.get("night"):
+        # 1.2.6: grade the low frequencies only and add the local detail back (lit edges, glows and highlights keep
+        # their contrast); light sources / lit signs are left as they are
+        r = max(2, min(img.shape[:2]) // 80)
+        Lb = blur(L, r)
+        Lt = (Lb.reshape(-1, 3) @ A[:3] + A[3]).reshape(L.shape) + (L - Lb)
+        out = lab_to_srgb(Lt) * 255.0
+    else:
+        Lt = L.reshape(-1, 3) @ A[:3] + A[3]
+        out = lab_to_srgb(Lt.reshape(L.shape)) * 255.0
     m = np.asarray(mask, np.float32)
     if m.shape[:2] != img.shape[:2]:
         m = resize(m, img.shape[1], img.shape[0])
-    prot = np.where(m > 0.5, 1.0, np.clip(np.maximum(blur(dilate(m > 0.5, 2).astype(np.float32), 1), m), 0, 1))[..., None]
+    prot = np.where(m > 0.5, 1.0, np.clip(np.maximum(blur(dilate(m > 0.5, 2).astype(np.float32), 1), m), 0, 1))
+    if grade.get("night"):
+        em = dilate(emissive_mask(img), 1)
+        prot = np.maximum(prot, np.maximum(em.astype(np.float32), blur(dilate(em, 2).astype(np.float32), 2)))
+    prot = prot[..., None]
     return np.clip(out * (1 - prot) + img * prot, 0, 255)
 
 
@@ -1445,7 +1594,8 @@ LIGHT_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["light_type", "key_rel_azimuth_deg", "key_elevation_deg", "sky_words"],
     "properties": {
-        "light_type": {"type": "string", "enum": ["direct_sun", "hazy_sun", "overcast", "interior_window", "interior_mixed"]},
+        "light_type": {"type": "string", "enum": ["direct_sun", "hazy_sun", "overcast", "night_artificial",
+                                                          "interior_window", "interior_mixed"]},
         "key_rel_azimuth_deg": {"type": "number", "description":
                                 "horizontal direction FROM the scene TOWARD the sun / brightest sky / main window, relative to "
                                 "the camera: 0 = straight ahead (backlight), +90 = camera right, -90 = camera left, 180 = behind"},
@@ -1455,7 +1605,9 @@ LIGHT_SCHEMA = {
 
 LIGHT_PROMPT = ("This is a rendered photo of a scene. Estimate the main light: the sun (or the brightest sky region if "
                 "overcast, or the main window if it is an interior). Use cast shadows, highlights, shading and the sky "
-                "gradient. Give the horizontal direction from the scene toward the light relative to the camera (0 ahead / "
+                "gradient. An OUTDOOR scene at night lit by signs, shop windows or street lamps is night_artificial (its main "
+                "light is the brightest artificial source); interior_window / interior_mixed are only for indoor rooms. "
+                "Give the horizontal direction from the scene toward the light relative to the camera (0 ahead / "
                 "backlight, +90 right, -90 left, 180 behind the camera), its elevation, and a short Chinese description.")
 
 
@@ -1467,8 +1619,23 @@ def world_light(light: dict, master_cam) -> dict:
     return out
 
 
-def light_sentence(light: dict, cam) -> str:
-    """Where the world-locked light sits for this camera, in the words the prototype used."""
+NIGHT_WORDS = ("夜", "night", "neon", "霓虹", "dark sky", "近黑")
+
+
+def light_kind(light: dict, outdoor=None) -> str:
+    """The light type to word the lock with. 1.2.6: when the ④ analysis says the scene is outdoor, an
+    ``interior_*`` estimate (the light model read a lit night street as 'interior_mixed') is worded as a
+    night street (night words in the estimate) or soft daylight — never 「同一个房间」 / 「窗户（主光）」."""
+    kind = str((light or {}).get("light_type") or "")
+    if outdoor and kind.startswith("interior"):
+        words = str((light or {}).get("sky_words") or "").lower()
+        return "night_artificial" if any(w in words for w in NIGHT_WORDS) else "overcast"
+    return kind
+
+
+def light_sentence(light: dict, cam, outdoor=None) -> str:
+    """Where the world-locked light sits for this camera, in the words the prototype used.
+    ``outdoor``: the ④ analysis scene kind is outdoor (None = unknown)."""
     if not light or "world_azimuth_deg" not in light:
         return ""
     rel = (float(light["world_azimuth_deg"]) - yaw_deg(cam) + 180.0) % 360.0 - 180.0
@@ -1476,7 +1643,17 @@ def light_sentence(light: dict, cam) -> str:
     lr = "右" if rel > 0 else "左"
     other = "左" if lr == "右" else "右"
     words = str(light.get("sky_words") or "").strip()
-    kind = str(light.get("light_type") or "")
+    kind = light_kind(light, outdoor)
+    if kind == "night_artificial":
+        if a <= 35:
+            pos = f"最亮的人工光源在画面前方{'偏' + lr if a > 10 else ''}：主体朝镜头一面偏暗，轮廓有彩色亮边"
+        elif a <= 120:
+            pos = f"最亮的人工光源在画面{lr}侧：受光面朝画面{lr}侧，{other}侧更暗"
+        else:
+            pos = f"最亮的人工光源在镜头身后{'偏' + lr if a < 165 else ''}：朝镜头一面受光"
+        return (f"光线锁定（与主视角是同一个夜晚同一时刻，光源在世界里固定）：夜景，人工照明为主（招牌、灯箱、橱窗、路灯），{pos}。"
+                "天空保持夜色，光源颜色、亮暗对比、局部光斑和光晕与主视角一致" + (f"（{words}）" if words else "")
+                + "，不要改成白天、黄昏或阴天，不要去掉或熄灭灯光。")
     if kind.startswith("interior"):
         if a <= 35:
             pos = f"窗户（主光）在画面前方{'偏' + lr if a > 10 else ''}：逆光，产品和家具朝镜头一面略暗，亮边朝窗"
@@ -1507,11 +1684,14 @@ def light_sentence(light: dict, cam) -> str:
             "阴影软硬与主视角一致" + (f"（{words}）" if words else "") + "，不要改变时段或天气。")
 
 
-def view_text(massing_text, light_line, source_names, fill_line="") -> str:
-    """Per-view addition to the simple-path prompt (goes in as ``massing_text``)."""
+def view_text(massing_text, light_line, source_names, fill_line="", style_line="") -> str:
+    """Per-view addition to the simple-path prompt (goes in as ``massing_text``). ``style_line``: the
+    1.2.6 风格与光线锁定 from ``style_lock_text`` (must-keep look of the 主视角)."""
     parts = [t.strip() for t in (massing_text or "",) if t and t.strip()]
     if light_line:
         parts.append(light_line)
+    if style_line and style_line.strip():
+        parts.append(style_line.strip())
     names = [n for n in source_names or () if n]
     parts.append(BASE_NOTE.format(sources="主视角" + ("和" + "、".join(names[1:]) if len(names) > 1 else "")))
     if fill_line:
@@ -1617,7 +1797,28 @@ def summary_line(results) -> str:
     g = grade_note(done)
     if g:
         line += " · " + g
+    o = occlusion_note(results)
+    if o:
+        line += " · " + o
     return line
+
+
+def occlusion_note(results) -> str:
+    """1.2.6 被遮挡就调视角: cameras moved for the occlusion and cameras skipped (no clear pose)."""
+    moved, blocked = [], []
+    for r in results or ():
+        occ = r.get("occlusion") or {}
+        if occ.get("status") == "adjusted":
+            moved.append(f"{r['name']}（遮挡 {occ['occ_before'] * 100:.0f}%→{occ['occ_after'] * 100:.0f}%，"
+                         f"距离 {occ['dist']:.1f}→{occ['dist_after']:.1f} m）")
+        elif occ.get("status") == "blocked":
+            blocked.append(r["name"])
+    parts = []
+    if moved:
+        parts.append("被遮挡已临时调整机位（原相机未改）：" + "、".join(moved))
+    if blocked:
+        parts.append("产品被遮挡，已跳过/请调整相机：" + "、".join(blocked))
+    return " · ".join(parts)
 
 
 # --------------------------------------------------------------------------- Blender helpers (main thread)
@@ -1788,6 +1989,280 @@ def obstacle(context, cam_obj, product_coll, nx=20, ny=12):
     return bad / max(1, n), hid / max(1, tot)
 
 
+def decide_interior(kind, ray_hits, shape_room, wall_like, rays=72) -> bool:
+    """Whether the other cameras get a closed room (1.2.6 室内误判 fix).
+
+    ``kind``: the ④ analysis scene kind ("outdoor" / "interior" / "" unknown) — the authority when known: an
+    outdoor street is never closed in, whatever its blocks are called (场景补全's 「推测建筑」「推测窗」 used to
+    trip the old ``wall_like >= 2`` name rule and walled in outdoor scenes since cfc6ced). Unknown (a hand-made
+    massing collection): shape first — horizontal rays from the product mostly hit blocks, or ``massing.is_interior``
+    (a slab overhead / thin walls on ≥ 2 sides); wall-like NAMES count only together with partial enclosure
+    (≥ a quarter of the rays hit something). ``wall_like`` must not include 场景补全 or 多角度补充 objects."""
+    kind = str(kind or "")
+    if kind == "outdoor":
+        return False
+    if kind == "interior":
+        return True
+    if ray_hits >= rays // 2 or shape_room:
+        return True
+    return wall_like >= 2 and ray_hits >= rays // 4
+
+
+# --------------------------------------------------------------------------- 1.2.6 被遮挡就调视角
+# Real cyber orbit test 2026-10-20: narrow street + 12.6 m orbit put 4 of 4 cameras behind buildings (product 100 %
+# hidden) and every one still spent 1–2 image calls. Now each 多角度 camera is ray-checked through the blockout
+# BEFORE any image call; an occluded camera is moved (temporarily — the user's camera is restored afterwards and the
+# pose used is recorded) or skipped.
+
+OCCLUDE_MAX = 0.20                 # share of the product silhouette hidden by the environment that is acceptable
+POSE_RADII = (0.9, 0.8, 0.7, 0.6, 0.5, 0.42, 0.35, 0.3, 0.25)      # step 1: closer along the line to the product
+POSE_AZ = (5, -5, 10, -10, 15, -15, 20, -20, 30, -30)               # step 2: small azimuth nudges (degrees)
+POSE_DH = (0.0, 1.0, -0.5, 2.0)                                      # … and height nudges (metres)
+POSE_AZ_SUGGEST = (40, -40, 50, -50, 60, -60, 75, -75, 90, -90)      # blocked: the nearest clear azimuth, as a hint only
+POSE_MIN_LENS = 0.6                # the lens may widen to this share of its focal length to keep the product framed
+POSE_MIN_MM = 12.0
+POSE_FRAME = 0.94                  # product extent must stay inside this share of the frame (both axes)
+
+
+def pose_candidates(cam_xyz, aim_xyz, min_dist, radii=POSE_RADII, az=POSE_AZ, dh=POSE_DH):
+    """Ordered camera positions to try when the original one is occluded: first straight in along the horizontal line
+    to the aim point (azimuth and height kept), then azimuth / height nudges (closest to the original first), each
+    from the original distance inward. Every candidate: {"pos", "r", "d_az", "dh"}; ``min_dist`` = the closest
+    horizontal distance allowed (product half diagonal + clearance)."""
+    cx, cy, cz = (float(v) for v in cam_xyz)
+    ax, ay, _az = (float(v) for v in aim_xyz)
+    dx, dy = cx - ax, cy - ay
+    R = math.hypot(dx, dy)
+    if R < 1e-6:
+        return []
+    base = math.atan2(dx, dy)
+    out = []
+
+    def add(r, d_az, d_h):
+        dist = R * r
+        if dist < min_dist - 1e-9:
+            return
+        a = base + math.radians(d_az)
+        out.append({"pos": (ax + math.sin(a) * dist, ay + math.cos(a) * dist, cz + d_h), "r": round(r, 3),
+                    "d_az": float(d_az), "dh": float(d_h), "dist": round(dist, 3)})
+    for r in radii:
+        add(r, 0.0, 0.0)
+    nudges = sorted(((d_az, d_h) for d_az in (0.0,) + tuple(az) for d_h in dh if (d_az, d_h) != (0.0, 0.0)),
+                    key=lambda t: (abs(t[0]) / 5.0 + abs(t[1]), abs(t[0])))
+    for d_az, d_h in nudges:
+        for r in (1.0,) + tuple(radii):
+            add(r, d_az, d_h)
+    return out
+
+
+def plan_clear_pose(candidates, evaluate, max_occ=OCCLUDE_MAX):
+    """First candidate ``evaluate(c)`` accepts: it returns {"occ", "free", "lens_scale"} (lens_scale None = the
+    product cannot be framed). Returns (candidate + its evaluation, tried count) or (None, tried)."""
+    tried = 0
+    for c in candidates:
+        tried += 1
+        ev = evaluate(c) or {}
+        if ev.get("free") and ev.get("lens_scale") is not None and float(ev.get("occ", 1.0)) <= max_occ:
+            return dict(c, **ev), tried
+    return None, tried
+
+
+def _look_at(pos, aim):
+    from mathutils import Vector
+    return (Vector(aim) - Vector(pos)).to_track_quat("-Z", "Y").to_matrix()
+
+
+def _product_samples(context, product_coll, limit=1500):
+    """(world vertex samples, BVH of the product meshes) — the silhouette the occlusion is measured on."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    dg = context.evaluated_depsgraph_get()
+    verts, polys, pts = [], [], []
+    for o in product_coll.all_objects:
+        if o.type != "MESH" or o.hide_render:
+            continue
+        ev = o.evaluated_get(dg)
+        me = ev.to_mesh()
+        try:
+            M = ev.matrix_world
+            off = len(verts)
+            vv = [M @ v.co for v in me.vertices]
+            verts.extend(vv)
+            polys.extend([tuple(off + i for i in p.vertices) for p in me.polygons])
+        finally:
+            ev.to_mesh_clear()
+    if not verts:
+        return [], None
+    step = max(1, len(verts) // limit)
+    pts = [Vector(v) for v in verts[::step]]
+    return pts, BVHTree.FromPolygons(verts, polys, all_triangles=False)
+
+
+def product_occlusion(context, pos, R, tx, ty, product_coll, samples=None, grid=(32, 20)):
+    """Share of the product silhouette (pixels whose ray hits the product) that an environment object hides,
+    for a camera at ``pos`` with rotation ``R`` (3×3, -Z forward) and half-FOV tangents ``tx`` / ``ty``. Also
+    returns the product's max |NDC| extent (framing) and the silhouette sample count."""
+    from mathutils import Vector
+    scene = context.scene
+    dg = context.evaluated_depsgraph_get()
+    pts, bvh = samples if samples is not None else _product_samples(context, product_coll)
+    if bvh is None:
+        return {"occ": 0.0, "extent": 0.0, "n": 0}
+    Ri = R.transposed()
+    o = Vector(pos)
+    xs, ys, ext = [], [], 0.0
+    for p in pts:
+        q = Ri @ (p - o)
+        if q.z > -1e-3:
+            return {"occ": 1.0, "extent": 9.0, "n": 0, "behind": True}
+        x, y = (q.x / -q.z) / tx, (q.y / -q.z) / ty
+        xs.append(x)
+        ys.append(y)
+        ext = max(ext, abs(x), abs(y))
+    x0, x1 = max(-1.0, min(xs)), min(1.0, max(xs))
+    y0, y1 = max(-1.0, min(ys)), min(1.0, max(ys))
+    prod = set(product_coll.all_objects)
+    nx, ny = grid
+    sil = hid = 0
+    for iy in range(ny):
+        for ix in range(nx):
+            u = x0 + (x1 - x0) * (ix + 0.5) / nx
+            v = y0 + (y1 - y0) * (iy + 0.5) / ny
+            d = (R @ Vector((u * tx, v * ty, -1.0))).normalized()
+            loc, _n, _i, tP = bvh.ray_cast(o, d)
+            if loc is None:
+                continue
+            sil += 1
+            hit, _l, _nn, _ii, ob, _m = scene.ray_cast(dg, o, d, distance=max(0.0, tP - 0.03))
+            if hit and ob not in prod:
+                hid += 1
+    return {"occ": hid / sil if sil else 1.0, "extent": ext, "n": sil}
+
+
+def camera_free(context, pos, product_coll, clearance=0.35):
+    """The camera stands in open space: not inside a block (most axis rays hit back faces) and nothing within
+    ``clearance`` metres around it horizontally."""
+    from mathutils import Vector
+    scene = context.scene
+    dg = context.evaluated_depsgraph_get()
+    prod = set(product_coll.all_objects)
+    o = Vector(pos)
+    back = 0
+    for d in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+        dv = Vector(d)
+        hit, _l, n, _i, ob, _m = scene.ray_cast(dg, o, dv, distance=500.0)
+        if hit and ob not in prod and n.dot(dv) > 0:
+            back += 1
+    if back >= 3:
+        return False
+    for k in range(8):
+        a = 2 * math.pi * k / 8
+        hit, _l, _n, _i, ob, _m = scene.ray_cast(dg, o, Vector((math.sin(a), math.cos(a), 0.0)), distance=clearance)
+        if hit and ob not in prod:
+            return False
+    return True
+
+
+def adjust_camera_for_occlusion(context, cam_obj, product_coll, max_occ=OCCLUDE_MAX, apply=True):
+    """Ray-check the product through the blockout from ``cam_obj``; when more than ``max_occ`` of its silhouette is
+    hidden, find the nearest clear pose (``pose_candidates`` order: closer first, then azimuth / height nudges; the
+    lens may widen to keep the product framed) and — with ``apply`` — move the camera there. The caller restores the
+    camera (``snapshot``). Returns a JSON-safe record: before / after occlusion, original and adjusted pose, status
+    "clear" (no change), "adjusted" or "blocked" (no clear pose: skip, never spend an image call)."""
+    from mathutils import Matrix, Vector
+    scene = context.scene
+    b = product_bounds(product_coll)
+    rec0 = scene_camera_record(scene, cam_obj)
+    M0 = cam_obj.matrix_world.copy()
+    pos0 = M0.translation.copy()
+    R0 = M0.to_3x3().normalized()
+    out = {"status": "clear", "camera": cam_obj.name, "lens": round(float(cam_obj.data.lens), 3),
+           "pos": [round(v, 3) for v in pos0]}
+    if b is None:
+        out["status"] = "no_product"
+        return out
+    mn, mx = b
+    C = (mn + mx) / 2
+    samples = _product_samples(context, product_coll)
+    tx, ty = float(rec0["tx"]), float(rec0["ty"])
+    first = product_occlusion(context, pos0, R0, tx, ty, product_coll, samples)
+    out["occ_before"] = round(first["occ"], 3)
+    out["occ_after"] = out["occ_before"]
+    rel = pos0 - C
+    out.update({"dist": round(rel.xy.length, 3), "height": round(rel.z, 3),
+                "azimuth_deg": round(math.degrees(math.atan2(rel.x, rel.y)), 2)})
+    if first["occ"] <= max_occ:
+        return out
+    fwd = -(R0 @ Vector((0, 0, 1)))
+    aim = pos0 + fwd * max(0.5, (C - pos0).dot(fwd))          # the point on the view axis nearest the product
+    half = 0.5 * math.hypot(mx.x - mn.x, mx.y - mn.y)
+    cands = pose_candidates(tuple(pos0), tuple(aim), half + 1.2)
+    lens0 = float(cam_obj.data.lens)
+
+    def evaluate(c):
+        pos = Vector(c["pos"])
+        if pos.z < mn.z + 0.3:
+            return {"free": False}
+        R = _look_at(pos, aim)
+        ev = product_occlusion(context, pos, R, tx, ty, product_coll, samples, grid=(24, 14))
+        if ev.get("behind"):
+            return {"free": False}
+        need = 1.0 if ev["extent"] <= POSE_FRAME else POSE_FRAME / ev["extent"]
+        scale = need if need >= max(POSE_MIN_LENS, POSE_MIN_MM / max(lens0, 1e-3)) else None
+        if ev["occ"] > max_occ or scale is None:
+            return {"occ": ev["occ"], "lens_scale": scale, "free": True}
+        if scale < 1.0:      # framed with a wider lens: occlusion re-measured with that field of view
+            ev = product_occlusion(context, pos, R, tx / scale, ty / scale, product_coll, samples, grid=(24, 14))
+        return {"occ": ev["occ"], "lens_scale": scale, "free": camera_free(context, pos, product_coll)}
+
+    best, tried = plan_clear_pose(cands, evaluate, max_occ)
+    out["tried"] = tried
+    if best is None:
+        out["status"] = "blocked"
+        out["message"] = f"{cam_obj.name}：产品被遮挡 {first['occ'] * 100:.0f}%，附近没有找到不被遮挡的机位，已跳过（请调整相机）"
+        # a hint for the user (never applied: a pose this far from the camera is a different view)
+        far, _n = plan_clear_pose([c for c in pose_candidates(tuple(pos0), tuple(aim), half + 1.2, az=POSE_AZ_SUGGEST,
+                                                              dh=(0.0, 1.0)) if abs(c["d_az"]) > max(POSE_AZ)],
+                                  evaluate, max_occ)
+        if far is not None:
+            out["suggest"] = {"d_az_deg": far["d_az"], "dist": far["dist"], "d_height": far["dh"],
+                              "lens": round(lens0 * float(far["lens_scale"]), 1)}
+            out["message"] += (f"；最近的可用机位：方位 {far['d_az']:+.0f}°、距离 {far['dist']:.1f} m"
+                               + (f"、焦距 {lens0 * float(far['lens_scale']):.0f} mm" if far["lens_scale"] < 0.999 else ""))
+        return out
+    pos = Vector(best["pos"])
+    R = _look_at(pos, aim)
+    scale = float(best["lens_scale"])
+    final = product_occlusion(context, pos, R, tx / scale, ty / scale, product_coll, samples)
+    rel = pos - C
+    out.update({"status": "adjusted", "occ_after": round(final["occ"], 3), "r_factor": best["r"],
+                "d_az_deg": best["d_az"], "d_height": best["dh"], "lens_after": round(lens0 * scale, 3),
+                "pos_after": [round(v, 3) for v in pos], "dist_after": round(rel.xy.length, 3),
+                "height_after": round(rel.z, 3),
+                "azimuth_after_deg": round(math.degrees(math.atan2(rel.x, rel.y)), 2)})
+    out["message"] = (f"{cam_obj.name}：产品被遮挡 {first['occ'] * 100:.0f}% → {final['occ'] * 100:.0f}%，机位已临时调整"
+                      f"（距离 {out['dist']:.1f}→{out['dist_after']:.1f} m，方位 {best['d_az']:+.0f}°，高度 {best['dh']:+.1f} m"
+                      + (f"，焦距 {lens0:.0f}→{lens0 * scale:.0f} mm" if scale < 0.999 else "") + "；原相机未改）")
+    if apply:
+        cam_obj.matrix_world = Matrix.Translation(pos) @ R.to_4x4()
+        if scale < 0.999:
+            cam_obj.data.lens = lens0 * scale
+        context.view_layer.update()
+    return out
+
+
+def snapshot_camera(cam_obj) -> dict:
+    return {"obj": cam_obj, "matrix": cam_obj.matrix_world.copy(), "lens": float(cam_obj.data.lens)}
+
+
+def restore_camera(snap) -> None:
+    try:
+        snap["obj"].matrix_world = snap["matrix"]
+        snap["obj"].data.lens = snap["lens"]
+    except Exception:
+        pass
+
+
 def _block_words(obj) -> str:
     """Name words of one block for the interior / built-up checks (1.2.3: the same naming as the
     prompt — hint, object / material name, analysis label — without the size guess)."""
@@ -1820,7 +2295,6 @@ def widen_blockout(context, massing_coll, product_coll, master_cam, fillers=True
     dg = context.evaluated_depsgraph_get()
     prod = set(product_coll.all_objects)
     words = [_block_words(o) for o in blocks]
-    wall_like = sum(any(w in t for w in WALL_WORDS) for t in words)
     hits = 0
     miss = {"x-": 0, "x+": 0, "y-": 0, "y+": 0}
     for j in range(72):
@@ -1832,7 +2306,13 @@ def widen_blockout(context, massing_coll, product_coll, master_cam, fillers=True
         else:
             key = ("x+" if d.x > 0 else "x-") if abs(d.x) > abs(d.y) else ("y+" if d.y > 0 else "y-")
             miss[key] += 1
-    interior = hits >= 36 or wall_like >= 2
+    kind = MS.blockout_kind(blocks)
+    own = [o for o in blocks if not o.get(MS.INFERRED_PROP) and not o.get(AUX_TAG)]
+    boxes = [MS._box_of([o.matrix_world @ Vector(c) for c in o.bound_box]) for o in own]
+    pbox = (mn.x, mn.y, mn.z, mx.x, mx.y, mx.z)
+    wall_like = sum(any(w in _block_words(o) for w in WALL_WORDS) for o in own)
+    interior = decide_interior(kind, hits, MS.is_interior(boxes, pbox), wall_like)
+    log.update({"interior": interior, "kind": kind or "unknown", "ray_hits": hits, "wall_like": wall_like})
     mat = MS.make_material(bpy.data.materials.new)
     mat.name = "_wondful_mv_aux_mat"
     made.append(mat)
