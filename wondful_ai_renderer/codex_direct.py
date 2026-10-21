@@ -115,6 +115,10 @@ STOP_KINDS = ("auth", "quota", "rate_limit_long")
 RATE_WAIT_CAP = 45.0      # s: longest single wait for a short rate limit
 RATE_WAITS_MAX = 2        # bounded: at most two waits per image, then stop
 RATE_LONG_S = 120.0       # a rate limit that asks for longer than this is treated as a stop
+# 1.2.7: a dropped connection (SSL UNEXPECTED_EOF, connection reset, cut stream) is retried with a back-off before
+# the render falls back to the Codex proxy (PC test 2026-10-21: two SSL / reset errors in a row → proxy → 1800 s).
+NET_RETRIES = 2
+NET_BACKOFF = (3.0, 8.0)  # s before retry 1 / 2
 QUOTA_TEXT = "Codex 生图额度已用完"
 AUTH_TEXT = "Codex 登录无效"
 
@@ -626,6 +630,34 @@ def select_images(edit_base, references, manifest=None, *, repair=False, limit=M
     keep.sort(key=lambda r: r[1])  # restore bundle order (camera, structure, product, ...)
     chosen += [(p, role, label) for _pri, _o, p, role, label in keep]
     return chosen, [(p, role) for _pri, _o, p, role, _l in dropped]
+
+
+def fit_images(images, limit, out_dir, size="", tag=""):
+    """1.2.7 参考图拼图 for the direct edit: ``images`` = [(path, role, label)], image 1 = the edit canvas.
+    The canvas and the Blender camera white model stay standalone; the rest is merged into labelled sheets
+    (environment / detail / structure become text when they cannot fit). → (images, dropped, note, info)."""
+    from . import reference_collage as RC
+    paths = [p for p, _r, _l in images]
+    roles = {p: ("environment" if r == "environment" else r) for p, r, _l in images}
+    labels = {p: l for p, _r, l in images}
+    fixed = [p for p, r, _l in images if r in ("camera", "candidate")][:2] or paths[:1]
+    new, note, info = RC.fit_inputs(paths, limit, out_dir=str(out_dir), roles=roles, labels=labels, fixed=fixed,
+                                    long_edge=RC.size_long_edge(size), tag=(tag or "direct")[-24:])
+    by = {p: (p, r, l) for p, r, l in images}
+    out = []
+    for p in new:
+        if p in by:
+            out.append(by[p])
+        else:
+            sh = next((x for x in info.get("sheets", []) if x["path"] == p), {})
+            cells = "、".join(f"{c['letter']}={c['label']}" for c in sh.get("cells", []))
+            out.append((p, "sheet", f"参考图拼图（格内字母：{cells}；逐格读取，不要画出拼版、边框或字母）"))
+    dropped = [(by[p][0], "text") for p in paths if p in by and p not in new
+               and not any(c["file"] == Path(p).name for x in info.get("sheets", []) for c in x["cells"])]
+    msg = RC.panel_text(info)
+    if msg:
+        print(f"[Wondful] {msg}（{info['before']} → {info['after']} 张图像输入）")
+    return out, dropped, note, info
 
 
 def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""):
@@ -1181,10 +1213,15 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                     images.append((str(Path(bp).resolve()), "building", f"建筑参考 · 体块 {ref.get('block')}"))
                     attached_refs.append(ref)
     else:
-        images, dropped = select_images(edit_base_path, reference_paths, manifest, repair=repair)
+        images, dropped = select_images(edit_base_path, reference_paths, manifest, repair=repair, limit=10 ** 6)
     if not simple:
         env_paths = []
     log_root = Path(log_dir or Path(output_path).parent)
+    collage_note, collage_info = "", {}
+    if len(images) > MAX_EDIT_IMAGES:
+        # 1.2.7 参考图超限自动拼图 (was: the lowest-priority references were silently dropped)
+        images, more_dropped, collage_note, collage_info = fit_images(images, MAX_EDIT_IMAGES, log_root, size, tag)
+        dropped = list(dropped) + more_dropped
     mask, mask_note = prepare_mask(mask_path, _png_size(images[0][0]), log_root)
     env_text, env_note = "", ""
     if simple and env_paths:
@@ -1209,6 +1246,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                                    style_text=style_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
+    if collage_note:
+        text = text.rstrip() + "\n" + collage_note
     # 1.2.6 只做场景相关物体: every image request (主视角 / 多角度 / 全景 / 细节修复 / 分层输出) forbids pedestrians,
     # other vehicles and animals unless the 一句话需求 asks for them
     from . import static_scene as _SS
@@ -1219,7 +1258,8 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
            "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note,
-           "building_refs": [{"block": r.get("block"), "file": Path(str(r.get("path"))).name} for r in attached_refs]}
+           "building_refs": [{"block": r.get("block"), "file": Path(str(r.get("path"))).name} for r in attached_refs],
+           "collage": collage_info}
     model_used = chain[0]
     log["model_chain"] = chain[:6]
     variants = [dict(compat=False, model=m) for m in chain[:6]]
@@ -1269,8 +1309,12 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                         continue
                     exc.kind, exc.fatal = "rate_limit_long", True   # bounded: stop, do not fall back
                     raise
-                if exc.kind == "stream_cut" and cut_retries < 1:
-                    cut_retries += 1     # one retry of the same request for a dropped stream
+                if exc.kind in ("stream_cut", "network") and cut_retries < NET_RETRIES and transient_network(exc):
+                    wait = NET_BACKOFF[min(cut_retries, len(NET_BACKOFF) - 1)]
+                    cut_retries += 1     # 1.2.7: back-off retries of the same request for a dropped connection
+                    log["attempts"][-1]["waited"] = wait
+                    print(f"[Wondful] Codex 直连网络中断（{str(exc)[:60]}），{wait:.0f}s 后重试 {cut_retries}/{NET_RETRIES}")
+                    _sleep_cancellable(wait, cancel_check)
                     continue
                 if exc.kind == "request" and index + 1 < len(variants):
                     index += 1  # 400: try a leaner, more compatible payload
@@ -1308,6 +1352,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         "mask_note": mask_note,
         "simple": simple,
         "building_refs": [int(r.get("block") or 0) for r in attached_refs],
+        "collage": collage_info,
         "size_requested": size,
         "size_returned": list(image_dimensions(target) or []),
         "model": log["attempts"][-1]["model"] if log["attempts"] else model_used,
@@ -1321,6 +1366,18 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         "revised_prompt": str(item.get("revised_prompt") or "")[:500],
         "seconds": round(time.time() - started, 1),
     }
+
+
+_TRANSIENT = ("ssl", "eof", "reset", "connection aborted", "broken pipe", "timed out", "timeout", "remote end closed",
+              "incompleteread", "connectionerror", "temporarily", "传输中断", "unexpected_eof")
+
+
+def transient_network(exc) -> bool:
+    """A connection-level failure worth retrying (SSL EOF, reset, cut stream, timeout) — not DNS / proxy refusal."""
+    if getattr(exc, "kind", "") == "stream_cut":
+        return True
+    text = (str(exc) + " " + str(getattr(exc, "detail", ""))).lower()
+    return any(k in text for k in _TRANSIENT)
 
 
 def _sleep_cancellable(seconds, cancel_check=None):
@@ -1351,6 +1408,10 @@ def fallback_with_building_refs(kwargs, building_refs, vehicle=False, limit=4):
         if str(r["path"]) not in paths:
             paths.append(str(r["path"]))
     out["reference_paths"] = paths
+    roles = dict(out.get("reference_roles") or {})
+    for r in refs:
+        roles[str(Path(str(r["path"])).resolve())] = ("building", f"环境体块 {r.get('block')} 的建筑参考（只管该体块的建筑风格）")
+    out["reference_roles"] = roles
     names = [Path(str(r["path"])).name for r in refs]
     out["prompt"] = (str(out.get("prompt") or "").rstrip() + "\n\n"
                      + building_ref_text(refs, vehicle=bool(vehicle), names=names))
@@ -1405,6 +1466,8 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 style_text=style_text if use_simple else "",
             )
             state["direct_ok"] += 1
+            if (result.get("collage") or {}).get("merged"):
+                state["collage"] = int(state.get("collage", 0)) + int(result["collage"]["merged"])
             return result
         except DirectEditError as exc:
             if exc.kind == "cancelled":
@@ -1444,15 +1507,38 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
             print(f"[Wondful] Codex 直连图像编辑异常，改用 codex exec：{reason}")
     state["fallbacks"] += 1
     kwargs = fallback_with_building_refs(kwargs, building_refs, vehicle=bool(vehicle))
-    result = fallback(**kwargs)
+    if manifest:      # 1.2.7: the 参考图拼图 names every cell by its bundle role
+        roles = dict(kwargs.get("reference_roles") or {})
+        for path, (role, label) in _labels_from_manifest(manifest).items():
+            roles.setdefault(path, ("sheet" if label.startswith("参考图集") else role, label))
+        kwargs = dict(kwargs, reference_roles=roles)
+    try:
+        result = fallback(**kwargs)
+    except TypeError as exc:
+        if "reference_roles" not in str(exc):
+            raise
+        kwargs = {k: v for k, v in kwargs.items() if k != "reference_roles"}
+        result = fallback(**kwargs)
     if isinstance(result, dict):
         result = dict(result)
         result["direct_fallback_reason"] = state.get("last_reason") or state.get("disabled") or ""
+        if (result.get("collage") or {}).get("merged"):
+            state["collage"] = int(state.get("collage", 0)) + int(result["collage"]["merged"])
     return result
 
 
 def engine_note(state) -> str:
-    """One short panel line describing which path produced the images."""
+    """One short panel line describing which path produced the images (+ 1.2.7 「已拼合 N 张参考图」)."""
+    if not state:
+        return ""
+    base = _engine_note(state)
+    n = int(state.get("collage", 0) or 0)
+    if n:
+        return (base + " · " if base else "") + f"已拼合 {n} 张参考图"
+    return base
+
+
+def _engine_note(state) -> str:
     if not state:
         return ""
     ok, fb = int(state.get("direct_ok", 0)), int(state.get("fallbacks", 0))

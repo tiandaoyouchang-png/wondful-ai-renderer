@@ -224,6 +224,19 @@ def _in_rects(pts, rects, pad=0.3):
 
 # ============================================================================== street frame
 
+def _has_water(analysis) -> bool:
+    an = analysis or {}
+    if (an.get("terrain") or {}).get("has_sea"):
+        return True
+    for p in an.get("primitives", []) or []:
+        if str(p.get("type", "")) in ("water_plane", "water", "sea", "lake"):
+            return True
+    for z in an.get("surface_zones", []) or []:
+        if any(w in str(z.get("kind", "")).lower() for w in ("water", "sea", "lake", "river")):
+            return True
+    return False
+
+
 def street_frame(parts, pad, analysis=None):
     """(origin a0 (2,), direction t (2,), road half width, source) of the street through the product."""
     px, py = (float(pad[0]), float(pad[1])) if pad is not None else (0.0, 8.0)
@@ -270,6 +283,64 @@ def street_frame(parts, pad, analysis=None):
     ref = us[int(np.argmax(ws))]
     acc = sum(w * (u if u @ ref >= 0 else -u) for u, w in zip(us, ws))
     return np.array([px, py]), _unit(acc), 4.0, "facades"
+
+
+# ============================================================================== measured rows (1.2.7)
+# PC test 2026-10-21 (戈壁 stone village, 216°): the 主视角's row of stone houses did not continue to the back.
+# The measured row's own line (not the street direction) is continued past both ends, and when nothing stands on
+# the camera side (no street mirror) the row is closed around the back at the row's distance from the product.
+ROW_MIN_PARTS = 2
+ROW_MIN_FRONTAGE = 10.0
+ROW_ANGLE_DEG = 10.0       # prisms whose facade directions differ more are a different row
+ROW_OFFSET_M = 3.5         # … or whose front lines are further apart
+CONF_ROW = 0.6             # continued on the measured row line
+CONF_BACK = 0.3            # closed around the back (lowest confidence)
+BACK_MAX_R = 60.0
+ROW_SNAP_DEG = 12.0        # a row this close to the street direction runs along the street (measured offset kept)
+
+
+def measured_rows(builds):
+    """Group measured building prisms into rows (same facade direction ± ROW_ANGLE_DEG, front lines within
+    ROW_OFFSET_M). → [{u, n, b (front line offset along n), s0, s1, tops, D, lot, parts, frontage}], biggest first."""
+    rows = []
+    for p in builds:
+        u = _unit(np.asarray(p["u"], np.float64))
+        n = _unit(np.asarray(p["n"], np.float64))
+        xy = np.asarray(p["xy"], np.float64)
+        placed = False
+        for r in rows:
+            uu = r["u"] if r["u"] @ u >= 0 else -r["u"]
+            if abs(float(uu @ u)) < math.cos(math.radians(ROW_ANGLE_DEG)):
+                continue
+            if abs(float(xy @ r["n"]) - r["b"]) > ROW_OFFSET_M:
+                continue
+            r["parts"].append(p)
+            placed = True
+            break
+        if not placed:
+            rows.append({"u": u, "n": n, "b": float(xy @ n), "parts": [p]})
+    out = []
+    for r in rows:
+        ps = r["parts"]
+        u, n = r["u"], r["n"]
+        ss = []
+        for p in ps:
+            c = np.asarray(p["xy"], np.float64) @ u
+            ss += [c - float(p["W"]) / 2, c + float(p["W"]) / 2]
+        frontage = float(sum(float(p["W"]) for p in ps))
+        if len(ps) < ROW_MIN_PARTS and frontage < ROW_MIN_FRONTAGE:
+            continue
+        if frontage < ROW_MIN_FRONTAGE * 0.6:
+            continue
+        b = float(np.median([np.asarray(p["xy"], np.float64) @ n for p in ps]))
+        tops = [float(p["top"]) - float(p.get("g0", 0.0)) for p in ps]
+        out.append({"u": u, "n": n, "b": b, "s0": float(min(ss)), "s1": float(max(ss)),
+                    "tops": [float(x) for x in np.percentile(np.clip(tops, 2.6, 30.0), [20, 40, 60, 80])],
+                    "D": float(np.clip(np.median([float(p.get("D", 8)) for p in ps]), 4.0, 14.0)),
+                    "lot": float(np.clip(np.median([float(p["W"]) for p in ps]), 4.0, 14.0)),
+                    "parts": len(ps), "frontage": round(frontage, 1)})
+    out.sort(key=lambda r: -r["frontage"])
+    return out
 
 
 # ============================================================================== side statistics
@@ -498,6 +569,72 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
         wgt = 1.0 - x * x * (3 - 2 * x)
         return top + (best[1] - top) * wgt, setback + (best[2] - setback) * wgt, wgt
 
+    # 1.2.7 measured rows: continue each substantial row on its own line past both ends (before the street rows,
+    # so the street rhythm only fills what the rows leave); a side carried by a row skips the street-row lots
+    rows = measured_rows(builds)
+    layout["rows"] = []
+    row_sides = set()
+    for ri, row in enumerate(rows[:3]):
+        u, n_in = row["u"], row["n"]
+        if abs(float(u @ t)) > math.cos(math.radians(ROW_SNAP_DEG)):
+            # nearly parallel to the street: the street direction (a long, reliable line) carries the row, the
+            # measured front line keeps its position (a 2° facade-fit error is 3 m off after 90 m)
+            mid0 = u * (row["s0"] + row["s1"]) / 2 + n_in * row["b"]
+            u2 = t if float(u @ t) >= 0 else -t
+            n2 = np.array([-u2[1], u2[0]])
+            if float(n2 @ n_in) < 0:
+                n2 = -n2
+            ss = [float(np.asarray(q, np.float64) @ u2) for q in (u * row["s0"] + n_in * row["b"],
+                                                                     u * row["s1"] + n_in * row["b"])]
+            row = dict(row, u=u2, n=n2, b=float(mid0 @ n2), s0=min(ss), s1=max(ss))
+            u, n_in = u2, n2
+        end_top = {}
+        for direction, s_end in ((1, row["s1"]), (-1, row["s0"])):
+            ends = [q for q in builds if abs(float(np.asarray(q["xy"], np.float64) @ u) - s_end) < float(q["W"]) / 2 + 1.0
+                    and abs(float(np.asarray(q["xy"], np.float64) @ n_in) - row["b"]) < ROW_OFFSET_M]
+            if ends:
+                end_top[direction] = float(ends[0]["top"]) - float(ends[0].get("g0", 0.0))
+        sp = float(prod @ u)
+        made_row = 0
+        for direction, start in ((1, row["s1"]), (-1, row["s0"])):
+            sv, k = start, 0
+            while abs(sv - sp) < S_BACK and k < 40:
+                r = _hash01(ri, direction, k)
+                far_lot = bands and abs(sv - sp) > BAND_MID
+                w = float(np.clip(row["lot"] * (0.8 + 0.45 * r), 4.0, 16.0))
+                if far_lot:
+                    w = float(np.clip(w * FAR_LOT_SCALE, 4.0, 28.0))
+                gap = 0.6 + 1.4 * _hash01(ri, direction, k, 2)
+                top = row["tops"][int(_hash01(ri, direction, k, 3) * 4) % 4] * (0.92 + 0.16 * _hash01(ri, direction, k, 4))
+                if seam and direction in end_top:     # 重叠衔接: the first lots take the end prism's eaves
+                    x = float(np.clip(abs(sv - (row["s1"] if direction > 0 else row["s0"])) / SEAM_LEN, 0.0, 1.0))
+                    wgt = 1.0 - x * x * (3 - 2 * x)
+                    if wgt > 0.05 and abs(end_top[direction] - top) < SEAM_TOP_MAX:
+                        top = top + (end_top[direction] - top) * wgt
+                        stats["seam_blended"] += 1
+                D = row["D"] * (0.85 + 0.3 * _hash01(ri, direction, k, 5))
+                smid = sv + direction * (gap + w / 2)
+                c = u * smid + n_in * row["b"]
+                g0 = float(ground(float(c[0]), float(c[1])))
+                style = int(_hash01(ri, direction, k, 6) * 997)
+
+                def build_row(info, c=c, ww=w, D=D, g0=g0, top=top, u=u, n_in=n_in):
+                    M.add(*prims.box(c, u, n_in, ww, D, g0 - 0.5, g0 + top), C_INF_BUILDING, info)
+                    deferred.append((float(np.hypot(c[0] - px, c[1] - py)), c, u.copy(), n_in.copy(), ww, D,
+                                     g0 - 0.5, g0 + top))
+                if place_box("building", C_INF_BUILDING, c, u, n_in, w, D, g0 - 0.5, g0 + top, CONF_ROW, style,
+                             builder=build_row):
+                    stats["buildings"] += 1
+                    stats["row_lots"] = stats.get("row_lots", 0) + 1
+                    made_row += 1
+                sv += direction * (gap + w)
+                k += 1
+        mid = u * (row["s0"] + row["s1"]) / 2 + n_in * row["b"]
+        layout["rows"].append({"c": [float(mid[0]), float(mid[1])], "u": [float(u[0]), float(u[1])],
+                               "n": [float(n_in[0]), float(n_in[1])], "s": [round(row["s0"], 2), round(row["s1"], 2)],
+                               "frontage": row["frontage"], "parts": row["parts"], "continued": made_row})
+        if made_row:
+            row_sides.add(1 if float((mid - a0) @ nperp) >= 0 else -1)
     for sd, cf in conf.items():
         sm = summ[sd]
         setback0 = max(sm["setback"], hw + 1.5)
@@ -505,7 +642,7 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
         lot = sm["lot"]
         hed = sides[sd]["hedges"] or sides[-sd]["hedges"]
         k = 0
-        s = -S_BACK
+        s = -S_BACK if sd not in row_sides else S_BACK      # 1.2.7: this side is carried by a measured row
         while s < S_BACK:
             r = _hash01(sd, k)
             far_lot = bands and abs(s - s_prod) > BAND_MID
@@ -612,6 +749,36 @@ def complete(prims, M, parts, ground, visible, *, pad=None, analysis=None, budge
                              builder=build_pole):
                     stats["poles"] += 1
                 s += sp
+    # 1.2.7 back closure: nothing on the camera side (no street to mirror) → the measured row is continued around
+    # the back at its distance from the product, facing it (lowest confidence; never where the 主视角 looks,
+    # never on water, never inside the clear circle)
+    if rows and len(conf) == 1 and not _has_water(analysis):
+        row = rows[0]
+        fr = np.array(layout["rows"][0]["c"]) if layout["rows"] else prod + row["n"] * 20.0
+        R = float(np.clip(np.hypot(*(fr - prod)), clear_r + 4.0, BACK_MAX_R))
+        phi_row = math.atan2(fr[1] - prod[1], fr[0] - prod[0])
+        half_span = max(0.35, (row["s1"] - row["s0"]) / 2 / R)
+        lot = row["lot"]
+        k, phi = 0, phi_row + half_span
+        while phi < phi_row + 2 * math.pi - half_span and k < 60:
+            w = float(np.clip(lot * (0.8 + 0.45 * _hash01(7, k)), 4.0, 16.0))
+            gap = 0.6 + 1.4 * _hash01(7, k, 2)
+            phi_c = phi + (gap + w / 2) / R
+            c = prod + R * np.array([math.cos(phi_c), math.sin(phi_c)])
+            n_in = _unit(prod - c)
+            u = np.array([-n_in[1], n_in[0]])
+            top = row["tops"][int(_hash01(7, k, 3) * 4) % 4]
+            D = row["D"]
+            g0 = float(ground(float(c[0]), float(c[1])))
+
+            def build_back(info, c=c, ww=w, D=D, g0=g0, top=top, u=u, n_in=n_in):
+                M.add(*prims.box(c, u, n_in, ww, D, g0 - 0.5, g0 + top), C_INF_BUILDING, info)
+            if place_box("building", C_INF_BUILDING, c, u, n_in, w, D, g0 - 0.5, g0 + top, CONF_BACK,
+                         int(_hash01(7, k, 6) * 997), builder=build_back):
+                stats["buildings"] += 1
+                stats["back_lots"] = stats.get("back_lots", 0) + 1
+            phi += (gap + w) / R
+            k += 1
     # windows of the inferred rows, nearest first, within the remaining triangle budget (近密远疏)
     for dist, c, uu, nn, ww, D, z0, z1 in sorted(deferred, key=lambda e: e[0]):
         if not windows or win_left <= 0 or dist > BAND_MID:

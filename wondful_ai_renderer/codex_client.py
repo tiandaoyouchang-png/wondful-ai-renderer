@@ -20,6 +20,25 @@ class CodexError(RuntimeError):
     pass
 
 
+class CodexTimeoutError(CodexError):
+    """The plugin's own time limit stopped a codex exec turn (not a login / quota problem)."""
+
+
+# 1.2.7: one codex exec image call longer than this is stopped and retried once (the PC test: a slow proxy call
+# sat 30 min until the 1800 s total limit killed the whole task). The total stays 偏好设置 › Codex ImageGen 超时.
+RENDER_FIRST_TRY_SECONDS = 600
+
+
+def render_attempt_timeouts(total) -> list:
+    """Per-attempt limits for one codex exec image call: [first, retry] within the user's total (0 = no total)."""
+    total = int(total or 0)
+    if total <= 0:
+        return [RENDER_FIRST_TRY_SECONDS, None]
+    if total <= RENDER_FIRST_TRY_SECONDS + 60:
+        return [total]
+    return [RENDER_FIRST_TRY_SECONDS, total - RENDER_FIRST_TRY_SECONDS]
+
+
 class CodexNotInstalledError(CodexError):
     pass
 
@@ -181,9 +200,9 @@ def _run(
     except FileNotFoundError as exc:
         raise CodexNotInstalledError("未找到 Codex CLI。请先安装 Codex，或在插件偏好设置中指定 Codex 可执行文件。") from exc
     except subprocess.TimeoutExpired as exc:
-        raise CodexError(
+        raise CodexTimeoutError(
             f"Codex 操作超过插件允许的总时长（{effective_timeout}s），已被插件终止。"
-            "这不代表 Codex 登录失效；可在插件偏好设置里提高对应超时，或设为 0 关闭插件侧硬超时。"
+            "这不代表 Codex 登录失效；可在 偏好设置 › 插件 › Wondful › Codex ImageGen 超时（秒）里提高，或设为 0 关闭插件侧硬超时。"
         ) from exc
     except Exception as exc:
         raise CodexError(f"无法启动 Codex: {exc}") from exc
@@ -529,7 +548,11 @@ def generate_image(
     edit_base_path: str = "",
     edit_mask_path: str = "",
     structure_control: dict | None = None,
+    reference_roles: dict | None = None,
+    collage_long_edge: int = 2048,
 ) -> dict:
+    """``reference_roles`` (path → (role, label)): lets the 参考图拼图 fit name every cell; unknown paths are
+    classified by file name."""
     from . import static_scene as _SS
     prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
     from .reference_bundle import check_image_capacity, reference_limit_error, ReferenceLimitError, unique_paths
@@ -553,6 +576,29 @@ def generate_image(
         if candidate and candidate not in attached:
             attached.append(candidate)
     attached = unique_paths(attached)
+    # 1.2.7 参考图超限自动拼图: over the tool's 5 inputs the camera base / edit base / mask stay standalone and the
+    # rest is merged into labelled sheets (environment never as an image; detail → structure become text last)
+    collage_note, collage_info = "", {}
+    from .reference_bundle import MAX_IMAGE_PATHS as _MAXP
+    if len(attached) > _MAXP:
+        from . import reference_collage as _RC
+        roles = {k: (v[0] if isinstance(v, (tuple, list)) else v) for k, v in (reference_roles or {}).items()}
+        labels = {k: v[1] for k, v in (reference_roles or {}).items() if isinstance(v, (tuple, list)) and len(v) > 1}
+        try:
+            attached, collage_note, collage_info = _RC.fit_inputs(
+                attached, _MAXP, out_dir=str(session_dir), roles=roles, labels=labels,
+                fixed=[p for p in (refs[:1] + [edit_base, edit_mask]) if p], long_edge=int(collage_long_edge or 2048),
+                tag=target.stem[-24:])
+        except _RC.CollageError as exc:
+            raise ReferenceLimitError(f"参考图拼图失败：{exc}") from exc
+        msg = _RC.panel_text(collage_info)
+        if msg:
+            print(f"[Wondful] {msg}（{collage_info['before']} → {collage_info['after']} 张图像输入）")
+        try:
+            (session_dir / f"reference_fit_{target.stem}.json").write_text(
+                json.dumps(collage_info, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
     check_image_capacity(attached)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -625,7 +671,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 
 最终生成要求：
 {prompt.strip()}
-
+{(chr(10) + collage_note + chr(10)) if collage_note else ""}
 执行要求：
 - 使用内置 image generation 工具真正生成/编辑图片。
 - 最终只生成一张图。
@@ -642,17 +688,29 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 """.strip()
 
     tracker = ArtifactTracker(session_dir, attached)
-    last_message = _exec_turn(
-        explicit_path=explicit_path,
-        prompt=task,
-        image_paths=attached,
-        model=model,
-        cwd=str(session_dir),
-        sandbox="workspace-write",
-        timeout=timeout,
-        enable_image_generation=True,
-        output_last_message=str(session_dir / "codex_render.txt"),
-    )
+    limits = render_attempt_timeouts(timeout)
+    for attempt, limit in enumerate(limits, start=1):
+        try:
+            last_message = _exec_turn(
+                explicit_path=explicit_path,
+                prompt=task,
+                image_paths=attached,
+                model=model,
+                cwd=str(session_dir),
+                sandbox="workspace-write",
+                timeout=limit if limit is not None else 0,
+                enable_image_generation=True,
+                output_last_message=str(session_dir / "codex_render.txt"),
+            )
+            break
+        except CodexTimeoutError as exc:
+            if attempt >= len(limits):
+                raise CodexTimeoutError(
+                    f"Codex 代理生图两次都没有在时限内完成（第 1 次 {limits[0]}s 后已自动重试 1 次）。{exc}") from exc
+            if tracker.accepts(target):
+                last_message = ""        # the slow turn still saved the image before it was stopped
+                break
+            print(f"[Wondful] Codex 代理生图超过 {limit}s 仍未完成，已停止并重试 1 次")
 
     candidates = [target, *_extract_candidate_paths(last_message)]
     newest = tracker.newest()
@@ -665,7 +723,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
                     shutil.copy2(candidate, target)
                 return {"engine": "codex_oauth_imagegen", "status": "ok",
                         "message": last_message, "source": str(candidate),
-                        "attached_images": len(attached)}
+                        "attached_images": len(attached), "collage": collage_info}
             except OSError:
                 continue
 

@@ -614,7 +614,7 @@ def _skin_tris(pieces):
 # ============================================================================== volumes (V1 rules)
 
 def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, windows=True, win_limit=400,
-                  r_split=R_SPLIT, avoid=None, occ=None, bands=False):
+                  r_split=R_SPLIT, avoid=None, occ=None, bands=False, static_fp=None):
     """Closed proxies per measured component. ``avoid`` = (x, y, radius) product spot: nothing is built there.
     ``occ`` (``scene_complete.Occupancy``): rule depths are cut back where they would reach free space.
     ``bands`` (近密远疏): components are processed nearest-to-the-product first (the window budget goes to the
@@ -742,13 +742,19 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                                  "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
             stats["walls"] += 1
             continue
-        dyn = _static_scene().is_dynamic_prop(W, hh)
+        SSm = _static_scene()
+        is_static = bool(static_fp) and SSm.in_static_footprint(float(cen[0]), float(cen[1]), static_fp,
+                                                                margin=max(0.8, 0.04 * dist))
+        dyn = SSm.is_dynamic_prop(W, hh, D=Dm, static=is_static)
         if dyn:                                             # 1.2.6 只做场景相关物体: pedestrians / parked cars
             stats["dynamic_skipped"] = stats.get("dynamic_skipped", 0) + 1
             continue
-        if 1.4 <= W <= 2.8 and 1.2 <= hh <= 4.0:            # vehicle seen end-on → length assumed
-            D = max(Dm, 4.5 if hh < 2.2 else 7.0)
-        elif 3.2 <= W <= 6.5 and 1.0 <= hh <= 2.2:          # vehicle side-on
+        if is_static:
+            stats["static_kept"] = stats.get("static_kept", 0) + 1
+        pose = "" if is_static else SSm.vehicle_pose(W, hh, Dm)
+        if pose == "end":                                   # (allowed) vehicle seen end-on → length assumed
+            D = max(Dm, 4.5)
+        elif pose == "side":                                # vehicle side-on
             D = max(Dm, 1.8)
         else:
             D = max(Dm, 0.5 * W, 0.4)
@@ -890,15 +896,19 @@ def build(geo, *, far_z=None, pad=None, scene_kind="outdoor", r_split=R_SPLIT, b
             occ = SC.Occupancy(geo, z_offset)
         except Exception as exc:     # never lose the blockout over the free-space test
             print(f"[Wondful] 空间三态不可用：{exc}")
+    try:    # 1.2.7: the analysis' static props (kiosk, pillar, sign …) are never removed as people / cars
+        static_fp = _static_scene().static_footprints(analysis)
+    except Exception:
+        static_fp = []
     stats, thin, Qv = build_volumes(P, N, mask, cls, T, cam_h, M, st=st_vol, win_limit=win_limit, r_split=r_split,
-                                    avoid=avoid, occ=occ, bands=bands)
+                                    avoid=avoid, occ=occ, bands=bands, static_fp=static_fp)
     vol_tris = M.tris()
     room = budget - len(FT) - vol_tris
     if room < SKIN_BUDGET // 2 and stats["windows"]:
         # over budget: drop the procedural windows first
         M = Mesh()
         stats, thin, Qv = build_volumes(P, N, mask, cls, T, cam_h, M, st=st_vol, windows=False, r_split=r_split,
-                                        avoid=avoid, occ=occ, bands=bands)
+                                        avoid=avoid, occ=occ, bands=bands, static_fp=static_fp)
         vol_tris = M.tris()
         room = budget - len(FT) - vol_tris
     skin_budget = max(4000, min(SKIN_BUDGET, room))

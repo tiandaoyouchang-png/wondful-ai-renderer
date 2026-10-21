@@ -1,6 +1,7 @@
 # RNA Property declarations must evaluate at class creation (Blender 4.3+).
 
 import hashlib
+import math
 import shutil
 import threading
 import uuid
@@ -551,6 +552,35 @@ def _watch_layers(scene_name):
         bpy.app.timers.register(_poll_layers, first_interval=0.5)
 
 
+HEARTBEAT_AFTER = 20.0      # s in one step before the panel shows 「已等 X 秒」
+
+
+def heartbeat(elapsed, estimate, floor=0.10, ceiling=0.88, phase="", phase_elapsed=None):
+    """1.2.7 心跳进度 (PC test: ⑤ 适配提示词 sat at 88 % for 13 minutes with no sign of life).
+
+    → (progress, eta_seconds, phase_text). Up to the estimate the bar moves linearly to ``ceiling``; past it the
+    bar keeps creeping toward 0.97 (never reaching it) and the phase says how long this step has been waiting."""
+    elapsed = max(0.0, float(elapsed))
+    est = max(1.0, float(estimate))
+    frac = elapsed / est
+    if frac <= 0.98:
+        progress = floor + (ceiling - floor) * frac
+    else:
+        top = max(ceiling, 0.96)
+        over = (elapsed - 0.98 * est) / est
+        base = floor + (ceiling - floor) * 0.98
+        progress = base + (top - base) * (1.0 - math.exp(-over))
+    eta = max(0, int(est - elapsed))
+    pe = elapsed if phase_elapsed is None else max(0.0, float(phase_elapsed))
+    text = str(phase or "")
+    if pe >= HEARTBEAT_AFTER or frac > 1.0:
+        wait = f"已等 {int(pe)} 秒" if pe < 120 else f"已等 {int(pe // 60)} 分 {int(pe % 60)} 秒"
+        if frac > 1.0:
+            wait += "，比平时慢，仍在进行"
+        text = f"{text} · {wait}" if text else wait
+    return round(min(progress, 0.965 if frac > 0.98 else 1.0), 4), eta, text
+
+
 class _BaseAsyncOperator(Operator):
     _timer = None
     _thread = None
@@ -657,10 +687,20 @@ class _BaseAsyncOperator(Operator):
 
     def _progress_update(self, props, floor=0.10, ceiling=0.88):
         elapsed = max(0.0, time.time() - self._started_at)
-        frac = min(1.0, elapsed / max(1.0, self._estimated_total))
-        props.progress = floor + (ceiling - floor) * min(0.98, frac)
-        props.eta_seconds = max(0, int(self._estimated_total - elapsed))
-        props.task_phase = getattr(self, "_phase", "")
+        est = max(1.0, float(self._estimated_total))
+        progress, eta, phase = heartbeat(elapsed, est, floor, ceiling, getattr(self, "_phase", ""),
+                                         self._phase_elapsed(elapsed))
+        props.progress = progress
+        props.eta_seconds = eta
+        props.task_phase = phase
+
+    def _phase_elapsed(self, elapsed):
+        """Seconds the current ``_phase`` text has been shown (heartbeat: 「已等 X 秒」)."""
+        phase = getattr(self, "_phase", "")
+        if getattr(self, "_hb_phase", None) != phase:
+            self._hb_phase = phase
+            self._hb_t0 = elapsed
+        return max(0.0, elapsed - float(getattr(self, "_hb_t0", 0.0) or 0.0))
 
     def _release_lock(self):
         with self._ownership_guard:
@@ -934,11 +974,7 @@ class WONDFUL_OT_generate(Operator):
                 _status(props, "ERROR", msg)
                 self.report({"ERROR"}, msg)
                 return False
-            if getattr(props, "product_collection", None) is None:
-                msg = "渲染多个视角需要先在 ② 选择产品集合。"
-                _status(props, "ERROR", msg)
-                self.report({"ERROR"}, msg)
-                return False
+            # 1.2.7 纯场景多角度: no product collection → the views render as a pure scene (no product gate)
         context.scene.camera = views[0]
         if len(views) > 1:
             props.views_plan = json.dumps({"cameras": [o.name for o in views], "total": len(views)}, ensure_ascii=False)
@@ -3158,6 +3194,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         # 3.2.1: Codex 图像编辑（直连）— edit the camera base with the hosted
         # image_generation tool; any failure falls back to the codex exec agent.
         self._direct_state = None
+        self._collage_merged = 0
         props.last_engine_note = ""
         self._layers = self._layers_spec(context, props, prefs, provider)
         self._detail = self._detail_spec(context, props)
@@ -3518,6 +3555,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             self._completed_variants.put(partial)
                         raise
                     generation_seconds = time.time() - generation_started
+                    if self._direct_state is None and isinstance(generation, dict):
+                        # 1.2.7 参考图拼图 on the proxy / AGY path (the direct path counts it in its state)
+                        self._collage_merged = int(getattr(self, "_collage_merged", 0)) + int(
+                            ((generation.get("collage") or {}).get("merged")) or 0)
                     total_generation_seconds += generation_seconds
                     canvas = assess_canvas(image_dimensions(candidate), (camera_w, camera_h))
 
@@ -3746,6 +3787,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             if getattr(self, "_direct_state", None) is not None:
                 from .codex_direct import engine_note
                 props.last_engine_note = engine_note(self._direct_state)
+            elif int(getattr(self, "_collage_merged", 0) or 0):
+                props.last_engine_note = f"已拼合 {int(self._collage_merged)} 张参考图"
             if self._error:
                 exc, _tb = self._error
                 if isinstance(exc, AntigravityNotLoggedInError):
@@ -4415,9 +4458,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             self.report({"ERROR"}, "主视角图不存在：请先渲染主视角，或选择一张已满意的主视角图。")
             return {"CANCELLED"}
         coll = getattr(props, "product_collection", None)
-        if coll is None:
-            self.report({"ERROR"}, "多角度场景一致需要先在 ② 选择产品集合。")
-            return {"CANCELLED"}
+        # 1.2.7 纯场景多角度 (PC test: a street / night scene without a product could not use 多角度): no product
+        # collection → empty product mask, no occlusion move, no product gate / 细节修复 / 轮廓验收
+        no_product = coll is None
         plan = views_plan(props) if self.from_plan else {}
         if self.from_plan and (not plan or plan["cameras"][0] != master.name):
             props.views_plan = ""
@@ -4486,7 +4529,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 scene.camera = cam
                 context.view_layer.update()
                 pre = pool / MV.safe_name(cam.name)
-                if cam != master and avoid:
+                if cam != master and avoid and not no_product:
                     # 1.2.6: ray-check the product through the blockout BEFORE any image call; move the camera
                     # (temporarily — restored below, the pose used is recorded) or skip it
                     try:
@@ -4510,6 +4553,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                                       terrain=settings_from_props(props), mask_path=files["mask"], massing=massing_coll,
                                       detail_path=files["detail"], keep_path=files["keep"], matid_path=files["matid"],
                                       geometry_prefix=str(pre), geometry_size=(ww, wh), detail=detail_mode)
+                if ok and no_product:      # pure scene: an empty product mask (nothing protected, nothing gated)
+                    from .png_io import write_png as _wp
+                    _wp(files["mask"], np.zeros((H, W, 4), np.uint8))
                 if not ok or not LAST_CLAY_INFO.get("geometry") or not Path(files["mask"]).is_file():
                     raise RuntimeError(f"相机 {cam.name} 的白模 / 几何通道渲染失败")
                 m = read_png(files["mask"]).astype(np.float32)
@@ -4517,7 +4563,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 np.save(f"{pre}_maskw.npy", np.clip(resize(m, ww, wh), 0, 1).astype(np.float32))
                 rec = MV.scene_camera_record(scene, cam)
                 blocked = hidden = 0.0
-                if cam != master:
+                if cam != master and not no_product:
                     try:
                         blocked, hidden = MV.obstacle(context, cam, coll)
                     except Exception as exc:
@@ -4562,9 +4608,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                   + (" + 远山剪影" if LAST_CLAY_INFO.get("detail_skyline") else
                      ("（远山剪影不可用，沿用 AI 远景带）" if detail_mode.endswith("+sky") else "")))
         centre = None
-        b = MV.product_bounds(coll)
+        b = MV.product_bounds(coll) if coll is not None else None
         if b is not None:
             centre = [(b[0].x + b[1].x) / 2, (b[0].y + b[1].y) / 2, (b[0].z + b[1].z) / 2]
+        elif no_product:      # pure scene: views are ordered around the point the 主视角 looks at (12 m ahead)
+            centre = MV.scene_pivot(master)
         if plan:      # ⑥ 渲染视角: the user's list order (each view still reuses every view accepted before it)
             order = [views[o.name]["cam"] for o in others]
         else:
@@ -4577,7 +4625,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             vehicle = False
         keep_text = ""
         try:
-            slots, texts = keep_exact_slots(coll), keep_exact_texts(coll)
+            slots, texts = (keep_exact_slots(coll), keep_exact_texts(coll)) if coll is not None else ({}, ())
             if slots or texts:
                 from .detail_paste import keep_prompt
                 keep_text = keep_prompt(vehicle, texts or ())
@@ -4589,7 +4637,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         size = CD.choose_edit_size(W, H, int(getattr(prefs, "long_edge", 2048) or 2048))
-        paste = bool(getattr(props, "detail_paste", True))
+        paste = bool(getattr(props, "detail_paste", True)) and not no_product
         colour_fix = bool(getattr(props, "detail_colour_fix", True))
         strength = float(getattr(props, "detail_paste_strength", 0.8))
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
@@ -4613,7 +4661,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
                     "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name,
-                    "plan": plan}
+                    "plan": plan, "no_product": no_product}
         self._phase = f"多角度场景一致 · 视角 2/{len(others) + 1}：准备完成" if plan else "多角度场景一致：准备完成"
         self._estimated_total = 15.0 + 80.0 * len(others)
         _status(props, "RENDERING")
@@ -4675,6 +4723,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             except Exception as exc:
                 print(f"[Wondful] 多角度场景一致：主视角风格读取失败：{exc}")
             night = bool(style.get("night"))
+            ground_line = ""
+            try:     # 1.2.7 地面锁定: the 主视角's ground material / colour goes into every view's prompt
+                ground_line = MV.ground_lock_text(sb_analysis, MV.master_ground(master_view))
+            except Exception as exc:
+                print(f"[Wondful] 多角度场景一致：地面锁定读取失败：{exc}")
             patches = None
             fill_words = ""
             if completion:
@@ -4735,7 +4788,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
                 res["projection"] = st
                 text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec, outdoor=outdoor),
-                                    [s["name"] for s in sources], fill_line=fill_line, style_line=style_line)
+                                    [s["name"] for s in sources], fill_line=fill_line, style_line=style_line,
+                                    ground_line=ground_line)
                 res["prompt_interior"] = "室内物体" in text
                 res["style"] = {"night": night, "colours": style.get("colours", []), "emissive": style.get("emissive")}
                 Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
@@ -4768,21 +4822,23 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     if not RW.fit_to_canvas(raw, canvas, W, H):
                         res["error"] = "结果图无法读取"
                         break
-                    rep, _note = RW.identity_scores(canvas, spec, matid)
-                    gate = {}
-                    try:      # fixed-coordinate silhouette (轮廓验收, ~1 s): did the product really move?
-                        gate = RW.gate_score(raw, v["files"]["mask"], W, H, str(work), f"try{n}", cancelled,
-                                             detail_path=v["files"]["detail"])
-                    except RW.Cancelled:
-                        raise
-                    except Exception as exc:
-                        print(f"[Wondful] 多角度场景一致：轮廓验收失败：{exc}")
+                    rep, gate = {}, {}
+                    if not no_product:      # 1.2.7 纯场景: no product → no product acceptance
+                        rep, _note = RW.identity_scores(canvas, spec, matid)
+                        try:      # fixed-coordinate silhouette (轮廓验收, ~1 s): did the product really move?
+                            gate = RW.gate_score(raw, v["files"]["mask"], W, H, str(work), f"try{n}", cancelled,
+                                                 detail_path=v["files"]["detail"])
+                        except RW.Cancelled:
+                            raise
+                        except Exception as exc:
+                            print(f"[Wondful] 多角度场景一致：轮廓验收失败：{exc}")
                     img_w = resize(read_png(canvas).astype(np.float32)[..., :3], ww, wh)
                     rp = MV.reproj_de(master_view, vk, img_w)
                     t = {"file": canvas, "identity": {k: rep.get(k) for k in ("shift_px", "scale_pct", "outline_px", "edge_px",
                                                                           "edge_px_detail", "colour_dE", "error")},
                          "iou": gate.get("iou"), "iou_verdict": gate.get("verdict"),
-                         "reproj": rp, "product_violations": MV.product_violations(rep, gate.get("verdict")),
+                         "reproj": rp,
+                         "product_violations": [] if no_product else MV.product_violations(rep, gate.get("verdict")),
                          "env_violations": MV.env_violations(rp, env_check), "seconds": r.get("seconds"),
                          "image_model": r.get("image_model", ""), "image_quality": r.get("image_quality", "")}
                     tries.append(t)
@@ -4897,6 +4953,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 if ((r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25) and not r.get("skipped_occluded")]
         if warn:
             notes.append("注意：产品前方有遮挡物（" + "、".join(warn) + "），可移动相机")
+        if info.get("no_product"):
+            notes.append("纯场景（未选产品集合）：已跳过产品验收")
         if info.get("skipped"):
             notes.append("已跳过正交相机：" + "、".join(info["skipped"]))
         if summary.get("light_note"):

@@ -1707,14 +1707,97 @@ def light_sentence(light: dict, cam, outdoor=None) -> str:
             "阴影软硬与主视角一致" + (f"（{words}）" if words else "") + "，不要改变时段或天气。")
 
 
-def view_text(massing_text, light_line, source_names, fill_line="", style_line="") -> str:
+# 1.2.7 地面锁定 (PC test 2026-10-21: the 216° view turned the 主视角's dry sandy gravel into wet asphalt)
+_WET = re.compile(r"(\bwet\b|rain|puddle|damp|湿|积水|雨|水洼|反光路面)", re.I)
+_PAVED = re.compile(r"(asphalt|tarmac|bitumen|paved|沥青|柏油|铺装|pavement|concrete|水泥)", re.I)
+
+
+def master_ground(view) -> dict:
+    """Measured ground colour of the 主视角: median RGB of the up-facing, lowest environment pixels
+    (product and sky excluded). {} when too few such pixels."""
+    img = view.get("img")
+    if img is None:
+        return {}
+    pos = np.asarray(view["pos"], np.float32)
+    nrm = np.asarray(view["nrm"], np.float32)
+    hit = pos[..., 3] > 0.5 if pos.shape[-1] > 3 else np.isfinite(pos[..., 2])
+    env = hit & (np.asarray(view["mask"]) < 0.5) & (nrm[..., 2] > 0.85)
+    if view.get("sky") is not None:
+        env &= ~np.asarray(view["sky"], bool)
+    if env.sum() < 200:
+        return {}
+    z = pos[..., 2]
+    zlo = float(np.percentile(z[env], 10))
+    g = env & (z < zlo + 0.6)
+    if g.sum() < 200:
+        g = env
+    rgb = np.median(np.asarray(img, np.float32)[g], 0)
+    return {"rgb": [int(round(float(c))) for c in rgb[:3]], "hex": "#%02X%02X%02X" % tuple(int(round(float(c))) for c in rgb[:3]),
+            "share": round(float(g.mean()), 3)}
+
+
+def _tone(rgb) -> str:
+    r, g, b = [float(c) for c in rgb[:3]]
+    L = 0.299 * r + 0.587 * g + 0.114 * b
+    light = "浅" if L > 165 else ("深" if L < 80 else "中等")
+    if r - b > 30 and r >= g:
+        hue = "黄褐/赭色" if g - b > 15 else "红褐色"
+    elif abs(r - b) <= 18 and abs(r - g) <= 18:
+        hue = "灰色"
+    elif b - r > 15:
+        hue = "冷灰蓝色"
+    else:
+        hue = "暖灰色"
+    return light + hue
+
+
+def ground_lock_text(analysis=None, ground=None) -> str:
+    """One must-keep line for every 多角度 view: the 主视角 ground material (④ analysis words + the measured
+    colour of the 主视角's ground), dry unless the 主视角 is wet, no new road surface unless one is there."""
+    an = analysis or {}
+    pal = an.get("palette") or {}
+    words = str(pal.get("ground_words") or "").strip()
+    surf = str((an.get("terrain") or {}).get("surface") or "").strip()
+    roads = [r for r in an.get("roads", []) or [] if isinstance(r, dict)]
+    road_words = " ".join(str(r.get("surface") or "") + " " + str(r.get("label_zh") or "") for r in roads)
+    all_words = " ".join((words, surf, road_words, str(an.get("environment_description") or ""),
+                          str(pal.get("lock_zh") or "")))
+    g = ground or {}
+    if not (words or surf or g):
+        return ""
+    desc = words or surf
+    if desc and len(desc) > 160:
+        desc = desc[:160].rsplit(" ", 1)[0] + "…"
+    bits = ["【地面锁定】所有地面保持与主视角完全一致的材质和颜色"]
+    if desc:
+        bits[0] += f"：{desc}"
+    if g.get("hex"):
+        bits.append(f"主视角地面实测颜色约 {g['hex']}（{_tone(g['rgb'])}），新视角的地面延续这个颜色和颗粒质感")
+    if not _WET.search(all_words):
+        bits.append("地面保持干燥：不要变湿，不要出现积水、水渍、湿润反光或镜面倒影")
+    if not _PAVED.search(all_words):
+        bits.append("不要把地面换成沥青、柏油、水泥或其他铺装路面，也不要新增路面标线")
+    else:
+        bits.append("路面只出现在白模里有路的位置，并保持主视角那种路面材质，不要换成别的路面")
+    en = "[GROUND LOCK] Keep the master view's exact ground material and colour" + (f" ({g['hex']})" if g.get("hex") else "")
+    if not _WET.search(all_words):
+        en += "; keep it dry — no wet surface, puddles or mirror reflections"
+    if not _PAVED.search(all_words):
+        en += "; do not turn it into asphalt or any paved road"
+    return "；".join(bits) + "。\n" + en + "."
+
+
+def view_text(massing_text, light_line, source_names, fill_line="", style_line="", ground_line="") -> str:
     """Per-view addition to the simple-path prompt (goes in as ``massing_text``). ``style_line``: the
-    1.2.6 风格与光线锁定 from ``style_lock_text`` (must-keep look of the 主视角)."""
+    1.2.6 风格与光线锁定 from ``style_lock_text`` (must-keep look of the 主视角); ``ground_line``: the 1.2.7
+    地面锁定 (``ground_lock_text``)."""
     parts = [t.strip() for t in (massing_text or "",) if t and t.strip()]
     if light_line:
         parts.append(light_line)
     if style_line and style_line.strip():
         parts.append(style_line.strip())
+    if ground_line and ground_line.strip():
+        parts.append(ground_line.strip())
     names = [n for n in source_names or () if n]
     parts.append(BASE_NOTE.format(sources="主视角" + ("和" + "、".join(names[1:]) if len(names) > 1 else "")))
     if fill_line:
@@ -1948,6 +2031,20 @@ def scene_camera_record(scene, cam_obj) -> dict:
     d = cam_obj.data
     return camera_record(cam_obj.name, cam_obj.matrix_world, d.angle, getattr(d, "sensor_fit", "AUTO"), w, h,
                          ortho=getattr(d, "type", "PERSP") != "PERSP")
+
+
+def scene_pivot(cam, ahead=12.0):
+    """1.2.7 纯场景多角度: the point a camera looks at ``ahead`` m in front (world xyz list), on z ≥ 0."""
+    from mathutils import Vector
+    m = cam.matrix_world
+    o = m.translation
+    d = (m.to_3x3() @ Vector((0.0, 0.0, -1.0))).normalized()
+    p = o + d * float(ahead)
+    if d.z < -0.05 and o.z > 0:          # looking down: where the view ray meets the ground, if nearer
+        t = o.z / -d.z
+        if t < ahead:
+            p = o + d * t
+    return [float(p.x), float(p.y), max(0.0, float(p.z))]
 
 
 def product_bounds(collection):

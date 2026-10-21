@@ -222,7 +222,7 @@ class Wiring(unittest.TestCase):
         self.assertLess(body.index("SS.strip_dynamic(data, allow)"), body.index("S = SB.normalize(data)"))
         self.assertIn("SS.dropped_note(dropped)", sbb)
         db = (PKG / "detail_blockout.py").read_text(encoding="utf-8")
-        self.assertIn("dyn = _static_scene().is_dynamic_prop(W, hh)", db)
+        self.assertIn("dyn = SSm.is_dynamic_prop(W, hh, D=Dm, static=is_static)", db)
 
 
 if __name__ == "__main__":

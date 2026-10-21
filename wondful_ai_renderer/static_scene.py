@@ -16,6 +16,7 @@ No bpy here (pure helpers, unit-tested).
 """
 from __future__ import annotations
 
+import math
 import re
 
 PERSON, VEHICLE, ANIMAL = "person", "vehicle", "animal"
@@ -177,18 +178,80 @@ def dropped_note(dropped) -> str:
     return "只保留场景静态物体：未生成" + " · ".join(bits)
 
 
-def is_dynamic_prop(W: float, h: float, allow=None) -> str:
+# 1.2.7 (PC test 2026-10-21: a 2.0 m wide x 3.0 m tall static kiosk / pillar was deleted as an end-on car):
+# size-only vehicle detection is limited to real passenger-car proportions.
+CAR_LEN = (3.5, 5.5)       # m, length (side-on: the visible width)
+CAR_WID = (1.6, 2.2)       # m, width (end-on: the visible width)
+CAR_HGT = (1.2, 2.0)       # m, height
+
+
+def vehicle_pose(W: float, h: float, D=None) -> str:
+    """'end' / 'side' when a free-standing measured cluster has passenger-car proportions, else ''.
+
+    Seen end-on the visible width is the car's width and its depth (when measured) must not exceed a car
+    length; side-on the visible width is its length and its depth must not exceed a car width (the two are
+    swapped). A measured depth below the car range is fine (one view only sees the front face)."""
+    if not (CAR_HGT[0] <= h <= CAR_HGT[1]):
+        return ""
+    d = None if D is None else float(D)
+    if CAR_WID[0] <= W <= CAR_WID[1] and (d is None or d <= CAR_LEN[1] + 0.5):
+        return "end"
+    if CAR_LEN[0] <= W <= CAR_LEN[1] and (d is None or d <= CAR_WID[1] + 0.8):
+        return "side"
+    return ""
+
+
+def is_dynamic_prop(W: float, h: float, allow=None, D=None, static=False) -> str:
     """细节粗模 measured cluster (free-standing, not building / wall / slab): its category by size, '' = keep.
 
-    Person-sized (≤ 0.9 m wide; a vending machine / kiosk is wider, 1.0–2.2 m tall) → person; car-sized seen end-on (1.4–2.8 m wide, 1.2–4.0 m tall)
-    or side-on (3.2–6.5 m wide, 1.0–2.2 m tall) → vehicle. Low props (benches, planters, bollards) stay."""
+    Person-sized (≤ 0.9 m wide, 1.0–2.2 m tall; a vending machine / kiosk is wider) → person; passenger-car
+    proportions only (``vehicle_pose``: length 3.5–5.5 m, width 1.6–2.2 m, height 1.2–2.0 m, end-on swaps
+    length and width) → vehicle. ``static``: the ④ analysis put a static element (sign, kiosk, pillar …) here
+    → never deleted. Low props (benches, planters, bollards) stay."""
+    if static:
+        return ""
     allow = allowed() if allow is None else frozenset(allow or ())
     cat = ""
     if W <= 0.9 and 1.0 <= h <= 2.2:
         cat = PERSON
-    elif (1.4 <= W <= 2.8 and 1.2 <= h <= 4.0) or (3.2 <= W <= 6.5 and 1.0 <= h <= 2.2):
+    elif vehicle_pose(W, h, D):
         cat = VEHICLE
     return "" if (not cat or cat in allow) else cat
+
+
+def static_footprints(analysis) -> list:
+    """Footprints of the ④ analysis' static elements (category '' — signs, kiosks, pillars, shelters …) that
+    are small enough to be a free-standing prop: [(x, y, half_w, half_d, rot_rad)], repeats expanded. A measured
+    cluster inside one is a static thing and is never removed as a person / vehicle."""
+    out = []
+    for p in (analysis or {}).get("primitives", []) or []:
+        if not isinstance(p, dict) or category_of(p):
+            continue
+        if str(p.get("type", "")).lower() in ("building", "window", "ceiling", "rug", "water_plane"):
+            continue
+        try:
+            x, y = float(p.get("x", 0)), float(p.get("y", 0))
+            w, d = float(p.get("w", 0) or 0), float(p.get("d", 0) or 0)
+            rot = math.radians(float(p.get("rot_z_deg", 0) or 0))
+            n = max(1, min(40, int(p.get("repeat", 1) or 1)))
+            dx, dy = float(p.get("repeat_dx", 0) or 0), float(p.get("repeat_dy", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if max(w, d) > 15.0 or max(w, d) <= 0:
+            continue
+        for k in range(n):
+            out.append((x + k * dx, y + k * dy, w / 2, d / 2, rot))
+    return out
+
+
+def in_static_footprint(x: float, y: float, fps, margin: float = 0.8) -> bool:
+    for cx, cy, hw, hd, rot in fps or ():
+        c, s = math.cos(rot), math.sin(rot)
+        lx = (x - cx) * c + (y - cy) * s
+        ly = -(x - cx) * s + (y - cy) * c
+        if abs(lx) <= hw + margin and abs(ly) <= hd + margin:
+            return True
+    return False
 
 
 def negative_text(allow=None) -> str:
