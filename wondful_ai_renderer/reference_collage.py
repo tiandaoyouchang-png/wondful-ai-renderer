@@ -13,8 +13,9 @@ When an image request carries more inputs than the tool accepts, ``fit_inputs`` 
 - environment references never go to the image model (user rule 2026-10-10: environment only as text); when a
   request is over the limit an environment image is taken out instead of merged.
 
-Pure numpy + ``png_io`` (safe on worker threads); JPEG inputs are decoded with Pillow when present, else with
-Blender's ``imbuf`` (no bpy data access).
+Pure numpy + ``png_io`` (safe on worker threads); JPEG inputs are decoded with Pillow when present, else converted
+to a temporary PNG by Blender's ``imbuf`` (only when it really writes PNG; 4.x keeps the loaded JPEG format), macOS
+``sips`` or a background Blender process (no bpy data access on the calling thread).
 """
 from __future__ import annotations
 
@@ -88,8 +89,90 @@ class CollageError(RuntimeError):
 
 # ============================================================================== image helpers
 
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _is_png(path) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(8) == PNG_MAGIC
+    except OSError:
+        return False
+
+
+def _imbuf_to_png(src: str, dst: str) -> bool:
+    """Blender's imbuf: decode anything Blender reads. In 4.x ``imbuf.write`` keeps the LOADED format (a JPEG stays
+    a JPEG whatever the file name; ImBuf has no ``file_type`` there), so the result counts only when it is a PNG."""
+    import imbuf
+    ib = imbuf.load(src)
+    try:
+        try:
+            ib.file_type = "PNG"         # newer Blender
+        except Exception:
+            pass
+        imbuf.write(ib, filepath=dst)
+    finally:
+        try:
+            ib.free()
+        except Exception:
+            pass
+    return _is_png(dst)
+
+
+def _sips_to_png(src: str, dst: str) -> bool:
+    """macOS built-in converter (Mac Blender ships without Pillow)."""
+    import shutil
+    import subprocess
+    import sys
+    if sys.platform != "darwin":
+        return False
+    sips = shutil.which("sips") or "/usr/bin/sips"
+    if not Path(sips).is_file():
+        return False
+    subprocess.run([sips, "-s", "format", "png", src, "--out", dst], capture_output=True, timeout=60)
+    return _is_png(dst)
+
+
+# a loaded JPEG keeps saving as JPEG even with file_format = 'PNG' (Blender 4.3), so the pixels go into a new
+# image that is saved as PNG (byte sRGB → byte sRGB, exact)
+_BLENDER_CONVERT = ("import bpy, sys, numpy as np\n"
+                    "src, dst = sys.argv[sys.argv.index('--') + 1:][:2]\n"
+                    "im = bpy.data.images.load(src)\n"
+                    "w, h = im.size\n"
+                    "px = np.empty(w * h * 4, np.float32)\n"
+                    "im.pixels.foreach_get(px)\n"
+                    "out = bpy.data.images.new('wondful_png', w, h, alpha=True)\n"
+                    "out.pixels.foreach_set(px)\n"
+                    "out.filepath_raw = dst\n"
+                    "out.file_format = 'PNG'\n"
+                    "out.save()\n")
+
+
+def _blender_to_png(src: str, dst: str) -> bool:
+    """Last resort on any OS: a background Blender (the running binary) loads the image and saves it as PNG.
+    A separate process, so it is safe from a worker thread (no bpy data access here)."""
+    import subprocess
+    try:
+        import bpy
+        exe = bpy.app.binary_path
+    except Exception:
+        return False
+    if not exe:
+        return False
+    subprocess.run([exe, "-b", "--factory-startup", "--python-expr", _BLENDER_CONVERT, "--", src, dst],
+                   capture_output=True, timeout=120)
+    return _is_png(dst)
+
+
+# PNG converters tried in order when Pillow is missing (tests replace entries)
+CONVERTERS = [_imbuf_to_png, _sips_to_png, _blender_to_png]
+
+
 def read_rgb(path) -> np.ndarray:
-    """(H, W, 3) uint8 of a PNG / JPEG / WebP, on any thread."""
+    """(H, W, 3) uint8 of a PNG / JPEG / WebP, on any thread.
+
+    PNG → own decoder; else Pillow; without Pillow (Mac Blender) the file is converted to a temporary PNG by
+    imbuf (only when it really writes PNG), macOS ``sips`` or a background Blender, then decoded."""
     p = str(path)
     from .png_io import read_png
     try:
@@ -103,20 +186,22 @@ def read_rgb(path) -> np.ndarray:
             return np.asarray(im.convert("RGB"), dtype=np.uint8).copy()
     except Exception:
         pass
-    try:     # Blender: imbuf decodes JPEG / WebP without touching bpy data
-        import imbuf
-        import tempfile
-        ib = imbuf.load(p)
-        try:
-            ib.file_type = "PNG"
-        except Exception:
-            pass
-        tmp = Path(tempfile.mkdtemp(prefix="wondful_collage_")) / "x.png"
-        imbuf.write(ib, filepath=str(tmp))
-        ib.free()
-        return _flatten(read_png(str(tmp)))
-    except Exception as exc:
-        raise CollageError(f"无法读取参考图 {Path(p).name}：{exc}") from exc
+    import shutil
+    import tempfile
+    tmpd = Path(tempfile.mkdtemp(prefix="wondful_collage_"))
+    errors = []
+    try:
+        for i, conv in enumerate(CONVERTERS):
+            dst = tmpd / f"x{i}.png"
+            try:
+                if conv(p, str(dst)):
+                    return _flatten(read_png(str(dst)))
+                errors.append(f"{getattr(conv, '__name__', conv)}: no PNG")
+            except Exception as exc:
+                errors.append(f"{getattr(conv, '__name__', conv)}: {str(exc)[:60]}")
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+    raise CollageError(f"无法读取参考图 {Path(p).name}：" + "；".join(errors))
 
 
 def _flatten(a) -> np.ndarray:

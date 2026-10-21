@@ -202,6 +202,92 @@ class CollageFit(unittest.TestCase):
         self.assertFalse(info.get("unreadable"))
 
 
+class CollageReadWithoutPillow(unittest.TestCase):
+    """Mac Blender has no Pillow. Blender 4.3 ``imbuf.write`` keeps a loaded JPEG a JPEG (no ``file_type``), so
+    the collage reader must not take that file for a PNG: it falls back to sips / a background Blender."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wondful132p_"))
+        self.jpg = self.tmp / "ref.jpg"
+        self.jpg.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF fake jpeg")
+        self.saved = list(RC.CONVERTERS)
+        self.pil = sys.modules.get("PIL", "absent")
+        sys.modules["PIL"] = None                     # `from PIL import Image` → ImportError
+
+    def tearDown(self):
+        RC.CONVERTERS[:] = self.saved
+        if self.pil == "absent":
+            sys.modules.pop("PIL", None)
+        else:
+            sys.modules["PIL"] = self.pil
+
+    def test_jpeg_bytes_under_png_name_rejected_then_next_converter(self):
+        calls = []
+
+        def imbuf_like(src, dst):           # what 4.3 imbuf.write does: JPEG bytes in x.png
+            calls.append("imbuf")
+            Path(dst).write_bytes(Path(src).read_bytes())
+            return RC._is_png(dst)
+
+        def good(src, dst):
+            calls.append("good")
+            a = np.zeros((10, 20, 3), np.uint8)
+            a[:5] = 255
+            png_io.write_png(dst, a)
+            return RC._is_png(dst)
+        RC.CONVERTERS[:] = [imbuf_like, good]
+        a = RC.read_rgb(self.jpg)
+        self.assertEqual(calls, ["imbuf", "good"])
+        self.assertEqual(a.shape, (10, 20, 3))
+        self.assertEqual(int(a[0, 0, 0]), 255)            # top row stays on top
+        self.assertEqual(int(a[9, 0, 0]), 0)
+
+    def test_all_converters_fail_reports_each(self):
+        RC.CONVERTERS[:] = [lambda s, d: False, lambda s, d: (_ for _ in ()).throw(OSError("boom"))]
+        with self.assertRaises(RC.CollageError) as cm:
+            RC.read_rgb(self.jpg)
+        self.assertIn("ref.jpg", str(cm.exception))
+        self.assertIn("boom", str(cm.exception))
+
+    def test_imbuf_converter_checks_real_png(self):
+        class FakeIB:
+            def free(self):
+                pass
+
+        class FakeImbuf:
+            @staticmethod
+            def load(p):
+                return FakeIB()
+
+            @staticmethod
+            def write(ib, filepath):
+                Path(filepath).write_bytes(b"\xff\xd8\xff\xe0 jpeg")
+        old = sys.modules.get("imbuf")
+        sys.modules["imbuf"] = FakeImbuf
+        try:
+            self.assertFalse(RC._imbuf_to_png(str(self.jpg), str(self.tmp / "o.png")))
+        finally:
+            if old is None:
+                sys.modules.pop("imbuf", None)
+            else:
+                sys.modules["imbuf"] = old
+
+    def test_unreadable_jpeg_goes_to_text_not_crash(self):
+        RC.CONVERTERS[:] = [lambda s, d: False]
+        cam = png(self.tmp / "camera_base.png", 160, 90)
+        others = [png(self.tmp / f"structure_{i}.png", 160, 90) for i in range(4)]
+        out, _n, info = RC.fit_inputs([cam] + others + [str(self.jpg)], 5, out_dir=str(self.tmp),
+                                      roles={str(self.jpg): "detail"})
+        self.assertLessEqual(len(out), 5)
+        self.assertTrue(info.get("unreadable"))
+
+    def test_blender_convert_script_uses_new_png_image(self):
+        self.assertIn("images.new", RC._BLENDER_CONVERT)
+        self.assertIn("'PNG'", RC._BLENDER_CONVERT)
+        self.assertEqual(RC.CONVERTERS[0].__name__, "_imbuf_to_png")
+        self.assertIn(RC._blender_to_png, RC.CONVERTERS)
+
+
 class CodexExecCollage(unittest.TestCase):
     """The PC's 7-input failure was raised by the codex exec path: it now merges instead of stopping."""
 
