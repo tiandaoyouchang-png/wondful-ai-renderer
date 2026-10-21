@@ -587,8 +587,14 @@ def measure(view, prior_t=None, analysis=None, source="master"):
         if b["kind"] == "curb":
             nbz = [bands[j]["z"] for j in (i - 1, i + 1) if 0 <= j < len(bands)]
             dz = b["z"] - (float(np.median(nbz)) if nbz else b["z"])
-            b["height"] = round(float(min(CURB_H_MAX, dz)) if dz > 0.03 else CURB_H, 3)
             b["height_measured"] = bool(dz > 0.03)
+            if b["height_measured"]:
+                b["height"] = round(float(min(CURB_H_MAX, dz)), 3)
+            else:
+                # Color contrast alone cannot establish a raised curb.
+                # Preserve the appearance band, but keep it on the ground plane.
+                b["kind"] = "strip"
+                b["height"] = 0.0
     if not any(b["kind"] in ("curb", "shoulder", "strip") for b in bands):
         return {}
     cam_o = MV._mat(view["cam"])[:3, 3] if view.get("cam") else None
