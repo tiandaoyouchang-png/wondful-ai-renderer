@@ -99,6 +99,47 @@ WONDFUL_STRUCTURE_ENGINE=CYCLES blender -b --factory-startup \
 blender -b --factory-startup --python tools/ui_draw_check.py -- dist/Wondful-AI-Renderer-Blender-<version>.zip
 ```
 
+### UI translations
+
+PR #8 introduced `bpy.app.translations` for step ① only. The later closure of
+issue #4 did not establish full UI coverage. Keep the Chinese source strings and
+the existing registration/unregistration in `__init__.py`; add English entries
+to `i18n.py`. Use Blender's **English** language with **Translate Interface**,
+**Tooltips**, and **Reports** enabled to inspect all three surfaces.
+
+- RNA operator titles use the `Operator` context. Explicit button text, panel
+  titles, property names/descriptions and enum labels use their RNA translation
+  context (normally `*`). Keep both entries when a title is also explicit button text.
+- Translate a formatted UI template **before** `.format(...)`. Translate a
+  disclosure/step title before adding its number or suffix. Translate status text
+  before wrapping or truncating it; a wrapped fragment is no longer a catalog key.
+- Workers and saved settings retain canonical Chinese status text, because stage
+  detection and retry logic inspect those strings. `translate_message()` is a
+  display-only compatibility layer for exact catalog messages, known formatted
+  templates and explicit summary separators/affixes. Numeric field constraints
+  prevent a count from consuming later clauses. Only `_MESSAGE_FIELDS` may
+  recursively localize nested diagnostics; names, paths, IDs and user/model text
+  must stay opaque. Never pass editable prompts or reference notes to this helper.
+- Add regression cases for composed messages and numeric/unit formatting. Extend
+  `tools/check_i18n.py`'s declared display functions when adding a status builder.
+  The audit covers UI/RNA metadata, declared status builders and diagnostic sinks;
+  it is a source contract, not a claim that all strings in the repository are UI.
+- Unknown external CLI/model diagnostics remain verbatim. Other interface
+  languages and disabled translation switches retain source text. Generated
+  descriptions and user-entered data are not automatically translated.
+
+```bash
+python tools/check_i18n.py
+python -m unittest discover -s tests -p 'test_i18n*.py' -v
+blender -b --factory-startup --python-exit-code 1 --python tools/blender_i18n_check.py
+```
+
+The Blender check registers the actual add-on/RNA, verifies catalog lookups,
+operator contexts and language switches, then records displayed text across 70
+English panel scenarios and the comparison panel. This is a **headless** check,
+not a pixel screenshot or proof that every sidebar width is free of truncation.
+For visual QA, use `tools/ui_screenshots.py` with a GUI display.
+
 ## Tools at a glance
 
 | Script | What it does |

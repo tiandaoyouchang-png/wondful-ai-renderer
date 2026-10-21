@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 
 import bpy
+
+from .i18n import translate_message as _message
 from bpy.props import StringProperty
 from bpy.types import Operator
 
@@ -300,7 +302,7 @@ class WONDFUL_OT_update_check(Operator):
 
     def execute(self, context):
         if not start_check(manual=True):
-            self.report({"INFO"}, "正在处理更新，请稍候")
+            self.report({"INFO"}, _message("正在处理更新，请稍候", report=True))
             return {"CANCELLED"}
         if bpy.app.background:
             wait()
@@ -315,7 +317,7 @@ class WONDFUL_OT_update_install(Operator):
     def execute(self, context):
         manifest = STATE.get("manifest")
         if not manifest or busy():
-            self.report({"WARNING"}, "没有可安装的新版本" if not manifest else "正在处理更新，请稍候")
+            self.report({"WARNING"}, _message("没有可安装的新版本" if not manifest else "正在处理更新，请稍候", report=True))
             return {"CANCELLED"}
         start_install(manifest)
         if bpy.app.background:

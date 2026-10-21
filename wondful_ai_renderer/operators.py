@@ -13,6 +13,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, IntPropert
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 
+from .i18n import translate_message as _message
 from .codex_client import (
     pop_model_notice as codex_pop_model_notice,
     set_model_fallbacks as codex_set_model_fallbacks,
@@ -563,11 +564,12 @@ class _BaseAsyncOperator(Operator):
     def poll(cls, context):
         return not _ACTIVE_LOCK.locked()
 
-    def report(self, type, message):
+    def report(self, type, message, *, limit=None):
         # 1.2.2: remember why an operator refused (e.g. a chained, timer-started render), for the panel.
         if "ERROR" in type or "WARNING" in type:
-            _LAST_REPORT[self.bl_idname] = str(message)
-        return super().report(type, message)
+            _LAST_REPORT[self.bl_idname] = str(message)[:limit] if limit else str(message)
+        translated = _message(message, report=True)
+        return super().report(type, translated[:limit] if limit else translated)
 
     def _start_thread(self, context, target):
         if not _ACTIVE_LOCK.acquire(blocking=False):
@@ -926,12 +928,12 @@ class WONDFUL_OT_generate(Operator):
             if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
                 msg = "渲染多个视角需要 Codex 图像编辑直连（高级 › 模型）；或在「渲染视角」里只勾选 1 个。"
                 _status(props, "ERROR", msg)
-                self.report({"ERROR"}, msg)
+                self.report({"ERROR"}, _message(msg, report=True))
                 return False
             if getattr(props, "product_collection", None) is None:
                 msg = "渲染多个视角需要先在 ② 选择产品集合。"
                 _status(props, "ERROR", msg)
-                self.report({"ERROR"}, msg)
+                self.report({"ERROR"}, _message(msg, report=True))
                 return False
         context.scene.camera = views[0]
         if len(views) > 1:
@@ -1113,21 +1115,21 @@ class WONDFUL_OT_block_ref_add(Operator, ImportHelper):
         from . import massing as MS
         block, _coll = _active_block(context)
         if block is None:
-            self.report({"ERROR"}, "请先在环境体块集合里选中一个体块")
+            self.report({"ERROR"}, _message("请先在环境体块集合里选中一个体块", report=True))
             return {"CANCELLED"}
         selected = [str(Path(self.directory) / f.name) for f in self.files if f.name] if self.files else []
         if not selected and self.filepath:
             selected = [self.filepath]
         selected = [p for p in selected if p and Path(bpy.path.abspath(p)).is_file()]
         if not selected:
-            self.report({"WARNING"}, "没有选择图片")
+            self.report({"WARNING"}, _message("没有选择图片", report=True))
             return {"CANCELLED"}
         kept, dropped = MS.merge_refs(MS.get_refs(block), selected, MS.MAX_BLOCK_REFS)
         MS.set_refs(block, kept)
         msg = f"{block.name}：建筑参考 {len(kept)} 张"
         if dropped:
             msg += f"（每个体块最多 {MS.MAX_BLOCK_REFS} 张，{len(dropped)} 张未添加）"
-        self.report({"WARNING" if dropped else "INFO"}, msg)
+        self.report({"WARNING" if dropped else "INFO"}, _message(msg, report=True))
         return {"FINISHED"}
 
 
@@ -1204,14 +1206,14 @@ class WONDFUL_OT_mark_keep_exact(Operator):
         props = context.scene.wondful_ai
         selected, marked = keep_exact_state(context, props)
         if not selected:
-            self.report({"WARNING"}, "先在视图里选中产品里的车牌 / 标识等部件")
+            self.report({"WARNING"}, _message("先在视图里选中产品里的车牌 / 标识等部件", report=True))
             return {"CANCELLED"}
         value = 0 if marked == len(selected) else 1
         for obj in selected:
             obj[KEEP_PROP] = value
         msg = (f"已标为原样保留：{len(selected)} 个部件" if value else f"已取消原样保留：{len(selected)} 个部件")
         props.last_detail_note = msg
-        self.report({"INFO"}, msg)
+        self.report({"INFO"}, _message(msg, report=True))
         return {"FINISHED"}
 
 
@@ -1231,7 +1233,7 @@ class WONDFUL_OT_massing_hull_build(Operator):
             obj, info = massing_hull.build_block(context, props)
         except Exception as exc:
             props.last_hull_note = f"建筑体块生成失败：{exc}"
-            self.report({"ERROR"}, props.last_hull_note[:200])
+            self.report({"ERROR"}, _message(props.last_hull_note, report=True)[:200])
             return {"CANCELLED"}
         props.last_hull_note = massing_hull.summary(info)
         try:
@@ -1241,7 +1243,7 @@ class WONDFUL_OT_massing_hull_build(Operator):
             context.view_layer.objects.active = obj
         except Exception:
             pass
-        self.report({"INFO"}, props.last_hull_note[:200])
+        self.report({"INFO"}, _message(props.last_hull_note, report=True)[:200])
         return {"FINISHED"}
 
 
@@ -1410,7 +1412,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         props.sb_stage = ""
         props.last_sb_note = SP.failure_note(stage, time.time() - sb["t0"], f"{prefix}{exc}")
         _status(props, "ERROR", props.last_sb_note)
-        self.report({"ERROR"}, props.last_sb_note[:200])
+        self.report({"ERROR"}, props.last_sb_note, limit=200)
         _redraw_all()
         return {"CANCELLED"}
 
@@ -1489,7 +1491,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         props.sb_elapsed = int(time.time() - self._sb["t0"])
         props.sb_failed_stage = ""
         _status(props, "IDLE")
-        self.report({"INFO"}, props.last_sb_note[:200])
+        self.report({"INFO"}, props.last_sb_note, limit=200)
         _redraw_all()
         return {"FINISHED"}
 
@@ -1706,10 +1708,10 @@ class WONDFUL_OT_codex_logout(Operator):
         except Exception as exc:
             props.codex_account_state = "ERROR"
             props.codex_account_message = str(exc)
-            self.report({"ERROR"}, str(exc))
+            self.report({"ERROR"}, _message(str(exc), report=True))
             return {"CANCELLED"}
         _apply_account_status(props, status)
-        self.report({"INFO"}, "已退出 Codex ChatGPT 登录。")
+        self.report({"INFO"}, _message("已退出 Codex ChatGPT 登录。", report=True))
         return {"FINISHED"}
 
 
@@ -1848,7 +1850,7 @@ class WONDFUL_OT_antigravity_submit_code(Operator):
                 raise RuntimeError("本次登录已结束，请重新连接。")
             _AGY_AUTH.submit_code(code)
         except Exception as exc:
-            self.report({"ERROR"}, safe_diagnostic(str(exc), [code]))
+            self.report({"ERROR"}, _message(safe_diagnostic(str(exc), [code]), report=True))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -1883,13 +1885,13 @@ class WONDFUL_OT_cancel_task(Operator):
                 if props:
                     props.task_phase = "后台任务正在结束"
                     props.eta_seconds = 0
-                self.report({"INFO"}, "后台任务正在结束，完成后会自动释放。")
+                self.report({"INFO"}, _message("后台任务正在结束，完成后会自动释放。", report=True))
                 return {"FINISHED"}
             if props:
                 _status(props, "IDLE", "当前没有可取消的任务")
                 props.progress = 0.0
                 props.eta_seconds = 0
-        self.report({"INFO"}, "已发送取消请求。")
+        self.report({"INFO"}, _message("已发送取消请求。", report=True))
         return {"FINISHED"}
 
 
@@ -2040,12 +2042,12 @@ class WONDFUL_OT_copy_conversation_id(Operator):
         props = context.scene.wondful_ai
         cid = props.active_conversation_id.strip()
         if not cid:
-            self.report({"WARNING"}, "当前尚无活跃的会话 ID。")
+            self.report({"WARNING"}, _message("当前尚无活跃的会话 ID。", report=True))
             return {"CANCELLED"}
         cmd = f"agy --conversation {cid}"
         from .clipboard_utils import set_clipboard_text
         set_clipboard_text(cmd)
-        self.report({"INFO"}, f"已复制终端恢复命令：{cmd}")
+        self.report({"INFO"}, _message(f"已复制终端恢复命令：{cmd}", report=True))
         return {"FINISHED"}
 
 
@@ -2056,7 +2058,7 @@ class WONDFUL_OT_antigravity_auth_browser(Operator):
     def execute(self, context):
         url = _AGY_AUTH.browser_url() if _AGY_AUTH else ""
         if not url:
-            self.report({"WARNING"}, "当前没有有效登录链接。")
+            self.report({"WARNING"}, _message("当前没有有效登录链接。", report=True))
             return {"CANCELLED"}
         webbrowser.open(url)
         return {"FINISHED"}
@@ -2078,11 +2080,11 @@ class WONDFUL_OT_antigravity_terminal(Operator):
             message = open_antigravity_google_login(cli or "")
             props.antigravity_cli_resolved = cli or ""
         except Exception as exc:
-            self.report({"ERROR"}, safe_diagnostic(str(exc)))
+            self.report({"ERROR"}, _message(safe_diagnostic(str(exc)), report=True))
             return {"CANCELLED"}
         props.antigravity_account_message = message
         _status(props, "IDLE")
-        self.report({"INFO"}, message)
+        self.report({"INFO"}, _message(message, report=True))
         return {"FINISHED"}
 
 
@@ -2110,7 +2112,7 @@ class WONDFUL_OT_copy_diagnostics(Operator):
             "error": safe_diagnostic(props.last_error),
         }
         context.window_manager.clipboard = json.dumps(data, ensure_ascii=False, indent=2)
-        self.report({"INFO"}, "已复制诊断信息（不含授权码或 OAuth 链接）。")
+        self.report({"INFO"}, _message("已复制诊断信息（不含授权码或 OAuth 链接）。", report=True))
         return {"FINISHED"}
 
 
@@ -3757,10 +3759,10 @@ class WONDFUL_OT_choose_output_directory(Operator):
     def execute(self, context):
         path = (self.directory or "").strip()
         if not path:
-            self.report({"WARNING"}, "没有选择输出目录。")
+            self.report({"WARNING"}, _message("没有选择输出目录。", report=True))
             return {"CANCELLED"}
         context.scene.wondful_ai.output_directory = path
-        self.report({"INFO"}, f"当前工程输出目录：{path}")
+        self.report({"INFO"}, _message(f"当前工程输出目录：{path}", report=True))
         return {"FINISHED"}
 
 
@@ -3777,7 +3779,7 @@ class WONDFUL_OT_open_output_directory(Operator):
             directory = resolve_output_directory(context, configured)
             bpy.ops.wm.path_open(filepath=str(directory))
         except Exception as exc:
-            self.report({"ERROR"}, f"无法打开输出目录: {exc}")
+            self.report({"ERROR"}, _message(f"无法打开输出目录: {exc}", report=True))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -3809,7 +3811,7 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
             selected = [self.filepath]
         selected = [p for p in selected if p]
         if not selected:
-            self.report({"WARNING"}, "没有选择参考图。")
+            self.report({"WARNING"}, _message("没有选择参考图。", report=True))
             return {"CANCELLED"}
 
         # STYLE upload means "replace the current style set". In 2.17 this
@@ -3818,28 +3820,28 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
         if self.ref_kind == "STYLE":
             added, failures = _replace_style_set(props, selected)
             if len(selected) > MAX_REFERENCES_PER_KIND:
-                self.report({"WARNING"}, f"风格参考最多 {MAX_REFERENCES_PER_KIND} 张，多余图片未添加。")
+                self.report({"WARNING"}, _message(f"风格参考最多 {MAX_REFERENCES_PER_KIND} 张，多余图片未添加。", report=True))
             elif failures:
-                self.report({"WARNING"}, f"风格已更换 {added} 张，{len(failures)} 张读取失败。")
+                self.report({"WARNING"}, _message(f"风格已更换 {added} 张，{len(failures)} 张读取失败。", report=True))
             elif added:
-                self.report({"INFO"}, f"已更换当前风格参考，共 {added} 张。")
+                self.report({"INFO"}, _message(f"已更换当前风格参考，共 {added} 张。", report=True))
             return {"FINISHED" if added else "CANCELLED"}
 
         if self.ref_kind == "PRODUCT":
             try:
                 _replace_product_reference(props, selected[0])
             except Exception as exc:
-                self.report({"ERROR"}, f"产品参考图读取失败：{exc}")
+                self.report({"ERROR"}, _message(f"产品参考图读取失败：{exc}", report=True))
                 return {"CANCELLED"}
             if len(selected) > 1:
-                self.report({"WARNING"}, "产品造型参考只保留 1 张，已使用第一张。多个角度请拼成一张三视图。")
+                self.report({"WARNING"}, _message("产品造型参考只保留 1 张，已使用第一张。多个角度请拼成一张三视图。", report=True))
             else:
-                self.report({"INFO"}, "已设置产品造型参考。")
+                self.report({"INFO"}, _message("已设置产品造型参考。", report=True))
             return {"FINISHED"}
 
         capacity = MAX_REFERENCES_PER_KIND - len(collection)
         if capacity <= 0:
-            self.report({"WARNING"}, f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。")
+            self.report({"WARNING"}, _message(f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。", report=True))
             return {"CANCELLED"}
 
         added = 0
@@ -3854,11 +3856,11 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
             setattr(props, index_attr, len(collection) - 1)
             _mark_reference_changed(props, self.ref_kind)
         if len(selected) > capacity:
-            self.report({"WARNING"}, f"已达到每类 {MAX_REFERENCES_PER_KIND} 张上限，多余图片未添加。")
+            self.report({"WARNING"}, _message(f"已达到每类 {MAX_REFERENCES_PER_KIND} 张上限，多余图片未添加。", report=True))
         elif failures:
-            self.report({"WARNING"}, f"成功添加 {added} 张，{len(failures)} 张读取失败。")
+            self.report({"WARNING"}, _message(f"成功添加 {added} 张，{len(failures)} 张读取失败。", report=True))
         else:
-            self.report({"INFO"}, f"已添加 {added} 张参考图。")
+            self.report({"INFO"}, _message(f"已添加 {added} 张参考图。", report=True))
         return {"FINISHED" if added else "CANCELLED"}
 
 
@@ -3873,7 +3875,7 @@ class WONDFUL_OT_paste_reference(Operator):
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
         if self.ref_kind not in {"STYLE", "PRODUCT"} and len(collection) >= MAX_REFERENCES_PER_KIND:
-            self.report({"WARNING"}, f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。")
+            self.report({"WARNING"}, _message(f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。", report=True))
             return {"CANCELLED"}
         clipboard_dir = CONFIG_DIR / "clipboard"
         clipboard_dir.mkdir(parents=True, exist_ok=True)
@@ -3890,12 +3892,12 @@ class WONDFUL_OT_paste_reference(Operator):
                 _append_reference_from_path(props, self.ref_kind, path)
                 _mark_reference_changed(props, self.ref_kind)
         except ClipboardImageError as exc:
-            self.report({"WARNING"}, str(exc))
+            self.report({"WARNING"}, _message(str(exc), report=True))
             return {"CANCELLED"}
         except Exception as exc:
-            self.report({"ERROR"}, f"粘贴参考图失败：{exc}")
+            self.report({"ERROR"}, _message(f"粘贴参考图失败：{exc}", report=True))
             return {"CANCELLED"}
-        self.report({"INFO"}, "已从剪贴板添加参考图。")
+        self.report({"INFO"}, _message("已从剪贴板添加参考图。", report=True))
         return {"FINISHED"}
 
 
@@ -3916,7 +3918,7 @@ class WONDFUL_OT_replace_reference(Operator, ImportHelper):
         try:
             image = _load_reference_image(self.filepath)
         except Exception as exc:
-            self.report({"ERROR"}, f"无法读取参考图: {exc}")
+            self.report({"ERROR"}, _message(f"无法读取参考图: {exc}", report=True))
             return {"CANCELLED"}
         collection[idx].image = image
         collection[idx].source_path = str(Path(self.filepath).expanduser())
@@ -3989,7 +3991,7 @@ class WONDFUL_OT_open_prompt_text_editor(Operator):
         try:
             open_prompt_in_area(context)
         except Exception as exc:
-            self.report({"ERROR"}, f"无法展开提示词编辑器：{exc}")
+            self.report({"ERROR"}, _message(f"无法展开提示词编辑器：{exc}", report=True))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -4136,7 +4138,7 @@ class WONDFUL_OT_mv_camera_from_view(Operator):
     def execute(self, context):
         space, rv3d = _mv_find_view3d(context)
         if rv3d is None:
-            self.report({"ERROR"}, "没有找到 3D 视图：请在 3D 视图的侧栏里点这个按钮。")
+            self.report({"ERROR"}, _message("没有找到 3D 视图：请在 3D 视图的侧栏里点这个按钮。", report=True))
             return {"CANCELLED"}
         scene = context.scene
         if rv3d.view_perspective == "CAMERA" and scene.camera is not None and scene.camera.type == "CAMERA":
@@ -4149,9 +4151,9 @@ class WONDFUL_OT_mv_camera_from_view(Operator):
             # the viewport's lens is drawn with a 72 mm-wide frame (Blender's view zoom 2), i.e. half on a 36 mm sensor
             cam = mv_new_view_camera(context, rv3d.view_matrix.inverted(), float(getattr(space, "lens", 50.0)) / 2.0)
         if rv3d.view_perspective == "ORTHO":
-            self.report({"WARNING"}, f"已新建 {cam.name}（视图是正交的，相机按透视处理）")
+            self.report({"WARNING"}, _message(f"已新建 {cam.name}（视图是正交的，相机按透视处理）", report=True))
         else:
-            self.report({"INFO"}, f"已新建 {cam.name} 并加入列表")
+            self.report({"INFO"}, _message(f"已新建 {cam.name} 并加入列表", report=True))
         return {"FINISHED"}
 
 
@@ -4165,15 +4167,15 @@ class WONDFUL_OT_mv_set_master(Operator):
         props = context.scene.wondful_ai
         cam = context.scene.camera
         if cam is None or cam.type != "CAMERA":
-            self.report({"ERROR"}, "场景里没有活动相机。")
+            self.report({"ERROR"}, _message("场景里没有活动相机。", report=True))
             return {"CANCELLED"}
         props.mv_master_camera = cam
         last = (getattr(props, "last_export_path", "") or getattr(props, "last_result_path", "") or "").strip()
         if last and Path(last).is_file():
             props.mv_master_image = last
-            self.report({"INFO"}, f"主视角：{cam.name}（主视角图：{Path(last).name}）")
+            self.report({"INFO"}, _message(f"主视角：{cam.name}（主视角图：{Path(last).name}）", report=True))
         else:
-            self.report({"WARNING"}, f"主视角：{cam.name}；还没有它的渲染结果，请先渲染或在下面选择主视角图。")
+            self.report({"WARNING"}, _message(f"主视角：{cam.name}；还没有它的渲染结果，请先渲染或在下面选择主视角图。", report=True))
         return {"FINISHED"}
 
 
@@ -4560,7 +4562,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             props.view_results = json.dumps(views, ensure_ascii=False)
             props.view_result_index = 0
             _status(props, "SUCCESS" if exported else "ERROR", "" if exported else props.last_mv_note)
-            self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note[:200])
+            self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note, limit=200)
             try:
                 (Path(info["pool"]) / "last_run.json").write_text(
                     json.dumps(dict(summary, exported=exported, plan=info["plan"]), ensure_ascii=False, indent=1,
@@ -4583,5 +4585,5 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         except Exception:
             pass
         _status(props, "IDLE" if exported else "ERROR", "" if exported else props.last_mv_note)
-        self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note[:200])
+        self.report({"INFO"} if exported else {"WARNING"}, props.last_mv_note, limit=200)
         return {"FINISHED"} if exported else {"CANCELLED"}

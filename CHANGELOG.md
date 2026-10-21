@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Extend the English UI beyond PR #8’s connect step to the six-step workflow, advanced settings, properties, tooltips, comparison, update notices and add-on diagnostics. Keep the existing `bpy.app.translations` registration and Chinese source strings.
+- Translate formatted UI templates before interpolation and legacy worker/status messages before wrapping or truncation, while preserving names, paths, editable prompts and canonical pipeline state.
+- Add a CI translation-coverage audit, offline i18n regressions and a Blender translation/RNA/panel-draw check (`tools/blender_i18n_check.py`).
+
 ## 1.2.4 · 一键更新 · ⑥ 渲染视角 · 细节修复 · 六步主流程（2026-10-19）
 
 - 面板整理：主流程改为六步，「从参考图生成场景粗模」提到 ③ 之后成为可选的 ④ 场景粗模；高级 分成 6 组（模型 · 输出 · 产品 · 场景 · 多角度 · 诊断），一次只显示一组；功能、默认值不变
