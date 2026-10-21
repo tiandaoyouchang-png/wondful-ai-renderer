@@ -999,6 +999,13 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
           massing_objects=()):
     """Build (replacing any earlier one) and return an info dict for the panel note / tests."""
     scene = context.scene
+    # 1.2.6 只做场景相关物体: people / other vehicles / animals never become blocks (unless the 一句话需求 asks)
+    from . import static_scene as SS
+    try:
+        allow = SS.wanted(getattr(getattr(scene, "wondful_ai", None), "scene_brief", "") or "")
+    except Exception:
+        allow = SS.allowed()
+    data, dropped = SS.strip_dynamic(data, allow)
     S = SB.normalize(data)
     frame = frame or SB.frame_of(data)
     remove_existing()
@@ -1073,7 +1080,7 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     context.view_layer.update()
     hw = frame[1] / float(frame[0])
     rx, ry = scene.render.resolution_x, scene.render.resolution_y
-    notes = ([moved] if moved else []) + list(b.warn)
+    notes = ([moved] if moved else []) + list(b.warn) + ([SS.dropped_note(dropped)] if dropped else [])
     if set_camera and rx and ry and abs((ry / float(rx)) / hw - 1.0) > 0.05:
         notes.append(f"渲染画幅 {rx}x{ry} 与参考图 {frame[0]}x{frame[1]} 不同，上下取景会有差异")
     c = S["camera"]

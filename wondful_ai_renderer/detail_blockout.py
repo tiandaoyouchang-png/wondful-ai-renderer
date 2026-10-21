@@ -742,6 +742,10 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                                  "xy": [round(float(c0[0]), 2), round(float(c0[1]), 2)]})
             stats["walls"] += 1
             continue
+        dyn = _static_scene().is_dynamic_prop(W, hh)
+        if dyn:                                             # 1.2.6 只做场景相关物体: pedestrians / parked cars
+            stats["dynamic_skipped"] = stats.get("dynamic_skipped", 0) + 1
+            continue
         if 1.4 <= W <= 2.8 and 1.2 <= hh <= 4.0:            # vehicle seen end-on → length assumed
             D = max(Dm, 4.5 if hh < 2.2 else 7.0)
         elif 3.2 <= W <= 6.5 and 1.0 <= hh <= 2.2:          # vehicle side-on
@@ -806,6 +810,25 @@ def build_volumes(P, N, mask, cls, T, cam_h, M, st=2, top_q=20, shrink=0.94, win
                 V, F = cylinder(cxy[0], cxy[1], max(0.12, min(0.35, rx * 0.12)), g0 - 0.2, bot + rz * 0.5, 6)
                 M.add(V, F, C_POLE)
     return stats, thin, Q
+
+
+
+def _static_scene():
+    """1.2.6 只做场景相关物体 helpers (works when this module is loaded by path, as in the tests)."""
+    try:
+        from . import static_scene as SS
+    except ImportError:
+        import importlib.util as _ilu
+        import os as _os
+        import sys as _sys
+        SS = _sys.modules.get("wondful_static_scene")
+        if SS is None:
+            _sp = _ilu.spec_from_file_location("wondful_static_scene",
+                                               _os.path.join(_os.path.dirname(__file__), "static_scene.py"))
+            SS = _ilu.module_from_spec(_sp)
+            _sp.loader.exec_module(SS)
+            _sys.modules["wondful_static_scene"] = SS
+    return SS
 
 
 # ============================================================================== top level

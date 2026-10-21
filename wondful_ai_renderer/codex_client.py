@@ -530,6 +530,8 @@ def generate_image(
     edit_mask_path: str = "",
     structure_control: dict | None = None,
 ) -> dict:
+    from . import static_scene as _SS
+    prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
     from .reference_bundle import check_image_capacity, reference_limit_error, ReferenceLimitError, unique_paths
     session_dir = Path(cwd).resolve()
     target = Path(output_path).resolve()

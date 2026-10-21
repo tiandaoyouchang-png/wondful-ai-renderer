@@ -1382,6 +1382,25 @@ def master_style(img, sky=None, mask=None) -> dict:
             "emissive": round(frac, 4), "colours": colours}
 
 
+
+def _static_scene():
+    """1.2.6 只做场景相关物体 helpers (works when this module is loaded by path, as in the tests)."""
+    try:
+        from . import static_scene as SS
+    except ImportError:
+        import importlib.util as _ilu
+        import os as _os
+        import sys as _sys
+        SS = _sys.modules.get("wondful_static_scene")
+        if SS is None:
+            _sp = _ilu.spec_from_file_location("wondful_static_scene",
+                                               _os.path.join(_os.path.dirname(__file__), "static_scene.py"))
+            SS = _ilu.module_from_spec(_sp)
+            _sp.loader.exec_module(SS)
+            _sys.modules["wondful_static_scene"] = SS
+    return SS
+
+
 def style_lock_text(style, analysis=None, light=None, brief="") -> str:
     """风格与光线锁定 paragraph for every new view (must keep the 主视角's look). Generic: night scenes get the
     light-source / sign lock, day scenes only the time-of-day / colour lock. ``analysis``: the ④ analysis JSON
@@ -1398,6 +1417,10 @@ def style_lock_text(style, analysis=None, light=None, brief="") -> str:
     from .scene_style import analysis_text, art_style, style_phrase
     art = art_style(analysis_text(an), brief)
     lock = str(pal.get("lock_zh") or an.get("environment_zh") or "").strip()
+    try:   # 1.2.6 只做场景相关物体
+        lock = _static_scene().scrub(lock).strip()
+    except Exception:
+        pass
     if night:
         signs = []
         for en, zh in SIGN_WORDS:

@@ -1197,6 +1197,9 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
             if exc.kind == "cancelled" or exc.kind in STOP_KINDS:
                 raise
             env_note = "环境描述失败：" + str(exc)[:160]
+    if env_text:
+        from . import static_scene as _SS0
+        env_text = _SS0.scrub(env_text)       # 1.2.6: the reference's people / traffic are not described
     if exact_prompt:
         text = prompt  # 1.2.0 分层输出: the clean-plate edit sends its own complete instruction
     elif simple:
@@ -1206,6 +1209,10 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                                    style_text=style_text)
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
+    # 1.2.6 只做场景相关物体: every image request (主视角 / 多角度 / 全景 / 细节修复 / 分层输出) forbids pedestrians,
+    # other vehicles and animals unless the 一句话需求 asks for them
+    from . import static_scene as _SS
+    text = _SS.apply(text)
     base = os.environ.get(BASE_URL_ENV, "").strip() or DEFAULT_BASE_URL
     url = base.rstrip("/") + "/responses"
     log = {"tag": tag, "url_host": re.sub(r"^(https?://[^/]+).*$", r"\1", url), "size": size,

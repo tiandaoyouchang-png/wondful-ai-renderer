@@ -202,6 +202,9 @@ PRIMITIVES (max 30, biggest silhouettes first; they sit ON the terrain: z_offset
  for small conifer trees, sphere (small bushes), dome (boulders). repeat>1 = a row of copies stepping by (repeat_dx, repeat_dy).
  Utility poles, posts, lamp posts = shape cylinder, type pole, w = d = 0.15-0.4 m, never boxes or slabs.
  material = what it really is (e.g. "two-storey red-brick industrial hall, arched green-framed windows").
+ MOVING THINGS: people / pedestrians / crowds = type person; other cars, taxis, buses, bicycles, motorbikes = type
+ vehicle; animals = type person with an animal label_zh. The builder never turns these into blocks (only the static scene
+ is rebuilt), so list them only when they matter for the product spot, and never let them displace a static element.
 CLIFFS: a rock face rising near-vertically (steeper than ~60 deg) beside a road, above a beach or over a valley is a cliff entry,
  NOT terrain bumps/ridges and NOT a mountain band. base_points = the foot of the face from near to far (x, y, z = height of the
  foot relative to the camera foot; for a road cut into a cliff = the inner road-edge height, placed exactly along the inner
@@ -222,6 +225,8 @@ PRODUCT_SPOT = where the user's product would naturally stand in this photo, vis
  (0 = along +Y; along the road direction there), on = what surface, reason = one sentence.
 ENVIRONMENT_DESCRIPTION: 3-6 sentences of real materials, architecture/vegetation species, region, season, weather, sky,
  light direction and colour temperature, so a photoreal image can be made from the blockout WITHOUT seeing the photo.
+ Describe only the static scene: never mention people, pedestrians, crowds, traffic, other cars, bicycles or animals
+ (environment_zh and lock_zh too).
 Use real-world scale cues (lane 3.2 m, storey 3 m, car 4.5x1.8x1.5 m, conifer 10-30 m, door 2.1 m, sofa 0.85 m high).
 Before answering, mentally project each element with the camera and check its outline lands where it is in the photo."""
 
@@ -324,10 +329,34 @@ def scene_note(data) -> str:
                             ("植被：" + str(p.get("foliage_words", "")).strip()) if p.get("foliage_words") else "",
                             ("天空：" + str(p.get("sky_words", "")).strip()) if p.get("sky_words") else "") if b]
         lock = "；".join(bits)
+    try:   # 1.2.6 只做场景相关物体: no pedestrians / traffic words reach the image prompt
+        _SS = _static_scene()
+        env, lock = _SS.scrub(env).strip(), _SS.scrub(lock).strip()
+    except Exception:
+        pass
     parts = [x for x in (env[:120], lock[:200]) if x]
     if not parts:
         return ""
     return "场景（按环境参考图分析的季节与色彩，保持一致）：" + "；".join(parts)
+
+
+
+def _static_scene():
+    """1.2.6 只做场景相关物体 helpers (works when this module is loaded by path, as in the tests)."""
+    try:
+        from . import static_scene as SS
+    except ImportError:
+        import importlib.util as _ilu
+        import os as _os
+        import sys as _sys
+        SS = _sys.modules.get("wondful_static_scene")
+        if SS is None:
+            _sp = _ilu.spec_from_file_location("wondful_static_scene",
+                                               _os.path.join(_os.path.dirname(__file__), "static_scene.py"))
+            SS = _ilu.module_from_spec(_sp)
+            _sp.loader.exec_module(SS)
+            _sys.modules["wondful_static_scene"] = SS
+    return SS
 
 
 # ---------------------------------------------------------------------------------------- normalise

@@ -576,6 +576,11 @@ class _BaseAsyncOperator(Operator):
             return False
         global _ACTIVE_OPERATOR
         _ACTIVE_OPERATOR = self
+        try:   # 1.2.6 只做场景相关物体: what this task's 一句话需求 allows (people / vehicles / animals)
+            from . import static_scene as _SS
+            _SS.set_brief(getattr(getattr(context.scene, "wondful_ai", None), "scene_brief", "") or "")
+        except Exception:
+            pass
         from .cli_transport import reset_cancellation
         reset_cancellation()
         self._owns_lock = True
@@ -1515,7 +1520,11 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         coll = getattr(props, "product_collection", None)
         data = dict(data)
         data.setdefault("_frame", {"w": self._sb["frame"][0], "h": self._sb["frame"][1]})
-        self._sb["analysis"] = data          # 1.2.5 场景补全: road direction / lot widths / poles
+        try:   # 1.2.6 只做场景相关物体: the completion stats never see people / other vehicles either
+            from . import static_scene as _SS
+            self._sb["analysis"] = _SS.strip_dynamic(data, _SS.wanted(getattr(props, "scene_brief", "") or ""))[0]
+        except Exception:
+            self._sb["analysis"] = data      # 1.2.5 场景补全: road direction / lot widths / poles
         own = [o for o in MS.massing_objects(parent, coll) if not any(c.get("wondful_scene_blockout") for c in o.users_collection)]
         info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
                          set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)

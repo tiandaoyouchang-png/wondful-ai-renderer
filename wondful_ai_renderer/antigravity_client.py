@@ -608,6 +608,8 @@ def generate_image(
     The CLI agent owns the Google OAuth session. Wondful only stages local images into the
     isolated render workspace and asks the agent to call generate_image with ImagePaths.
     """
+    from . import static_scene as _SS
+    prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
     cli = discover_antigravity_cli(explicit_path)
     if not cli:
         raise AntigravityNotInstalledError("未找到 Antigravity CLI（agy）。请先安装官方 Antigravity CLI。")
