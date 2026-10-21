@@ -15,6 +15,8 @@ from .operators import provider_variant_cap, render_variant_count
 
 # Text built from several parts is not a single key in Blender's translation table,
 # so it is translated here (see i18n.py).
+from .i18n import translate_message as _message
+
 _t = bpy.app.translations.pgettext_iface
 
 
@@ -25,7 +27,7 @@ def _prefs(context):
 def _disclosure(row, props, attr, label, icon="NONE", suffix=""):
     opened = bool(getattr(props, attr))
     row.prop(props, attr, text="", icon="TRIA_DOWN" if opened else "TRIA_RIGHT", emboss=False)
-    row.label(text=f"{label}{suffix}", icon=icon)
+    row.label(text=f"{_t(label)}{suffix}", icon=icon)
     return opened
 
 
@@ -69,7 +71,7 @@ def _draw_prompt_editor(layout, props, columns=36):
             layout.textbox(
                 props, "prompt",
                 initial_visible_lines=max(12, min(30, len(lines))) if expanded else PROMPT_EDITOR_VISIBLE_ROWS,
-                placeholder="输入创意需求，或点击 AI 润色生成完整提示词…",
+                placeholder=_t("输入创意需求，或点击 AI 润色生成完整提示词…"),
             )
             return
         except (TypeError, AttributeError):
@@ -88,7 +90,7 @@ def _draw_prompt_editor(layout, props, columns=36):
         for line in visible:
             preview.label(text=line or " ")
         if len(lines) > len(visible):
-            preview.label(text=f"还有 {len(lines) - len(visible)} 行，" + ("可在完整编辑器中读取" if expanded else "点击展开全文"))
+            preview.label(text=_t('还有 {v0} 行，').format(v0=len(lines) - len(visible)) + (_t("可在完整编辑器中读取") if expanded else _t("点击展开全文")))
     field.operator("wondful.open_prompt_text_editor", text="编辑完整提示词", icon="GREASEPENCIL")
 
 
@@ -97,7 +99,7 @@ def _draw_progress_action(row, props, *, active_status: str, idle_text: str, ico
     if props.status == active_status:
         pct = max(0, min(100, int(round(float(props.progress) * 100))))
         phase = getattr(props, "task_phase", "")
-        text = f"{phase or idle_text} · 估算 {pct}%"
+        text = _t('{v0} · 估算 {v1}%').format(v0=_message(phase or idle_text), v1=pct)
         row.enabled = False
         if hasattr(row, "progress"):
             row.progress(factor=max(0.0, min(1.0, float(props.progress))), text=text, type="BAR")
@@ -106,7 +108,7 @@ def _draw_progress_action(row, props, *, active_status: str, idle_text: str, ico
             row.prop(props, "progress", text=text, slider=True)
         return None
     row.enabled = bool(enabled)
-    return row.operator(operator, text=idle_text, icon=icon)
+    return row.operator(operator, text=_t(idle_text), icon=icon)
 
 
 class WONDFUL_UL_prompt_lines(UIList):
@@ -141,7 +143,7 @@ class WONDFUL_UL_render_views(UIList):
             return
         present = cam.name in scene.objects
         row.alert = not present
-        row.label(text=cam.name if present else f"{cam.name}（不在场景里）", icon="OUTLINER_OB_CAMERA")
+        row.label(text=cam.name if present else _t('{v0}（不在场景里）').format(v0=cam.name), icon="OUTLINER_OB_CAMERA")
         if index == master:
             tag = row.row(align=True)
             tag.alignment = "RIGHT"
@@ -168,7 +170,7 @@ def _draw_render_views(layout, context, props, busy, cells):
     head.label(text="渲染视角", icon="OUTLINER_OB_CAMERA")
     count = head.row(align=True)
     count.alignment = "RIGHT"
-    count.label(text=f"已选 {len(views)} 个" if views else "当前相机")
+    count.label(text=_t('已选 {v0} 个').format(v0=len(views)) if views else "当前相机")
     rows = len(props.mv_cameras)
     if rows:
         body = box.row()
@@ -190,9 +192,9 @@ def _draw_render_views(layout, context, props, busy, cells):
     if not views:
         _hint(box, "从大纲视图把相机拖进来并勾选；不选 = 用当前场景相机", cells)
     elif len(views) == 1:
-        _hint(box, f"只渲染 {views[0].name}（和单视角一样）", cells)
+        _hint(box, _t('只渲染 {v0}（和单视角一样）').format(v0=views[0].name), cells)
     else:
-        _hint(box, f"先渲染主视角 {views[0].name}，其余 {len(views) - 1} 个按场景粗模保持一致", cells)
+        _hint(box, _t('先渲染主视角 {v0}，其余 {v1} 个按场景粗模保持一致').format(v0=views[0].name, v1=len(views) - 1), cells)
     return views
 
 
@@ -216,7 +218,7 @@ def _draw_reference_card(layout, props, item, index, kind):
     if kind == "PRODUCT" and index > 0:
         meta.label(text="未使用（只用第一张）", icon="ERROR")
     else:
-        meta.label(text=primary_text if index == 0 else f"辅助 {index + 1}", icon=icon0 if index == 0 else "IMAGE_DATA")
+        meta.label(text=primary_text if index == 0 else _t('辅助 {v0}').format(v0=index + 1), icon=icon0 if index == 0 else "IMAGE_DATA")
     if item.image:
         name = item.image.name
         meta.label(text=name if len(name) <= 24 else name[:21] + "…")
@@ -385,7 +387,7 @@ def _draw_item_controls(row, item, index, kind, *, movable):
 
 def _draw_instruction(layout, item, placeholder):
     if _supports_placeholder():
-        layout.prop(item, "instruction", text="", icon="GREASEPENCIL", placeholder=placeholder)
+        layout.prop(item, "instruction", text="", icon="GREASEPENCIL", placeholder=_t(placeholder))
     else:
         layout.prop(item, "instruction", text=placeholder)
 
@@ -435,10 +437,10 @@ def _draw_progress_bar(layout, props, text):
     bar = layout.row(align=True)
     factor = max(0.0, min(1.0, float(props.progress)))
     if hasattr(bar, "progress"):
-        bar.progress(factor=factor, text=text, type="BAR")
+        bar.progress(factor=factor, text=_message(text), type="BAR")
     else:
         bar.enabled = False
-        bar.prop(props, "progress", text=text, slider=True)
+        bar.prop(props, "progress", text=_message(text), slider=True)
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +512,7 @@ def _cols(context, depth=2):
 
 def _lines(layout, text, icon, cells, max_lines=3):
     """Draw ``text`` wrapped to ``cells``; the icon only on the first line, the rest aligned under it."""
-    lines = _wrap(text, cells)
+    lines = _wrap(_message(text), cells)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
         last = lines[-1]
@@ -572,19 +574,19 @@ def _draw_task_progress(layout, props, cells):
     if props.status == "BLOCKOUT":
         from . import sb_progress as SP
         stage = getattr(props, "sb_stage", "") or SP.READ
-        text = ("④ 场景粗模" + SEP + "正在取消…" if "取消" in phase
-                else "④ 场景粗模" + SEP + SP.status_text(stage, getattr(props, "sb_elapsed", 0)) + f"{SEP}{pct}%")
+        text = (_t("④ 场景粗模") + SEP + _t("正在取消…") if "取消" in phase
+                else _t("④ 场景粗模") + SEP + SP.status_text(stage, getattr(props, "sb_elapsed", 0)) + f"{SEP}{pct}%")
         _note(layout, text, cells, "run", 1)
         return
     _note(layout, phase or "后台任务进行中", cells, "run", 2)
     bar = layout.column()
     bar.scale_y = 1.4
-    _draw_progress_bar(bar, props, f"估算 {pct}%")
+    _draw_progress_bar(bar, props, _t('估算 {v0}%').format(v0=pct))
 
 
 def _view_phase(index, total, name, master=False):
-    from .multiview import view_phase
-    return view_phase(index, total, name, master)
+    return (_t("视角 {v0}/{v1} · {v2}").format(v0=index, v1=total, v2=name)
+            + (_t("（主视角）") if master else ""))
 
 
 def _draw_view_flip(layout, props):
@@ -601,7 +603,7 @@ def _draw_view_flip(layout, props):
     row.operator("wondful.view_result_step", text="", icon="TRIA_LEFT").step = -1
     mid = row.row(align=True)
     mid.alignment = "CENTER"
-    mid.label(text=_view_phase(i + 1, len(views), views[i].get("camera", ""), bool(views[i].get("master"))))
+    mid.label(text=_message(_view_phase(i + 1, len(views), views[i].get("camera", ""), bool(views[i].get("master")))))
     row.operator("wondful.view_result_step", text="", icon="TRIA_RIGHT").step = 1
 
 
@@ -648,7 +650,7 @@ def _draw_detail_paste(adv, context, props, busy):
                 slots = keep_exact_slots(coll)
                 objs = {o for (o, _i) in slots}
                 auto = {o for (o, _i), k in slots.items() if k == "auto"} - {o for (o, _i), k in slots.items() if k == "explicit"}
-                text = (f"原样保留：{len(objs)} 个部件" + (f"（自动识别 {len(auto)}）" if auto else "")) if objs \
+                text = (_t('原样保留：{v0} 个部件').format(v0=len(objs)) + (_t('（自动识别 {v0}）').format(v0=len(auto)) if auto else "")) if objs \
                     else "原样保留：无 · 可选中车牌 / 标识后标记"
             except Exception:
                 text = "原样保留：—"
@@ -751,7 +753,7 @@ def _draw_massing(adv, context, props, busy):
         coll, blocks = None, []
     if coll is not None:
         how = "已选择" if getattr(props, "massing_collection", None) else "自动识别"
-        _note(box, f"{how}：{coll.name}{SEP}{len(blocks)} 个体块", cells, "ok", 2)
+        _note(box, _t('{v0}：{v1}{v2}{v3} 个体块').format(v0=_message(how), v1=coll.name, v2=SEP, v3=len(blocks)), cells, "ok", 2)
         _hint(box, "白模里显示为灰蓝色，AI 画成真实建筑", cells)
     elif getattr(props, "massing_collection", None) is not None:
         _note(box, "该集合与产品集合重叠，已忽略", cells, "info")
@@ -779,7 +781,7 @@ def _draw_block_refs(box, context, props, busy, blocks):
         _hint(col, "选中一个体块，添加 1–3 张建筑照片 / 效果图 / 草图", cells)
     else:
         refs = MS.get_refs(root)
-        _lines(col, f"当前体块：{root.name}{SEP}{len(refs)}/{MS.MAX_BLOCK_REFS} 张", "OBJECT_DATA", cells, 2)
+        _lines(col, _t('当前体块：{v0}{v1}{v2}/{v3} 张').format(v0=root.name, v1=SEP, v2=len(refs), v3=MS.MAX_BLOCK_REFS), "OBJECT_DATA", cells, 2)
         for index, path in enumerate(refs):
             line = col.row(align=True)
             missing = not Path(bpy.path.abspath(path)).is_file()
@@ -802,8 +804,8 @@ def _draw_block_refs(box, context, props, busy, blocks):
                               icon="IMAGE_REFERENCE" if n else "MESH_CUBE", emboss=(obj == root))
             op.name = obj.name
         if len(blocks) > 8:
-            lst.label(text=f"另有 {len(blocks) - 8} 个体块…", icon="BLANK1")
-    _note(refs_box, f"每次生图最多带 {MS.MAX_BUILDING_IMAGES} 张，画面里大的体块优先", cells, "plain", 2)
+            lst.label(text=_t('另有 {v0} 个体块…').format(v0=len(blocks) - 8), icon="BLANK1")
+    _note(refs_box, _t('每次生图最多带 {v0} 张，画面里大的体块优先').format(v0=MS.MAX_BUILDING_IMAGES), cells, "plain", 2)
 
 
 def _draw_massing_hull(box, props, busy):
@@ -921,13 +923,13 @@ def _draw_sb_progress(layout, props, running, failed, SP):
         for name, icon, active in SP.row_icons(ids, stage, failed):
             cell = stages.row(align=True)
             cell.active = active
-            cell.label(text=name + (SEP + "失败" if icon == "ERROR" else ""), icon=icon)
+            cell.label(text=_t(name) + (SEP + _t("失败") if icon == "ERROR" else ""), icon=icon)
         return
     phase = getattr(props, "task_phase", "") or ""
     if "取消" in phase:
         layout.label(text="正在取消，等待当前请求结束…", icon="TIME")
     else:
-        layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
+        layout.label(text=_message(SP.status_text(stage, elapsed)), icon="TIME")
     tip = SP.hint(stage)
     if tip:
         _hint(layout, tip, _cols(bpy.context, 2))
@@ -935,7 +937,7 @@ def _draw_sb_progress(layout, props, running, failed, SP):
     bar.scale_y = 1.2
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
     i = SP.index(ids, stage)
-    step = f"第 {i + 1}/{len(ids)} 步{SEP}" if i >= 0 and ids else ""
+    step = _t('第 {v0}/{v1} 步{v2}').format(v0=i + 1, v1=len(ids), v2=SEP) if i >= 0 and ids else ""
     _draw_progress_bar(bar, props, f"{step}{pct}%")
 
 
@@ -959,7 +961,7 @@ def _draw_person_refs(adv, context, props, busy):
     else:
         for index, item in enumerate(images):
             _draw_secondary_reference(box, context, item, index, "PERSON",
-                                      caption=f"人物 {index + 1}" + ("（主参考）" if index == 0 else ""),
+                                      caption=_t('人物 {v0}').format(v0=index + 1) + (_t("（主参考）") if index == 0 else ""),
                                       caption_icon="IMAGE_DATA", placeholder="参考什么", movable=True)
     total = len(props.product_images) + len(props.person_images) + len(props.style_images)
     if total > 0 and not busy:
@@ -1004,7 +1006,7 @@ def _draw_multiview(adv, context, props, busy):
     act = box.row(align=True)
     act.scale_y = 1.2
     act.enabled = bool(master is not None and others) and not busy
-    act.operator("wondful.multiview_render", text=f"渲染 {len(others)} 个相机", icon="RENDER_STILL")
+    act.operator("wondful.multiview_render", text=_t('渲染 {v0} 个相机').format(v0=len(others)), icon="RENDER_STILL")
     note = getattr(props, "last_mv_note", "")
     if note:
         _note(box, note, cells, _state(note, fail=("失败", "未完成"), info=("超标", "注意", "生成中")), 5)
@@ -1025,18 +1027,18 @@ def _draw_mv_cameras(box, context, props, busy, picked):
         row = cams.row(align=True)
         n = index + 1
         row.alert = n in picked.get("missing", [])
-        row.label(text=f"相机 {n}")
+        row.label(text=_t('相机 {v0}').format(v0=n))
         row.prop(item, "camera", text="")
         row.prop(item, "enabled", text="启用")
         row.operator("wondful.mv_camera_remove", text="", icon="X").index = index
         if n in why:
-            cams.label(text=f"相机 {n}：{why[n]}", icon="ERROR" if n in picked.get("missing", []) else "INFO")
+            cams.label(text=_t('相机 {v0}：{v1}').format(v0=n, v1=_message(why[n])), icon="ERROR" if n in picked.get("missing", []) else "INFO")
     add = cams.row(align=True)
     add.operator("wondful.mv_camera_add", text="添加相机槽", icon="ADD")
     add.operator("wondful.mv_camera_from_view", text="从当前视图新建相机", icon="VIEW_CAMERA")
     count = len(picked.get("cameras", []))
     if picked.get("source") == "selected":
-        _note(box, f"列表为空：用视图里选中的相机（{count} 个）" + ("，或添加相机槽" if not count else ""),
+        _note(box, _t('列表为空：用视图里选中的相机（{v0} 个）').format(v0=count) + (_t("，或添加相机槽") if not count else ""),
               cells, "ok" if count else "info", 2)
     elif not count:
         _hint(box, "在「相机 N」里选相机并勾选启用", cells)
@@ -1065,7 +1067,7 @@ def _draw_mv_block_name(box, context, props, busy):
         except Exception:
             hint, src = "", ""
         if hint and src != "custom":
-            _note(box, f"自动：{hint}", _cols(context, 2), "plain", 1)
+            _note(box, _t('自动：{v0}').format(v0=hint), _cols(context, 2), "plain", 1)
         elif not hint:
             _note(box, "留空：生图时按尺寸和位置自动命名", _cols(context, 2), "plain", 1)
 
@@ -1084,9 +1086,9 @@ def _draw_update_banner(layout, context):
     cells = _cols(context, 2)
     box = layout.box()
     if phase in ("DOWNLOADING", "VERIFYING", "INSTALLING"):
-        _note(box, f"更新到 {manifest['version']}{SEP}{UO.STATE['message']}", cells, "run", 1)
+        _note(box, _t('更新到 {v0}{v1}{v2}').format(v0=manifest['version'], v1=SEP, v2=_message(UO.STATE['message'])), cells, "run", 1)
         bar = box.column()
-        bar.progress(factor=float(UO.STATE["progress"]), type="BAR", text=UO.STATE["message"])
+        bar.progress(factor=float(UO.STATE["progress"]), type="BAR", text=_message(UO.STATE["message"]))
         return
     if phase == "DONE":
         _note(box, UO.STATE["message"], cells, "ok", 2)
@@ -1099,7 +1101,7 @@ def _draw_update_banner(layout, context):
         row.operator("wondful.update_install", text="重试", icon="FILE_REFRESH")
         row.operator("wondful.update_open_page", text="GitHub 下载", icon="URL")
         return
-    box.label(text=f"发现新版本 {manifest['version']}", icon="INFO")
+    box.label(text=_t('发现新版本 {v0}').format(v0=manifest['version']), icon="INFO")
     if manifest.get("notes"):
         _note(box, manifest["notes"], cells, "plain", 2)
     row = box.row(align=True)
@@ -1112,7 +1114,7 @@ def _draw_update_diag(adv, context, prefs):
     from . import update_ops as UO
     acells = _cols(context, 2)
     box, _head, _on = _section(adv, "更新", "FILE_REFRESH")
-    _note(box, f"当前版本 {UO.local_version()}", acells, "plain", 1)
+    _note(box, _t('当前版本 {v0}').format(v0=UO.local_version()), acells, "plain", 1)
     row = box.row(align=True)
     row.prop(prefs, "auto_check_updates")
     check = row.row(align=True)
@@ -1125,7 +1127,7 @@ def _draw_update_diag(adv, context, prefs):
              "CHECK_FAILED": "fail", "FAILED": "fail", "AVAILABLE": "info"}.get(phase, "ok")
     _note(box, message, acells, state, 4)
     if phase == "AVAILABLE" and UO.STATE.get("manifest"):
-        box.operator("wondful.update_install", text=f"更新到 {UO.STATE['manifest']['version']}", icon="IMPORT")
+        box.operator("wondful.update_install", text=_t('更新到 {v0}').format(v0=UO.STATE['manifest']['version']), icon="IMPORT")
     elif phase in ("CHECK_FAILED", "FAILED"):
         box.operator("wondful.update_open_page", text="GitHub 手动下载", icon="URL")
 
@@ -1246,7 +1248,7 @@ class WONDFUL_PT_main(Panel):
                                             placeholder="造型重点（可选）", movable=False)
                 else:
                     extra = step2.row(align=True)
-                    extra.label(text=f"未使用{SEP}{_short(item.image.name if item.image else '无效图片', 16)}", icon="INFO")
+                    extra.label(text=_t('未使用{v0}{v1}').format(v0=SEP, v1=_short(item.image.name if item.image else '无效图片', 16)), icon="INFO")
                     remove = extra.operator("wondful.clear_reference", text="", icon="X")
                     remove.ref_kind, remove.item_index = "PRODUCT", index
         if not props.product_collection:
@@ -1272,7 +1274,7 @@ class WONDFUL_PT_main(Panel):
                                             placeholder="参考什么（可选）", movable=len(props.style_images) > 1)
                 else:
                     _draw_secondary_reference(step3, context, item, index, "STYLE",
-                                              caption=f"辅助 {index + 1}", caption_icon="IMAGE_DATA",
+                                              caption=_t('辅助 {v0}').format(v0=index + 1), caption_icon="IMAGE_DATA",
                                               placeholder="参考什么", movable=True)
 
         # ---- ④ 场景粗模（可选）--------------------------------------------------
@@ -1281,7 +1283,7 @@ class WONDFUL_PT_main(Panel):
         # ---- ⑤ 提示词 -----------------------------------------------------------
         step4, tools = _step_card(layout, 5, "提示词", done=prompt_ready, ready=connected and product_done)
         _fit(tools, 3)
-        tools.label(text=f"{_prompt_char_count(props.prompt)} 字")
+        tools.label(text=_t('{v0} 字').format(v0=_prompt_char_count(props.prompt)))
         brief = step4.row(align=True)
         brief.scale_y = 1.25
         if _supports_placeholder():
@@ -1336,13 +1338,13 @@ class WONDFUL_PT_main(Panel):
                 icon = "CHECKMARK" if index < current else ("PLAY" if index == current else "RADIOBUT_OFF")
                 cell = stages.row(align=True)
                 cell.active = index <= current
-                cell.label(text=name + (SEP + "进行中" if index == current else ""), icon=icon)
+                cell.label(text=_t(name) + (SEP + _t("进行中") if index == current else ""), icon=icon)
             pct = max(0, min(100, int(round(float(props.progress) * 100))))
             phase = getattr(props, "task_phase", "") or GENERATE_STAGES[max(0, current)]
             _note(step5, phase, cells, "run", 2)
             bar = step5.column()
             bar.scale_y = 1.4
-            _draw_progress_bar(bar, props, f"估算 {pct}%")
+            _draw_progress_bar(bar, props, _t('估算 {v0}%').format(v0=pct))
         else:
             views = []
             if _scene_blockout_exists(context):      # 1.2.3: ④ built a 场景粗模 → choose the views to render
@@ -1352,7 +1354,7 @@ class WONDFUL_PT_main(Panel):
             else:
                 go_text = "生成"
             if len(views) > 1 and not (props.two_step and needs_polish):
-                go_text += f" {len(views)} 个视角"
+                go_text = _t(go_text) + _t(' {v0} 个视角').format(v0=len(views))
             # 1.2.2: images per generation, right above 生成.
             count_row = step5.row(align=True)
             count_row.enabled = not busy
@@ -1360,11 +1362,11 @@ class WONDFUL_PT_main(Panel):
             count_row.prop(props, "render_count", expand=True)
             cap = provider_variant_cap("antigravity" if active_is_antigravity else "codex")
             if int(props.render_count) > cap:
-                _hint(step5, f"Antigravity 每次最多 {cap} 张，将生成 {cap} 张", cells)
+                _hint(step5, _t('Antigravity 每次最多 {v0} 张，将生成 {v1} 张').format(v0=cap, v1=cap), cells)
             go = step5.row(align=True)
             go.scale_y = 2.0
             go.enabled = can_generate
-            go.operator("wondful.generate", text=go_text, icon="RENDER_STILL")
+            go.operator("wondful.generate", text=_t(go_text), icon="RENDER_STILL")
         if busy:
             if props.status not in {"POLISHING", "RENDERING"} and not side_task:
                 _note(step5, getattr(props, "task_phase", "") or "后台任务进行中", cells, "run", 2)
@@ -1398,14 +1400,14 @@ class WONDFUL_PT_main(Panel):
                 score = title.row(align=True)
                 score.alignment = "RIGHT"
                 _fit(score, 3.6)
-                score.label(text=f"对齐 {props.alignment_score:.0f}", icon="CHECKMARK" if ok else "INFO")
+                score.label(text=_t('对齐 {v0}').format(v0=format(props.alignment_score, '.0f')), icon="CHECKMARK" if ok else "INFO")
             _draw_view_flip(result, props)
             _draw_thumbnail(result, props.result_image, _thumb_scale(context, 1.0, hi=18.0))
             exported_count = max(0, int(getattr(props, "variant_count", 0)))
             if props.status == "RENDERING" and props.last_export_path:
-                _note(result, f"已完成 {exported_count}/{provider_variant_count} 张，继续生成中", rcells, "run", 1)
+                _note(result, _t('已完成 {v0}/{v1} 张，继续生成中').format(v0=exported_count, v1=provider_variant_count), rcells, "run", 1)
             elif exported_count > 1:
-                _note(result, f"共 {exported_count} 张，预览为最佳一张", rcells, "plain", 1)
+                _note(result, _t('共 {v0} 张，预览为最佳一张').format(v0=exported_count), rcells, "plain", 1)
             engine_note = getattr(props, "last_engine_note", "")
             if engine_note:
                 _note(result, engine_note, rcells, "info" if "改用" in engine_note else "ok", 2)
@@ -1498,7 +1500,7 @@ class WONDFUL_PT_main(Panel):
             if not (props.output_directory or "").strip():
                 _hint(flow, "留空：存到 .blend 旁的 Wondful_Renders", acells)
             if camera:
-                flow.label(text=f"相机：{camera.name}{SEP}{camera_w} × {camera_h}", icon="CAMERA_DATA")
+                flow.label(text=_t('相机：{v0}{v1}{v2} × {v3}').format(v0=camera.name, v1=SEP, v2=camera_w, v3=camera_h), icon="CAMERA_DATA")
             if not prefs.structure_guides_enabled:
                 _note(flow, "结构控制图已在偏好设置中关闭", acells, "info")
 
@@ -1508,7 +1510,7 @@ class WONDFUL_PT_main(Panel):
                 mode_row.enabled = not busy
                 mode_row.prop(props, "layered_mode", expand=True)
                 full = getattr(props, "layered_mode", "SHADOW") == "FULL"
-                _hint(layers, ("每张约多 30–50 秒" if full else "几秒完成") + SEP + "存到结果图旁（PNG + PSD）", acells)
+                _hint(layers, (_t("每张约多 30–50 秒") if full else _t("几秒完成")) + SEP + _t("存到结果图旁（PNG + PSD）"), acells)
                 if not getattr(props, "product_collection", None):
                     _hint(layers, "需要先在 ② 选择产品集合", acells)
             if getattr(props, "last_layers_note", ""):
@@ -1536,10 +1538,10 @@ class WONDFUL_PT_main(Panel):
             else:
                 info.template_ID_preview(props, "result_image", rows=4, cols=7)
                 if props.last_export_path:
-                    _note(info, f"输出：{props.last_export_path}", acells, "plain", 2)
+                    _note(info, _t('输出：{v0}').format(v0=props.last_export_path), acells, "plain", 2)
                 if props.alignment_attempts:
-                    session = f"{SEP}会话 {props.last_session_id}" if props.last_session_id else ""
-                    _note(info, f"尝试 {props.alignment_attempts} 次{session}", acells, "plain", 1)
+                    session = _t('{v0}会话 {v1}').format(v0=SEP, v1=props.last_session_id) if props.last_session_id else ""
+                    _note(info, _t('尝试 {v0} 次{v1}').format(v0=props.alignment_attempts, v1=_message(session)), acells, "plain", 1)
                 if props.last_canvas_warning:
                     _note(info, props.last_canvas_warning, acells, "info", 3)
                 iou_note = getattr(props, "last_iou_note", "")
@@ -1559,8 +1561,7 @@ class WONDFUL_PT_main(Panel):
                 if getattr(props, "last_engine_note", ""):
                     _note(info, props.last_engine_note, acells, "plain", 2)
                 if props.last_total_seconds > 0:
-                    _note(info, f"总用时 {props.last_total_seconds:.0f} 秒{SEP}生图 {props.last_generation_seconds:.0f} 秒"
-                                f"{SEP}验收 {props.last_audit_seconds:.0f} 秒", acells, "plain", 2)
+                    _note(info, _t('总用时 {v0} 秒{v1}生图 {v2} 秒{v3}验收 {v4} 秒').format(v0=format(props.last_total_seconds, '.0f'), v1=SEP, v2=format(props.last_generation_seconds, '.0f'), v3=SEP, v4=format(props.last_audit_seconds, '.0f')), acells, "plain", 2)
                 if getattr(props, "active_conversation_id", ""):
                     info.operator("wondful.copy_conversation_id", text="复制远程会话恢复命令", icon="COPYDOWN")
 

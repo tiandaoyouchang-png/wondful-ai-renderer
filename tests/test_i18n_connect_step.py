@@ -1,5 +1,6 @@
 """English UI translations for the connect step (source-level checks, no Blender needed)."""
 import importlib.util
+import runpy
 import re
 import unittest
 from pathlib import Path
@@ -34,9 +35,12 @@ class ConnectStepTranslationTests(unittest.TestCase):
 
     def test_every_msgid_appears_in_the_add_on_source(self):
         # Keys must match the literal strings in the code exactly, or Blender never looks them up.
-        combined = "\n".join(self.sources.values())
+        checks = runpy.run_path(str(PKG.parent / "tools" / "check_i18n.py"))
+        messages = checks["source_messages"]()
+        # This legacy status is composed from the view template + the main-view tag.
+        messages.add("视角 {v0}/{v1} · {v2}" + "（主视角）")
         for (_context, msgid) in self.entries:
-            self.assertIn(msgid, combined, f"no source string for translation key: {msgid}")
+            self.assertIn(msgid, messages, f"no source string for translation key: {msgid}")
 
     def test_composed_titles_and_formatted_text_are_translated_explicitly(self):
         ui = self.sources["ui.py"]

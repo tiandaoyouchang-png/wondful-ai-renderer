@@ -3,6 +3,10 @@
 import time
 
 import bpy
+
+from .i18n import translate_message as _message
+
+_t = bpy.app.translations.pgettext_iface
 from bpy.props import FloatProperty
 from bpy.types import Operator, Panel
 
@@ -42,11 +46,11 @@ def _image_rgba(image):
 
     w, h = int(image.size[0]), int(image.size[1])
     if w <= 0 or h <= 0:
-        raise RuntimeError(f"图片 {image.name} 尚未加载完成。")
+        raise RuntimeError(_t('图片 {v0} 尚未加载完成。').format(v0=image.name))
     data = np.asarray(image.pixels[:], dtype=np.float32)
     expected = w * h * 4
     if data.size != expected:
-        raise RuntimeError(f"图片 {image.name} 像素数据异常。")
+        raise RuntimeError(_t('图片 {v0} 像素数据异常。').format(v0=image.name))
     return data.reshape((h, w, 4))
 
 
@@ -273,7 +277,7 @@ def _duplicate_workspace_safely(context, source_workspace):
         with bpy.context.temp_override(window=window, screen=window.screen):
             bpy.ops.workspace.duplicate()
     except Exception as exc:
-        raise RuntimeError(f"无法创建 {COMPARE_WORKSPACE_NAME} 工作区: {exc}") from exc
+        raise RuntimeError(_t('无法创建 {v0} 工作区: {v1}').format(v0=COMPARE_WORKSPACE_NAME, v1=exc)) from exc
 
     created = [ws for ws in bpy.data.workspaces if _workspace_id(ws) not in before]
     if not created:
@@ -365,18 +369,18 @@ class WONDFUL_OT_open_compare_workspace(Operator):
     def execute(self, context):
         props = context.scene.wondful_ai
         if not props.viewport_image or not props.result_image:
-            self.report({"ERROR"}, "当前 Render Session 没有同时包含 Camera Reference 和 AI Render。")
+            self.report({"ERROR"}, _message("当前 Render Session 没有同时包含 Camera Reference 和 AI Render。", report=True))
             return {"CANCELLED"}
         try:
             window, area, region = _ensure_compare_workspace(context)
             started = _start_drag_modal(window, area, region)
         except Exception as exc:
-            self.report({"ERROR"}, str(exc))
+            self.report({"ERROR"}, _message(str(exc), report=True))
             return {"CANCELLED"}
         if started:
-            self.report({"INFO"}, "已进入 Wondful Compare。直接在图片上按住左键左右拖动分割线。")
+            self.report({"INFO"}, _message("已进入 Wondful Compare。直接在图片上按住左键左右拖动分割线。", report=True))
         else:
-            self.report({"INFO"}, "已进入 Wondful Compare。鼠标拖动未自动启动，可用右侧分割位置滑块或“启用鼠标拖动”。")
+            self.report({"INFO"}, _message("已进入 Wondful Compare。鼠标拖动未自动启动，可用右侧分割位置滑块或“启用鼠标拖动”。", report=True))
         return {"FINISHED"}
 
 
@@ -392,7 +396,7 @@ class WONDFUL_OT_leave_compare_workspace(Operator):
         if target is None:
             target = next((w for w in bpy.data.workspaces if not _is_owned_compare_workspace(w)), None)
         if target is None:
-            self.report({"WARNING"}, "没有找到可返回的工作区。")
+            self.report({"WARNING"}, _message("没有找到可返回的工作区。", report=True))
             return {"CANCELLED"}
         context.window.workspace = target
         return {"FINISHED"}
@@ -410,7 +414,7 @@ class WONDFUL_OT_compare_refresh(Operator):
                 region = next((r for r in context.area.regions if r.type == "WINDOW"), None)
                 _fit_image_view(context.window, context.area, region)
         except Exception as exc:
-            self.report({"ERROR"}, str(exc))
+            self.report({"ERROR"}, _message(str(exc), report=True))
             return {"CANCELLED"}
         return {"FINISHED"}
 
@@ -440,17 +444,17 @@ class WONDFUL_OT_compare_modal(Operator):
         global _ACTIVE_COMPARE_OPERATOR
         props = context.scene.wondful_ai
         if not props.viewport_image or not props.result_image:
-            self.report({"ERROR"}, "没有可对比的 Camera Reference 和 AI Render。")
+            self.report({"ERROR"}, _message("没有可对比的 Camera Reference 和 AI Render。", report=True))
             return {"CANCELLED"}
         if context.area.type != "IMAGE_EDITOR":
-            self.report({"ERROR"}, "请在 Wondful Compare 的 Image Editor 中启用鼠标拖动。")
+            self.report({"ERROR"}, _message("请在 Wondful Compare 的 Image Editor 中启用鼠标拖动。", report=True))
             return {"CANCELLED"}
         if props.compare_mode != "SPLIT":
             props.compare_mode = "SPLIT"
 
         region = next((r for r in context.area.regions if r.type == "WINDOW"), None)
         if region is None:
-            self.report({"ERROR"}, "Image Editor 没有 WINDOW 区域。")
+            self.report({"ERROR"}, _message("Image Editor 没有 WINDOW 区域。", report=True))
             return {"CANCELLED"}
 
         if _ACTIVE_COMPARE_OPERATOR is not None and _ACTIVE_COMPARE_OPERATOR is not self:
@@ -466,7 +470,7 @@ class WONDFUL_OT_compare_modal(Operator):
         props.compare_drag_active = True
         _fit_image_view(context.window, self._area, self._window_region)
         context.window_manager.modal_handler_add(self)
-        self.report({"INFO"}, "鼠标拖动已开启：直接在图片内按住左键左右拖动，Esc 结束。")
+        self.report({"INFO"}, _message("鼠标拖动已开启：直接在图片内按住左键左右拖动，Esc 结束。", report=True))
         return {"RUNNING_MODAL"}
 
     def _mouse_factor(self, event, allow_outside=False):
@@ -600,12 +604,12 @@ class WONDFUL_PT_compare_workspace(Panel):
         if props.alignment_score >= 0:
             threshold = context.preferences.addons[__package__].preferences.alignment_threshold
             icon = "CHECKMARK" if props.alignment_score >= threshold else "ERROR"
-            align.label(text=f"构图评分  {props.alignment_score:.0f} / 100", icon=icon)
+            align.label(text=_t('构图评分  {v0} / 100').format(v0=format(props.alignment_score, '.0f')), icon=icon)
             if props.alignment_attempts:
-                align.label(text=f"生成尝试  {props.alignment_attempts} 次")
+                align.label(text=_t('生成尝试  {v0} 次').format(v0=props.alignment_attempts))
         else:
             align.label(text="尚未获得对齐评分", icon="INFO")
         if props.alignment_message:
-            align.label(text=props.alignment_message[:100])
+            align.label(text=_message(props.alignment_message)[:100])
 
         layout.operator("wondful.leave_compare_workspace", text="返回原工作区", icon="TRIA_LEFT")
