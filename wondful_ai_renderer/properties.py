@@ -991,6 +991,11 @@ class WONDFUL_AISettings(PropertyGroup):
     sb_lod_bands: BoolProperty(name="近密远疏", default=True,
                                description="细节粗模和场景补全按到产品的距离分带：近处实测表皮更细、窗户优先给近处；"
                                            "远处房屋合并成大块、不加窗和门前树篱、路沿分段更长（远山不变）")
+    # 1.2.8 地面分带 (PC feedback 2026-10-21: the 216° ground lost the 主视角's curb / bands)
+    sb_ground_bands: BoolProperty(name="地面分带", default=True,
+                                  description="多角度场景一致：从主视角图和实测深度量出地面分带（路面、路沿、路肩 / 砂石，宽度、走向、"
+                                              "高差），在场景粗模里临时搭成分带几何并沿道路延伸；主视角没拍到的地面按各自分带铺主视角取样的"
+                                              "纹理；每个视角的提示词按分带描述地面。主视角一次出多张时每张都拿到同样的分带说明")
     sb_seam_blend: BoolProperty(name="接缝过渡", default=True,
                                 description="多角度投影时，补全填色和主视角投影之间留重叠带：填色按相邻照片调色并交叉过渡；"
                                             "紧挨实测房屋的推测房屋沿用它的檐口高度和退线再渐变到街道节奏")

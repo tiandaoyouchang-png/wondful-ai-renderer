@@ -1751,9 +1751,12 @@ def _tone(rgb) -> str:
     return light + hue
 
 
-def ground_lock_text(analysis=None, ground=None) -> str:
+def ground_lock_text(analysis=None, ground=None, bands=None) -> str:
     """One must-keep line for every 多角度 view: the 主视角 ground material (④ analysis words + the measured
-    colour of the 主视角's ground), dry unless the 主视角 is wet, no new road surface unless one is there."""
+    colour of the 主视角's ground), dry unless the 主视角 is wet, no new road surface unless one is there.
+    ``bands`` (1.2.8 地面分带): (zh, en) from ``ground_bands.lock_addition`` — the measured bands and where they run
+    in this view, merged into the same line."""
+    bz, be = (tuple(bands) + ("", ""))[:2] if bands else ("", "")
     an = analysis or {}
     pal = an.get("palette") or {}
     words = str(pal.get("ground_words") or "").strip()
@@ -1763,7 +1766,7 @@ def ground_lock_text(analysis=None, ground=None) -> str:
     all_words = " ".join((words, surf, road_words, str(an.get("environment_description") or ""),
                           str(pal.get("lock_zh") or "")))
     g = ground or {}
-    if not (words or surf or g):
+    if not (words or surf or g or bz):
         return ""
     desc = words or surf
     if desc and len(desc) > 160:
@@ -1773,6 +1776,8 @@ def ground_lock_text(analysis=None, ground=None) -> str:
         bits[0] += f"：{desc}"
     if g.get("hex"):
         bits.append(f"主视角地面实测颜色约 {g['hex']}（{_tone(g['rgb'])}），新视角的地面延续这个颜色和颗粒质感")
+    if bz:
+        bits.append(bz)
     if not _WET.search(all_words):
         bits.append("地面保持干燥：不要变湿，不要出现积水、水渍、湿润反光或镜面倒影")
     if not _PAVED.search(all_words):
@@ -1784,7 +1789,7 @@ def ground_lock_text(analysis=None, ground=None) -> str:
         en += "; keep it dry — no wet surface, puddles or mirror reflections"
     if not _PAVED.search(all_words):
         en += "; do not turn it into asphalt or any paved road"
-    return "；".join(bits) + "。\n" + en + "."
+    return "；".join(bits) + "。\n" + en + "." + (("\n" + be) if be else "")
 
 
 def view_text(massing_text, light_line, source_names, fill_line="", style_line="", ground_line="") -> str:

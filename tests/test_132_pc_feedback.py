@@ -421,8 +421,10 @@ class GroundLock(unittest.TestCase):
         t = MV.view_text("体块", "光", ["主视角"], ground_line="【地面锁定】x")
         self.assertIn("【地面锁定】x", t)
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
-        self.assertIn("MV.ground_lock_text(sb_analysis, MV.master_ground(master_view))", ops)
-        self.assertIn("ground_line=ground_line)", ops)
+        # 1.2.8: the measured 主视角 ground (mground) feeds the lock; each view merges its 地面分带 into it
+        self.assertIn("mground = MV.master_ground(master_view)", ops)
+        self.assertIn("ground_line = MV.ground_lock_text(sb_analysis, mground)", ops)
+        self.assertIn("ground_line=view_ground)", ops)
 
     def test_master_ground_colour(self):
         H, W = 40, 60

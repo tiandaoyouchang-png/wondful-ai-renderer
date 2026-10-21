@@ -101,6 +101,35 @@ def cancel_auth_session(*, detach=False, context=None):
 
 
 
+def _mv_analysis(massing_coll, coll) -> dict:
+    """The ④ analysis the blockout was built from ({} for a hand-made massing collection)."""
+    try:
+        from . import massing as _MS
+        if massing_coll is None or not _MS.blockout_kind(_MS.massing_objects(massing_coll, coll)):
+            return {}
+        txt = bpy.data.texts.get(_MS.SB_TEXT)
+        return json.loads(txt.as_string()) if txt is not None else {}
+    except Exception:
+        return {}
+
+
+def _sb_ground_band_line(context, props) -> str:
+    """1.2.8 地面分带 line of the ④ analysis for the 主视角 request ("" when off / no blockout / no bands)."""
+    if not bool(getattr(props, "sb_ground_bands", True)):
+        return ""
+    try:
+        from .massing import SB_TEXT as _SB_TEXT
+        from .multiview import scene_blockout_exists as _sb_exists
+        from .ground_bands import analysis_bands_text
+        txt = bpy.data.texts.get(_SB_TEXT)
+        if txt is None or not _sb_exists(context.scene):
+            return ""
+        return analysis_bands_text(json.loads(txt.as_string()))
+    except Exception as exc:
+        print(f"[Wondful] 地面分带（分析）读取失败：{exc}")
+        return ""
+
+
 def _addon_prefs(context):
     return context.preferences.addons[__package__].preferences
 
@@ -3128,6 +3157,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             identity_items=identity_items,
         )
         render_prompt = prompt_profiles.render_brief(render_prompt, provider["id"])
+        # 1.2.8 地面分带: the ④ analysis' ground bands go into the request itself, so every image of a 张数 > 1
+        # request (direct or codex exec) is told the same road / curb / shoulder banding
+        sb_band_line = _sb_ground_band_line(context, props)
+        if sb_band_line and sb_band_line not in render_prompt:
+            render_prompt = render_prompt.rstrip() + "\n" + sb_band_line + "\n"
         structure_refs = list(structure.get("generation_reference_paths", [])) if structure.get("enabled") else []
         camera_base = str(structure.get("camera_base_path") or self._session.viewport_reference)
         # Two free slots are needed if a later strict repair adds a candidate and
@@ -3268,7 +3302,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or "")
                 except Exception as exc:
                     print(f"[Wondful] 风格锁定读取失败：{exc}")
+            if sb_band_line and sb_band_line not in direct_style_text:     # 1.2.8 地面分带 (simple path prompt)
+                direct_style_text = (direct_style_text + "\n" + sb_band_line).strip()
             direct_state["style_lock"] = direct_style_text[:200]
+            direct_state["ground_bands"] = bool(sb_band_line)
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
             direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
                                              for r in direct_building_refs]
@@ -4518,6 +4555,11 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             completion = _DBc.completion_layout()
         except Exception as exc:
             print(f"[Wondful] 多角度场景一致：读取场景补全失败：{exc}")
+        # 1.2.8 地面分带: measured from the 主视角 image + its position pass right after the master pass, built into the
+        # 场景粗模 (temporary, removed with the other 多角度补充 geometry) before the other cameras' passes
+        bands_on = bool(getattr(props, "sb_ground_bands", True))
+        bands_info = {}
+        bands_note = ""
         try:
             if bool(getattr(props, "mv_widen", True)) and massing_coll is not None:
                 try:
@@ -4576,6 +4618,25 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                                    "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
                 if cam.name in occlusion:
                     views[cam.name]["occlusion"] = occlusion[cam.name]
+                if cam == master and bands_on and others:
+                    try:
+                        from . import ground_bands as GB
+                        bands_info = GB.measure_master(master_img, pool, pre, rec, W, H, ww, wh,
+                                                       product_box=MV.product_bounds(coll) if coll is not None else None,
+                                                       completion=completion, analysis=_mv_analysis(massing_coll, coll))
+                        if bands_info:
+                            cam_xy = [tuple(o.matrix_world.translation)[:2] for o in [master] + others]
+                            got = GB.build_geometry(context, massing_coll, bands_info, cam_xy)
+                            made.extend(got)
+                            context.view_layer.update()
+                            bands_info["geometry"] = sum(1 for b in got if isinstance(b, bpy.types.Object))
+                            bands_note = GB.summary(bands_info)
+                            print(f"[Wondful] 多角度场景一致：{bands_note}")
+                        else:
+                            print("[Wondful] 多角度场景一致：主视角地面没有明显分带（沿用整体地面锁定）")
+                    except Exception as exc:
+                        bands_info = {}
+                        print(f"[Wondful] 多角度场景一致：地面分带测量失败：{exc}")
         except Exception as exc:
             self.report({"ERROR"}, f"多角度场景一致准备失败：{exc}")
             props.last_mv_note = f"多角度场景一致准备失败：{exc}"
@@ -4661,6 +4722,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
                     "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name,
+                    "ground_bands": bands_note,
                     "plan": plan, "no_product": no_product}
         self._phase = f"多角度场景一致 · 视角 2/{len(others) + 1}：准备完成" if plan else "多角度场景一致：准备完成"
         self._estimated_total = 15.0 + 80.0 * len(others)
@@ -4724,10 +4786,24 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 print(f"[Wondful] 多角度场景一致：主视角风格读取失败：{exc}")
             night = bool(style.get("night"))
             ground_line = ""
+            mground = {}
             try:     # 1.2.7 地面锁定: the 主视角's ground material / colour goes into every view's prompt
-                ground_line = MV.ground_lock_text(sb_analysis, MV.master_ground(master_view))
+                mground = MV.master_ground(master_view)
+                ground_line = MV.ground_lock_text(sb_analysis, mground)
             except Exception as exc:
                 print(f"[Wondful] 多角度场景一致：地面锁定读取失败：{exc}")
+            band_sy = None
+            band_dry = True
+            if bands_info:      # 1.2.8 地面分带: one texture per band, rectified from the 主视角
+                try:
+                    from . import ground_bands as GB
+                    band_sy = GB.band_synths(GB.band_patches(master_view, bands_info))
+                    band_dry = not MV._WET.search(json.dumps(sb_analysis, ensure_ascii=False) if sb_analysis else "")
+                    (pool / "ground_bands.json").write_text(json.dumps(bands_info, ensure_ascii=False, indent=1,
+                                                                       default=float), encoding="utf-8")
+                except Exception as exc:
+                    print(f"[Wondful] 多角度场景一致：地面分带取样失败：{exc}")
+                    band_sy = None
             patches = None
             fill_words = ""
             if completion:
@@ -4772,24 +4848,55 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 mfull = (mfull[..., 3] if mfull.shape[-1] == 4 else mfull[..., 0]) / 255.0
                 env, cover, _srcmap, st = MV.build_base(vk, sources, resize(clay_full, ww, wh))
                 fill_line = ""
+                fimg = have = cmap = band_bi = None
                 if patches is not None:      # 1.2.5 场景补全: uncovered pixels take a master style patch
                     try:
                         cmap, sty = MV.class_map(vk, completion)
                         fimg, have = MV.style_fill(vk, cmap, sty, patches, completion)
-                        env, cover, filled = MV.apply_fill(env, cover, fimg, have, cls=cmap,
-                                                           seam=seam_on)
+                    except Exception as exc:
+                        fimg = have = cmap = None
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 补全填色失败：{exc}")
+                if band_sy:                  # 1.2.8 地面分带: uncovered ground takes its own band's texture
+                    try:
+                        from . import ground_bands as GB
+                        fimg, have, cmap, band_bi = GB.band_fill(vk, bands_info, band_sy, fimg, have, cmap)
+                    except Exception as exc:
+                        band_bi = None
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 地面分带填色失败：{exc}")
+                if have is not None:
+                    try:
+                        env, cover, filled = MV.apply_fill(env, cover, fimg, have, cls=cmap, seam=seam_on)
                         envm = np.asarray(vk["mask"]) < 0.5
                         st["fill"] = round(float((filled & envm).sum()) / max(1, int(envm.sum())), 3)
-                        fill_line = MV.fill_note(cmap, filled & envm, fill_words)
+                        if patches is not None:
+                            fill_line = MV.fill_note(cmap, filled & envm, fill_words)
+                        if band_bi is not None:
+                            from . import ground_bands as GB
+                            bshare = float((filled & envm & (band_bi >= 0)).sum()) / max(1, int(envm.sum()))
+                            st["band_fill"] = round(bshare, 3)
+                            bnote = GB.fill_note(bshare)
+                            if bnote:
+                                fill_line = (fill_line + "\n" + bnote) if fill_line else bnote
                     except Exception as exc:
                         print(f"[Wondful] 多角度场景一致：{rec['name']} 补全填色失败：{exc}")
+                view_ground = ground_line
+                if bands_info:
+                    try:
+                        from . import ground_bands as GB
+                        bstats = GB.view_stats(vk, bands_info, band_bi)
+                        view_ground = MV.ground_lock_text(sb_analysis, mground,
+                                                          bands=GB.lock_addition(bands_info, bstats, dry=band_dry))
+                        res["ground_bands"] = {"bands": [b.get("zh") for b in bands_info.get("bands", [])],
+                                               "stats": bstats, "fill": st.get("band_fill", 0.0)}
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 地面分带描述失败：{exc}")
                 st["hop"] = MV.view_hop(st, sources)
                 base = pre + "_base.png"
                 write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
                 res["projection"] = st
                 text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec, outdoor=outdoor),
                                     [s["name"] for s in sources], fill_line=fill_line, style_line=style_line,
-                                    ground_line=ground_line)
+                                    ground_line=view_ground)
                 res["prompt_interior"] = "室内物体" in text
                 res["style"] = {"night": night, "colours": style.get("colours", []), "emissive": style.get("emissive")}
                 Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
@@ -4953,6 +5060,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 if ((r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25) and not r.get("skipped_occluded")]
         if warn:
             notes.append("注意：产品前方有遮挡物（" + "、".join(warn) + "），可移动相机")
+        if info.get("ground_bands"):
+            notes.append(info["ground_bands"])
         if info.get("no_product"):
             notes.append("纯场景（未选产品集合）：已跳过产品验收")
         if info.get("skipped"):

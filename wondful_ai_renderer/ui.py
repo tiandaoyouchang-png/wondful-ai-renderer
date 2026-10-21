@@ -1051,6 +1051,7 @@ def _draw_multiview(adv, context, props, busy):
     row.prop(props, "sb_free_space", text="空间三态")
     row.prop(props, "sb_lod_bands", text="近密远疏")
     row.prop(props, "sb_seam_blend", text="接缝过渡")
+    row.prop(props, "sb_ground_bands", text="地面分带")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:
