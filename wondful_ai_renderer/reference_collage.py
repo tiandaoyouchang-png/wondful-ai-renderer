@@ -6,7 +6,7 @@ When an image request carries more inputs than the tool accepts, ``fit_inputs`` 
 - the camera base (the image being edited), an edit base and an edit mask always stay standalone, never merged;
 - the other inputs (product three-view, structure control maps, building references, detail crops …) are merged
   by priority into labelled sheets: each cell keeps its original aspect (no crop), a letter (A, B, C …) sits in
-  the cell's top-left corner, and the prompt note says what every letter is; a sheet's long edge never exceeds
+  a label strip above the cell (never on the image itself), and the prompt note says what every letter is; a sheet's long edge never exceeds
   the request size;
 - only when the sheets still cannot fit (more than ``MAX_CELLS`` per sheet would be needed) inputs fall back to a
   text line, by priority: detail crops first, then structure maps;
@@ -154,7 +154,7 @@ def resize(img: np.ndarray, w: int, h: int) -> np.ndarray:
 
 
 def draw_letter(sheet: np.ndarray, x: int, y: int, letter: str, scale: int) -> None:
-    """White letter on a black tab at (x, y) (cell's top-left corner), in place."""
+    """White letter on a black tab at (x, y) (in the label strip above a cell), in place."""
     glyph = _GLYPHS.get(letter.upper())
     if glyph is None:
         return
@@ -173,52 +173,75 @@ def letter_name(i: int) -> str:
     return LETTERS[i] if i < len(LETTERS) else LETTERS[i % len(LETTERS)] + str(i // len(LETTERS) + 1)
 
 
-def layout(sizes, long_edge=SHEET_LONG_EDGE):
-    """Grid for cells of ``sizes`` [(w, h)]: (sheet_w, sheet_h, [(x, y, w, h) per cell]); long edge ≤ long_edge,
-    every image scaled to fit its cell with its own aspect (no crop)."""
+def label_scale(long_edge=SHEET_LONG_EDGE) -> int:
+    """Glyph pixel size of the letter tabs (one size per sheet)."""
+    return int(np.clip(int(long_edge) // 320, 3, 8))
+
+
+def label_height(long_edge=SHEET_LONG_EDGE) -> int:
+    """Height of the label strip above every row of cells (tab + 4 px air)."""
+    sc = label_scale(long_edge)
+    return 7 * sc + 2 * max(2, sc) + 4
+
+
+def _layout(sizes, long_edge=SHEET_LONG_EDGE):
+    """Full grid: (sheet_w, sheet_h, cells [(x, y, w, h)], tabs [(x, y)]). Every row has a label strip ABOVE its
+    cells (user 2026-10-21: a nested structure sheet's own R numbers were hidden under the B tab), so a tab
+    never covers any pixel of the image it names."""
     n = len(sizes)
     if n == 0:
         raise CollageError("empty sheet")
+    LB = label_height(long_edge)
+    ar = float(np.median([w / max(1, h) for w, h in sizes]))
     best = None
     for cols in range(1, n + 1):
         rows = int(math.ceil(n / cols))
         # cell aspect = median image aspect → square-ish sheets for landscape inputs
-        ar = float(np.median([w / max(1, h) for w, h in sizes]))
-        sw, sh = cols * ar, rows * 1.0
-        scale = (long_edge - GAP * (max(cols, rows) + 1)) / max(sw, sh)
-        cw, ch = sw / cols * scale, sh / rows * scale
+        avail_w = long_edge - GAP * (cols + 1)
+        avail_h = long_edge - GAP * (rows + 1) - rows * LB
+        if avail_w <= 0 or avail_h <= 0:
+            continue
+        scale = min(avail_w / (cols * ar), avail_h / rows)
+        cw, ch = ar * scale, 1.0 * scale
         # area each image actually gets inside its cell
         used = sum(min(cw / w, ch / h) ** 2 * w * h for w, h in sizes)
         if best is None or used > best[0]:
             best = (used, cols, rows, cw, ch)
+    if best is None:
+        raise CollageError("sheet too small for its cells")
     _u, cols, rows, cw, ch = best
-    cw, ch = int(cw), int(ch)
+    cw, ch = max(1, int(cw)), max(1, int(ch))
     sheet_w = cols * cw + GAP * (cols + 1)
-    sheet_h = rows * ch + GAP * (rows + 1)
-    k = min(1.0, long_edge / max(sheet_w, sheet_h))
-    if k < 1.0:
-        cw, ch = int(cw * k), int(ch * k)
-        sheet_w = cols * cw + GAP * (cols + 1)
-        sheet_h = rows * ch + GAP * (rows + 1)
-    cells = []
+    sheet_h = rows * (ch + LB) + GAP * (rows + 1)
+    cells, tabs = [], []
     for i, (w, h) in enumerate(sizes):
         r, c = divmod(i, cols)
         s = min(cw / w, ch / h)
         tw, th = max(1, int(w * s)), max(1, int(h * s))
-        x = GAP + c * (cw + GAP) + (cw - tw) // 2
-        y = GAP + r * (ch + GAP) + (ch - th) // 2
+        slot_x = GAP + c * (cw + GAP)
+        slot_y = GAP + r * (ch + LB + GAP)
+        x = slot_x + (cw - tw) // 2
+        y = slot_y + LB + (ch - th) // 2
         cells.append((x, y, tw, th))
-    return sheet_w, sheet_h, cells
+        tabs.append((x, max(slot_y, y - LB)))      # sits right above the image, inside the strip
+    return sheet_w, sheet_h, cells, tabs
+
+
+def layout(sizes, long_edge=SHEET_LONG_EDGE):
+    """Grid for cells of ``sizes`` [(w, h)]: (sheet_w, sheet_h, [(x, y, w, h) per cell]); long edge ≤ long_edge,
+    every image scaled to fit its cell with its own aspect (no crop); labels live in a strip above each row."""
+    sw, sh, cells, _tabs = _layout(sizes, long_edge)
+    return sw, sh, cells
 
 
 def compose(images, letters, long_edge=SHEET_LONG_EDGE) -> np.ndarray:
     sizes = [(im.shape[1], im.shape[0]) for im in images]
-    sw, sh, cells = layout(sizes, long_edge)
+    sw, sh, cells, tabs = _layout(sizes, long_edge)
     sheet = np.full((sh, sw, 3), BG, np.uint8)
-    for im, (x, y, w, h), lt in zip(images, cells, letters):
+    scale = label_scale(long_edge)
+    for im, (x, y, w, h), (tx, ty), lt in zip(images, cells, tabs, letters):
         sheet[y:y + h, x:x + w] = resize(im, w, h)
-        scale = int(np.clip(min(w, h) // 40, 3, 10))
-        draw_letter(sheet, x, y, lt[0], scale)
+        draw_letter(sheet, tx, ty, lt[0], scale)
     return sheet
 
 
@@ -372,7 +395,7 @@ def fit_inputs(paths, limit, *, out_dir, roles=None, labels=None, fixed=(), long
         for sh in info["sheets"]:
             cells = "；".join(f"{c['letter']} = {c['label']}" for c in sh["cells"])
             lines.append(f"输入图 {idx.get(sh['path'], '?')}（拼图）：{cells}。")
-        lines.append("拼图只供逐格读取：每格左上角的字母只是编号；各格互相独立、比例未变。"
+        lines.append("拼图只供逐格读取：每格上方标签条里的字母只是编号（字母不在图内）；各格互相独立、比例未变。"
                      "不要在结果里画出拼版、边框、格子或字母，也不要把拼图当作构图。")
     seen_txt = set()
     for p, role in text:

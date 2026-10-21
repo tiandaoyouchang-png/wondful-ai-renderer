@@ -122,14 +122,40 @@ class CollageFit(unittest.TestCase):
                 self.assertGreater(int(img[y + h // 2, x + w // 2].sum()), 3 * 28)   # image, not background
         self.assertTrue(sizes)
 
-    def test_letters_drawn_in_corner(self):
-        _p, _n, info = self.fit(7)
+    def test_letters_drawn_in_label_strip_above_cell(self):
+        _p, note, info = self.fit(7)
         sh = info["sheets"][0]
         img = png_io.read_png(sh["path"])[..., :3]
-        _w, _h, cells = RC.layout([tuple(c["size"]) for c in sh["cells"]], 2048)
+        _w, _h, cells, tabs = RC._layout([tuple(c["size"]) for c in sh["cells"]], 2048)
+        sc = RC.label_scale(2048)
+        tab_h = 7 * sc + 2 * max(2, sc)
+        for (x, y, w, h), (tx, ty) in zip(cells, tabs):
+            self.assertLessEqual(ty + tab_h, y)                      # the tab ends above the image
+            tab = img[ty:ty + tab_h, tx:tx + 5 * sc + 2 * max(2, sc)]
+            self.assertTrue((tab.sum(-1) == 0).any() and (tab.sum(-1) == 765).any())   # black tab + white strokes
+        self.assertIn("上方标签条", note)
+        self.assertNotIn("左上角", note)
+
+    def test_nested_sheet_numbers_not_covered(self):
+        """A structure sheet that already carries its own R1/R2 tabs in its top-left keeps them visible."""
+        nested = np.full((450, 800, 3), 200, np.uint8)
+        RC.draw_letter(nested, 0, 0, "R", 6)                      # the sheet's own top-left number
+        other = np.full((600, 900, 3), 90, np.uint8)
+        sheet = RC.compose([nested, other], ["A", "B"], 2048)
+        _w, _h, cells, _tabs = RC._layout([(800, 450), (900, 600)], 2048)
+        for im, (x, y, w, h) in zip([nested, other], cells):
+            self.assertTrue(np.array_equal(sheet[y:y + h, x:x + w], RC.resize(im, w, h)))  # image pixels untouched
         x, y, w, h = cells[0]
-        tab = img[y:y + 40, x:x + 30]
-        self.assertTrue((tab == 0).any() and (tab == 255).any())     # black tab + white strokes
+        corner = sheet[y:y + h // 6, x:x + w // 8]
+        self.assertTrue((corner.sum(-1) == 765).any())               # the nested R strokes are still there
+
+    def test_label_strip_keeps_long_edge(self):
+        for n in (2, 3, 5, 6):
+            sizes = [(1600, 900)] * n
+            w_, h_, cells = RC.layout(sizes, 1536)
+            self.assertLessEqual(max(w_, h_), 1536)
+            sheet = RC.compose([np.full((900, 1600, 3), 120, np.uint8)] * n, list("ABCDEF")[:n], 1536)
+            self.assertEqual(sheet.shape[:2], (h_, w_))
 
     def test_environment_never_merged(self):
         env = png(self.tmp / "env_photo.png", 1200, 634, (200, 150, 90))
