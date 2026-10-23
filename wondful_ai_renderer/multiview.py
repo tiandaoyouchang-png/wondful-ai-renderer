@@ -1853,6 +1853,50 @@ def file_md5(path) -> str:
     return h.hexdigest()
 
 
+def cache_key(*parts) -> str:
+    """Versioned, deterministic identity for cached lighting and projection sources."""
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def scene_geometry_key(context) -> str:
+    """Main-thread snapshot, including evaluated modifiers and off-camera geometry."""
+    h = hashlib.sha256()
+    dg = context.evaluated_depsgraph_get()
+    for obj in sorted(context.scene.objects, key=lambda ob: ob.name):
+        if obj.hide_render:
+            continue
+        h.update(cache_key(obj.name, obj.type, [list(row) for row in obj.matrix_world]).encode())
+        if obj.type == "CAMERA":
+            data = obj.data
+            h.update(cache_key(data.type, data.lens, data.sensor_width, data.sensor_height,
+                               data.sensor_fit, data.shift_x, data.shift_y).encode())
+        elif obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}:
+            evaluated = obj.evaluated_get(dg)
+            mesh = evaluated.to_mesh()
+            try:
+                if mesh is not None:
+                    coords = np.empty(len(mesh.vertices) * 3, np.float32)
+                    indices = np.empty(len(mesh.loops), np.int32)
+                    mesh.vertices.foreach_get("co", coords)
+                    mesh.loops.foreach_get("vertex_index", indices)
+                    h.update(coords.tobytes())
+                    h.update(indices.tobytes())
+                    h.update(cache_key([p.loop_total for p in mesh.polygons]).encode())
+            finally:
+                evaluated.to_mesh_clear()
+    return h.hexdigest()
+
+
+def reusable_views(data, key, pool, current_names, geometry):
+    """Old/unversioned pools and incomplete pass sets are never projection sources."""
+    if data.get("context_key") != key:
+        return []
+    return [e for e in data.get("views", []) if not e.get("master")
+            and e.get("name") not in current_names and e.get("geometry", "llm") == geometry
+            and all(e.get(k) and (Path(pool) / e[k]).is_file() for k in ("image", "pos", "nrm", "mask"))]
+
+
 def safe_name(name) -> str:
     return re.sub(r"[^\w\u3400-\u9fff.-]+", "_", str(name or "camera")).strip("_")[:60] or "camera"
 

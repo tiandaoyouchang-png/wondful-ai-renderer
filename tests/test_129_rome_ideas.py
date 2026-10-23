@@ -51,6 +51,7 @@ class ThreeStates(unittest.TestCase):
         self.assertFalse(off["stats"]["free_space"])
         self.assertEqual(off["stats"]["carved"], 0)
 
+    @unittest.skipUnless((REC / "street_geo_plugin.npz").is_file(), "recorded street measurement not available")
     def test_recorded_street_less_free_area(self):
         d = np.load(REC / "street_geo_plugin.npz", allow_pickle=True)
         geo = {k: d[k] for k in d.files}

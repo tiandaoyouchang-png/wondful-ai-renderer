@@ -872,7 +872,7 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
     1.2.2: robust chain (see op_chain): tries every 3D View / window context, retries
     transient context errors, and when the operator cannot start shows the reason in
     the panel instead of stopping silently.  Returns the ChainRunner (for tests)."""
-    from . import op_chain
+    from . import op_chain, layered_output
     from .op_chain import ChainRunner, OperatorRefused
     module, name = idname.split(".")
     scene_name = getattr(scene, "name", "") if scene is not None else ""
@@ -909,7 +909,10 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
             _status(props, "ERROR", text)
         _redraw_all()
 
-    runner = ChainRunner(invoke=invoke, contexts=contexts, locked=_ACTIVE_LOCK.locked, on_fail=on_fail,
+    # Keep background NumPy layer processing away from the next Blender render.
+    # Blender's Python runtime can crash when that render overlaps the layer worker.
+    runner = ChainRunner(invoke=invoke, contexts=contexts,
+                         locked=lambda: _ACTIVE_LOCK.locked() or layered_output.RUNNER.pending > 0, on_fail=on_fail,
                          on_started=lambda ctx, result: _redraw_all(),
                          last_report=lambda: _LAST_REPORT.get(idname, ""))
     bpy.app.timers.register(runner.step, first_interval=0.3)
@@ -4730,6 +4733,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         props.progress = 0.05
         props.last_mv_note = "多角度场景一致：生成中…"
         master_name = master.name
+        scene_geometry_key = MV.scene_geometry_key(context)
 
         def job():
             import numpy as np
@@ -4747,15 +4751,17 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                        "nrm": Path(mv["prefix"] + "_nrm.npy").name, "mask": Path(mv["prefix"] + "_maskw.npy").name,
                        "image": master_png.name, "master": True, "geometry": geo_kind}
             data = MV.read_pool(pool)
-            # 1.2.5: an earlier view is reused only when its passes came from the same geometry (细节粗模 or not)
-            reused = [e for e in data.get("views", []) if not e.get("master") and e["name"] not in views
-                      and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()
-                      and e.get("geometry", "llm") == geo_kind]
+            context_key = MV.cache_key(
+                "pool-v2", scene_geometry_key, MV.file_md5(master_png), mv["cam"], geo_kind,
+                [MV.file_md5(pool / entry_m[k]) for k in ("pos", "nrm", "mask")],
+                sb_analysis, bands_info, brief, size, paste, strength, colour_strength,
+                grade_on, seam_on, detail_mode, model)
+            reused = MV.reusable_views(data, context_key, pool, views, geo_kind)
             # 1.2.5: AI-from-AI views (hop ≥ 2) stay in the pool but are not projected again
             reused_src = [e for e in reused if MV.usable_source(e)]
             light, light_note = None, ""
             lp = pool / MV.LIGHT_FILE
-            key = MV.file_md5(master_png)
+            key = MV.cache_key("light-v2", MV.file_md5(master_png), mv["cam"], model)
             try:
                 cached = json.loads(lp.read_text(encoding="utf-8")) if lp.is_file() else {}
             except (OSError, ValueError):
@@ -5008,7 +5014,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 accepted.append(entry)
                 if MV.usable_source(entry):
                     sources.append(MV.load_view(pool, entry))
-                MV.write_pool(pool, {"master": master_name, "views": accepted})
+                MV.write_pool(pool, {"master": master_name, "context_key": context_key, "views": accepted})
                 (pool / f"{MV.safe_name(rec['name'])}_meta.json").write_text(
                     json.dumps(res, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             summary = {"results": results, "light": light, "light_note": light_note, "seconds": round(time.time() - t0, 1),

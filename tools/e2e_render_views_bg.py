@@ -17,11 +17,13 @@ import sys
 import tempfile
 import time
 import traceback
+from pathlib import Path
 
 import bpy
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 ZIP, OUT = argv[0], argv[1]
+PURE_SCENE = len(argv) > 2 and argv[2] == "pure-scene"
 os.makedirs(OUT, exist_ok=True)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
@@ -43,6 +45,7 @@ def run_timers(props, phases, limit=900):
         again = fn()
         if isinstance(again, (int, float)):
             TIMERS.append([CLOCK[0] + float(again), fn])
+            time.sleep(0.001)
 
 
 def visible_files(folder):
@@ -122,6 +125,9 @@ def main():
         self._detached = threading.Event()
         self._origin_scene = context.scene
         self._result, self._error, self._started_at, self._timer, self._thread = None, None, time.time(), None, None
+        if self.bl_idname == "WONDFUL_OT_multiview_render":
+            from wondful_ai_renderer import layered_output
+            REPORT["layers_pending_at_multiview_start"] = layered_output.RUNNER.pending
         started.append(self.bl_idname)
         op = self
 
@@ -155,13 +161,15 @@ def main():
     for obj in list(scene.objects):
         bpy.data.objects.remove(obj, do_unlink=True)
     props = scene.wondful_ai
-    product = bpy.data.collections.new("产品")
-    scene.collection.children.link(product)
-    mesh = bpy.data.meshes.new("Box")
-    mesh.from_pydata([(x, y, z) for x in (-.5, .5) for y in (-.5, .5) for z in (0, 1)], [],
-                     [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)])
-    product.objects.link(bpy.data.objects.new("Box", mesh))
-    props.product_collection = product
+    product = None
+    if not PURE_SCENE:
+        product = bpy.data.collections.new("产品")
+        scene.collection.children.link(product)
+        mesh = bpy.data.meshes.new("Box")
+        mesh.from_pydata([(x, y, z) for x in (-.5, .5) for y in (-.5, .5) for z in (0, 1)], [],
+                         [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)])
+        product.objects.link(bpy.data.objects.new("Box", mesh))
+        props.product_collection = product
     from wondful_ai_renderer import massing as MS, scene_blockout_build as SBB
     parent, _c = MS.ensure_collection(scene, props)
     fixture = os.path.join(ROOT, "tests", "fixtures", "scene_blockout", "desert_v3.json")
@@ -193,7 +201,7 @@ def main():
     props.two_step = False
     props.render_count = "1"
     props.scene_brief = "沙漠清晨"
-    props.layered_output = True             # 分层输出 deliverables (PNG layers + PSD) stay visible
+    props.layered_output = not PURE_SCENE             # 分层输出 deliverables (PNG layers + PSD) stay visible
     props.layered_mode = "SHADOW"
 
     # drag in: one camera, then the collection (adds the other two, recursive, skips the repeat)
@@ -232,15 +240,18 @@ def main():
     REPORT["visible_files"] = visible_files(out_dir)
     REPORT["non_images"] = [f for f in REPORT["visible_files"] if os.path.splitext(f)[1].lower() not in IMAGE_EXT]
     REPORT["internal_files"] = sum(len(f) for _d, _s, f in os.walk(os.path.join(out_dir, ".wondful")))
+    masks = list(Path(out_dir).rglob("*_maskw.npy")) if PURE_SCENE else []
+    REPORT["pure_mask_empty"] = bool(masks) and all(not np.load(p).any() for p in masks) if PURE_SCENE else None
     REPORT["ok"] = bool(
         REPORT["blockout"] and REPORT["list"] == ["正面", "侧面", "背面"] and REPORT["checked"] == ["正面", "背面"]
         and REPORT["scene_camera_after_click"] == "正面"
         and started == ["WONDFUL_OT_polish_prompt", "WONDFUL_OT_ai_render", "WONDFUL_OT_multiview_render"]
+        and REPORT.get("layers_pending_at_multiview_start") == 0
         and props.status == "SUCCESS" and [v[0] for v in REPORT["view_results"]] == ["正面", "背面"]
         and all(v[2] for v in REPORT["view_results"]) and any("视角 2/2" in p for p in REPORT["view_phases"])
         and REPORT["plan_cleared"] and len({f[1] for f in flips}) == 2 and not REPORT["non_images"]
         and not any(f.startswith("多角度") for f in REPORT["visible_files"])
-        and any(f.endswith("_layers.psd") for f in REPORT["visible_files"]) and REPORT["internal_files"] > 0)
+        and (REPORT["pure_mask_empty"] if PURE_SCENE else any(f.endswith("_layers.psd") for f in REPORT["visible_files"])) and REPORT["internal_files"] > 0)
 
 
 try:

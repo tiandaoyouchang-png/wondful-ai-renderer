@@ -736,9 +736,15 @@ def ground_level(vk, info, extra=0.45):
     N = MV._unit_n(vk["nrm"])
     tt, s = frame(info, P[..., :2])
     dz = P[..., 2] - plane_z(info, tt, s)
-    hmax = max([b.get("height", 0.0) for b in info.get("bands") or []] + [0.0])
+    # Vertical faces belong to a curb only inside a measured raised curb band.
+    # A global height test also paints the base of every nearby wall as ground.
+    curb_face = np.zeros(hit.shape, bool)
+    for b in info.get("bands") or []:
+        if raised(b):
+            curb_face |= ((s >= b["s0"]) & (s <= b["s1"])
+                          & (dz >= -0.05) & (dz <= float(b["height"]) + 0.06))
     gl = hit & (np.asarray(vk["mask"]) < 0.5) & (dz > -0.6) & (
-        ((N[..., 2] > 0.7) & (dz < extra)) | (dz < hmax + 0.06))
+        ((N[..., 2] > 0.7) & (dz < extra)) | (curb_face & (N[..., 2] > -0.2)))
     return gl, tt, s, dz
 
 

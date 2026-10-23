@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .cli_runtime import runtime_env, find_cli
+from .request_budget import RequestDeadline
 from .image_artifacts import ArtifactTracker
 from .prompt_engine import REFERENCE_LIGHTING_POLICY
 
@@ -182,8 +183,12 @@ def _run(
     cwd: str | None = None,
     timeout: int | None = 120,
 ) -> subprocess.CompletedProcess:
-    effective_timeout = None if timeout is None or int(timeout) <= 0 else int(timeout)
+    effective_timeout = None if timeout is None or float(timeout) <= 0 else float(timeout)
     try:
+        if input_text is not None:
+            from .cli_transport import run_headless
+            return run_headless(cli_path, args, cwd=cwd, env=_runtime_env(cli_path),
+                                timeout=effective_timeout, input_text=input_text)
         return subprocess.run(
             [cli_path, *args],
             input=input_text,
@@ -278,15 +283,24 @@ def _exec_turn(*, model: str = "", **kwargs) -> str:
 
     The fallback is recorded in ``_MODEL_STATE["notice"]`` so the panel can tell the
     user to update Codex CLI (operators pop it into props.model_notice)."""
+    deadline = RequestDeadline(kwargs.get("timeout"))
+
+    def run(candidate):
+        try:
+            remaining = deadline.remaining()
+        except TimeoutError as exc:
+            raise CodexTimeoutError(str(exc)) from exc
+        return _exec_turn_once(model=candidate, **dict(kwargs, timeout=remaining or 0))
+
     try:
-        return _exec_turn_once(model=model, **kwargs)
+        return run(model)
     except CodexModelRejectedError as first:
         if not (model or "").strip():
             raise
         last = first
         for candidate in model_fallback_candidates(model):
             try:
-                text = _exec_turn_once(model=candidate, **kwargs)
+                text = run(candidate)
             except CodexModelRejectedError as exc:
                 last = exc
                 continue
@@ -689,8 +703,11 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 
     tracker = ArtifactTracker(session_dir, attached)
     limits = render_attempt_timeouts(timeout)
+    deadline = RequestDeadline(timeout)
     for attempt, limit in enumerate(limits, start=1):
         try:
+            remaining = deadline.remaining()
+            actual_limit = remaining if limit is None else (min(limit, remaining) if remaining is not None else limit)
             last_message = _exec_turn(
                 explicit_path=explicit_path,
                 prompt=task,
@@ -698,11 +715,13 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
                 model=model,
                 cwd=str(session_dir),
                 sandbox="workspace-write",
-                timeout=limit if limit is not None else 0,
+                timeout=actual_limit if actual_limit is not None else 0,
                 enable_image_generation=True,
                 output_last_message=str(session_dir / "codex_render.txt"),
             )
             break
+        except TimeoutError as exc:
+            raise CodexTimeoutError(str(exc)) from exc
         except CodexTimeoutError as exc:
             if attempt >= len(limits):
                 raise CodexTimeoutError(

@@ -105,14 +105,15 @@ class MeasureTest(unittest.TestCase):
         info = GB.measure(MASTER, analysis=ANALYSIS)
         self.assertTrue(info)
         kinds = [b["kind"] for b in GB.order_from_camera(info)]
-        self.assertEqual(kinds, ["shoulder", "curb", "main"])
-        curb = [b for b in info["bands"] if b["kind"] == "curb"][0]
+        self.assertEqual(kinds, ["shoulder", "strip", "main"])
+        curb = [b for b in info["bands"] if b["kind"] == "strip"][0]
         # the curb sits at across -5.3 … -4.8 (± one bin) in a frame centred on the product
         s_mid = 0.5 * (curb["s0"] + curb["s1"])
         n = np.asarray(info["n"])
         self.assertAlmostEqual(abs(s_mid), 5.05, delta=0.2)
         self.assertLessEqual(curb["width"], 0.8)
-        self.assertGreater(curb["height"], 0.0)
+        self.assertEqual(curb["height"], 0.0)
+        self.assertFalse(curb["height_measured"])
         self.assertAlmostEqual(abs(float(np.asarray(info["t"]) @ np.array([1.0, 0.0]))), 1.0, delta=0.01)
         self.assertAlmostEqual(abs(float(n[1])), 1.0, delta=0.01)
         words = [b["zh"] for b in GB.order_from_camera(info)]
@@ -127,7 +128,7 @@ class MeasureTest(unittest.TestCase):
         t = np.asarray(info["t"])
         ang = math.degrees(math.acos(min(1.0, abs(float(t @ np.array([math.cos(rot), math.sin(rot)]))))))
         self.assertLess(ang, 3.0)
-        self.assertIn("curb", [b["kind"] for b in info["bands"]])
+        self.assertIn("strip", [b["kind"] for b in info["bands"]])
 
     def test_street_prior_kept_when_close(self):
         info = GB.measure(MASTER, prior_t=[math.cos(math.radians(2)), math.sin(math.radians(2))], analysis=ANALYSIS)
@@ -144,7 +145,7 @@ class MeasureTest(unittest.TestCase):
     def test_product_shadow_is_not_a_band(self):
         v = make_view((0, -10, 1.2), 0, shadow=True)
         info = GB.measure(v, analysis=ANALYSIS)
-        self.assertEqual([b["kind"] for b in GB.order_from_camera(info)], ["shoulder", "curb", "main"])
+        self.assertEqual([b["kind"] for b in GB.order_from_camera(info)], ["shoulder", "strip", "main"])
 
     def test_grazing_far_band_not_measured(self):
         # a dark strip far behind the product (seen only at grazing angles) is not one of the measured bands
@@ -153,7 +154,7 @@ class MeasureTest(unittest.TestCase):
         far = (P[..., 3] > 0.5) & (P[..., 1] > 9.0) & (P[..., 1] < 10.0)
         v["img"][far] = (40, 30, 25)
         info = GB.measure(v, analysis=ANALYSIS)
-        self.assertEqual([b["kind"] for b in GB.order_from_camera(info)], ["shoulder", "curb", "main"])
+        self.assertEqual([b["kind"] for b in GB.order_from_camera(info)], ["shoulder", "strip", "main"])
 
     def test_band_index_open_edges(self):
         info = GB.measure(MASTER, analysis=ANALYSIS)
@@ -173,7 +174,7 @@ class FillAndTextTest(unittest.TestCase):
     def test_patches_per_band(self):
         ps = GB.band_patches(MASTER, self.info)
         self.assertEqual(len(ps), len(self.info["bands"]))
-        curb_i = [i for i, b in enumerate(self.info["bands"]) if b["kind"] == "curb"][0]
+        curb_i = [i for i, b in enumerate(self.info["bands"]) if b["kind"] == "strip"][0]
         self.assertTrue(ps[curb_i]["narrow"])
         for p, b in zip(ps, self.info["bands"]):
             L = float(np.mean(MV.lab(np.asarray(p["patches"][0], np.float32).reshape(-1, 3))[:, 0]))
@@ -190,8 +191,8 @@ class FillAndTextTest(unittest.TestCase):
             self.assertTrue(sel.any(), b["kind"])
             means[b["kind"]] = float(L[sel].mean())
             self.assertTrue((cls[sel] == GB.BAND_CLS0 + i).all())
-        self.assertLess(means["curb"], means["main"] - 15)
-        self.assertLess(means["curb"], means["shoulder"] - 10)
+        self.assertLess(means["strip"], means["main"] - 15)
+        self.assertLess(means["strip"], means["shoulder"] - 10)
         # the product stays unfilled
         self.assertFalse(have[np.asarray(self.other["mask"]) > 0.5].any())
 
@@ -219,14 +220,14 @@ class FillAndTextTest(unittest.TestCase):
     def test_view_stats_and_sentence(self):
         stats = GB.view_stats(self.other, self.info)
         by = {self.info["bands"][e["i"]]["kind"]: e for e in stats}
-        self.assertEqual(by["curb"]["rel"], "behind")
+        self.assertEqual(by["strip"]["rel"], "behind")
         self.assertEqual(by["shoulder"]["rel"], "behind")
         s = GB.view_sentence(self.info, stats)
         self.assertIn("深色石路沿在产品后方", s)
         zh, en = GB.lock_addition(self.info, stats)
         self.assertIn("粗砂石路肩 + 深色石路沿 + 压实土路面，干燥", zh)
         self.assertIn("这个视角里", zh)
-        self.assertIn("略高于两侧", zh)
+        self.assertNotIn("略高于两侧", zh)
         self.assertIn("[GROUND BANDS]", en)
         self.assertIn("dark stone curb", en)
 
@@ -256,7 +257,9 @@ class GeometryTest(unittest.TestCase):
         cam_xy = [(0, -10), (0, 12), (30, 5)]
         half = GB.geometry_extent(info, cam_xy)
         self.assertGreaterEqual(half, 30 + GB.GEOM_EXTENT_M[0] - 1)
-        curb = [b for b in info["bands"] if b["kind"] == "curb"][0]
+        curb = [b for b in info["bands"] if b["kind"] == "strip"][0]
+        # Positive geometry test supplies a measured raised step, not colour alone.
+        curb.update(kind="curb", height=0.12, height_measured=True)
         v, f = GB.strip_mesh(info, curb, half)
         V = np.asarray(v)
         tt, s = GB.frame(info, V[:, :2])

@@ -25,6 +25,9 @@ import threading
 import time
 import uuid
 import zlib
+import socket
+
+from .request_budget import RequestDeadline
 from http import client as http_client
 from pathlib import Path
 from urllib import error as urlerror
@@ -1000,28 +1003,46 @@ def _line_iter(resp, cancel_check):
 
 
 def post_responses(url, headers, payload, *, timeout, cancel_check=None, want="image", meta=None):
+    if cancel_check and cancel_check():
+        raise DirectEditError("任务已取消", kind="cancelled", fatal=True)
+    deadline = RequestDeadline(timeout)
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     req = urlrequest.Request(url, data=body, headers=headers, method="POST")
     holder = {}
     stop = threading.Event()
 
-    def watch():  # cancellation closes the socket so a blocking read returns
-        while not stop.wait(0.5):
-            if cancel_check and cancel_check() and holder.get("resp") is not None:
-                try:
-                    holder["resp"].close()
-                except Exception:
-                    pass
+    def check_stopped():
+        if cancel_check and cancel_check():
+            raise DirectEditError("任务已取消", kind="cancelled", fatal=True)
+        try:
+            deadline.remaining()
+        except TimeoutError as exc:
+            raise DirectEditError(str(exc), kind="timeout", fatal=True) from exc
+
+    def watch():
+        while not stop.wait(0.1):
+            try:
+                check_stopped()
+            except DirectEditError:
+                resp = holder.get("resp")
+                if resp is not None:
+                    # shutdown interrupts a blocked buffered read; close alone can wait on its lock.
+                    try:
+                        resp.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+                    except (AttributeError, OSError):
+                        pass
                 return
 
     watcher = threading.Thread(target=watch, daemon=True)
     watcher.start()
     try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
+        with urlrequest.urlopen(req, timeout=deadline.remaining()) as resp:
             holder["resp"] = resp
             holder["streaming"] = True
             events = parse_sse_events(_line_iter(resp, cancel_check))
-            return extract_text(events) if want == "text" else extract_image(events, meta)
+            result = extract_text(events) if want == "text" else extract_image(events, meta)
+            check_stopped()
+            return result
     except urlerror.HTTPError as exc:
         try:
             text = exc.read().decode("utf-8", errors="replace")
@@ -1029,8 +1050,10 @@ def post_responses(url, headers, payload, *, timeout, cancel_check=None, want="i
             text = ""
         raise _http_error(exc.code, text, dict(getattr(exc, "headers", None) or {})) from exc
     except DirectEditError:
+        check_stopped()
         raise
     except (urlerror.URLError, OSError, ValueError, http_client.HTTPException) as exc:
+        check_stopped()
         if cancel_check and cancel_check():
             raise DirectEditError("任务已取消", kind="cancelled", fatal=True) from exc
         reason = getattr(exc, "reason", exc)
@@ -1168,7 +1191,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False, massing_text="", building_refs=None, keep_text="", style_text=""):
+               exact_prompt=False, massing_text="", building_refs=None, keep_text="", style_text="", deadline=None):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
     ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
@@ -1180,6 +1203,9 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     read as text only.
     """
     started = time.time()
+    deadline = deadline or RequestDeadline(timeout)
+    if cancel_check and cancel_check():
+        raise DirectEditError("任务已取消", kind="cancelled", fatal=True)
     if not edit_base_path or not Path(edit_base_path).is_file():
         raise DirectEditError("编辑底图不存在", kind="input")
     auth_path = find_auth_file()
@@ -1273,6 +1299,12 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     meta = {}
     try:
         while index < len(variants):
+            if cancel_check and cancel_check():
+                raise DirectEditError("任务已取消", kind="cancelled", fatal=True)
+            try:
+                remaining = deadline.remaining()
+            except TimeoutError as exc:
+                raise DirectEditError(str(exc), kind="timeout", fatal=True) from exc
             opts = variants[index]
             payload, summary = build_payload(text, images, size=size, mask_path=mask, model=opts["model"], compat=opts["compat"],
                                              instructions=BUILDING_INSTRUCTIONS if attached_refs and not exact_prompt else "")
@@ -1283,7 +1315,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
             t0 = time.time()
             try:
                 meta = {}
-                result = post_responses(url, headers, payload, timeout=timeout, cancel_check=cancel_check, meta=meta)
+                result = post_responses(url, headers, payload, timeout=remaining, cancel_check=cancel_check, meta=meta)
                 log["attempts"].append({"ok": True, "compat": opts["compat"], "model": opts["model"],
                                         "seconds": round(time.time() - t0, 1)})
                 log["reported"] = dict(meta)
@@ -1294,7 +1326,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                                         "kind": exc.kind, "status": exc.status, "error": str(exc)[:300],
                                         "detail": getattr(exc, "detail", "")[:300],
                                         "seconds": round(time.time() - t0, 1)})
-                if exc.kind == "cancelled":
+                if exc.kind in ("cancelled", "timeout"):
                     raise
                 if exc.kind == "auth" and exc.status == 401 and not refreshed:
                     refreshed = True
@@ -1305,7 +1337,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                         rate_waits += 1
                         wait = min(RATE_WAIT_CAP, exc.retry_after or 4.0 * rate_waits)
                         log["attempts"][-1]["waited"] = round(wait, 1)
-                        _sleep_cancellable(wait, cancel_check)
+                        _sleep_cancellable(min(wait, deadline.remaining() or wait), cancel_check)
                         continue
                     exc.kind, exc.fatal = "rate_limit_long", True   # bounded: stop, do not fall back
                     raise
@@ -1314,7 +1346,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
                     cut_retries += 1     # 1.2.7: back-off retries of the same request for a dropped connection
                     log["attempts"][-1]["waited"] = wait
                     print(f"[Wondful] Codex 直连网络中断（{str(exc)[:60]}），{wait:.0f}s 后重试 {cut_retries}/{NET_RETRIES}")
-                    _sleep_cancellable(wait, cancel_check)
+                    _sleep_cancellable(min(wait, deadline.remaining() or wait), cancel_check)
                     continue
                 if exc.kind == "request" and index + 1 < len(variants):
                     index += 1  # 400: try a leaner, more compatible payload
@@ -1432,6 +1464,9 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
     direct edit is skipped for the remaining variants/attempts of this render.
     """
+    deadline = RequestDeadline(kwargs.get("timeout", 900))
+    if cancel_check and cancel_check():
+        raise RuntimeError("任务已取消")
     state.setdefault("direct_ok", 0)
     state.setdefault("fallbacks", 0)
     state.setdefault("disabled", "")
@@ -1455,7 +1490,7 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 prompt=prompt, edit_base_path=edit_base, reference_paths=references,
                 output_path=str(out), size=size, mask_path=kwargs.get("edit_mask_path", ""),
                 manifest=manifest, repair=repair, model=kwargs.get("model", ""),
-                client_version=client_version, timeout=max(60, int(kwargs.get("timeout") or 900) or 900),
+                client_version=client_version, timeout=deadline.remaining(), deadline=deadline,
                 log_dir=kwargs.get("cwd", ""), tag=out.stem, cancel_check=cancel_check,
                 simple_brief=simple_brief if use_simple else None,
                 terrain_text=terrain_text if use_simple else "",
@@ -1472,6 +1507,8 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
         except DirectEditError as exc:
             if exc.kind == "cancelled":
                 raise RuntimeError("任务已取消") from exc
+            if exc.kind == "timeout":
+                raise DirectEditStop(str(exc), kind="timeout") from exc
             if exc.kind in STOP_KINDS:
                 # 1.2.3: quota / login / long rate limit stop the render; codex exec runs on the same
                 # account and would hit the same wall, so it is never tried for these.
@@ -1505,6 +1542,13 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
             state["disabled"] = reason
             state["last_reason"] = reason
             print(f"[Wondful] Codex 直连图像编辑异常，改用 codex exec：{reason}")
+    if cancel_check and cancel_check():
+        raise RuntimeError("任务已取消")
+    try:
+        remaining = deadline.remaining()
+    except TimeoutError as exc:
+        raise DirectEditStop(str(exc), kind="timeout") from exc
+    kwargs = dict(kwargs, timeout=0 if remaining is None else remaining)
     state["fallbacks"] += 1
     kwargs = fallback_with_building_refs(kwargs, building_refs, vehicle=bool(vehicle))
     if manifest:      # 1.2.7: the 参考图拼图 names every cell by its bundle role

@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-23",
+  "base_commit": "4c81a6a925740cea7231d36c8241f4590cdd234f",
+  "branch": "fix/pc-feedback-hardening",
+  "environment": "Linux / Blender 4.3.2 / Cycles CPU / Python 3.12 host, 3.11 Blender",
+  "tests": {
+    "total": 744,
+    "passed": 731,
+    "skipped": 13,
+    "failed": 0,
+    "seconds": 230.557
+  },
+  "skipped": [
+    "test_psd_structure_and_psd_tools (test_120_layers.PsdWriterTest.test_psd_structure_and_psd_tools) ... skipped 'psd-tools not installed'",
+    "test_real_mud_lower_door_kept (test_122_matte_paste.RealMudTest.test_real_mud_lower_door_kept) ... skipped 'real mud generation + Blender passes not present (sandbox-only data)'",
+    "test_missing_auth_file_is_local_and_falls_back (test_123_error_classification.MissingAuthStillFallsBack.test_missing_auth_file_is_local_and_falls_back) ... skipped 'a real ~/.codex/auth.json exists on this machine'",
+    "test_recorded_interior_falls_back (test_126_detail_blockout.SplitBudgetFallback.test_recorded_interior_falls_back) ... skipped 'recorded interior not present'",
+    "test_recorded_scenes_budget_and_time (test_126_detail_blockout.SplitBudgetFallback.test_recorded_scenes_budget_and_time) ... skipped 'recorded measurements not present'",
+    "test_recorded_measurements (test_126_far_skyline.Skyline.test_recorded_measurements) ... skipped 'recorded MoGe measurements not available'",
+    "test_recorded_street (test_127_scene_complete.Completion.test_recorded_street) ... skipped 'recorded street measurement not available'",
+    "test_recorded_street_less_free_area (test_129_rome_ideas.ThreeStates.test_recorded_street_less_free_area) ... skipped 'recorded street measurement not available'",
+    "test_recorded_cyber_light (test_130_interior_neon.LightWording.test_recorded_cyber_light) ... skipped 'cyber orbit run not present'",
+    "test_recorded_minecraft_analysis (test_130_interior_neon.SceneStyle.test_recorded_minecraft_analysis) ... skipped 'minecraft analysis not present'",
+    "test_recorded_cyber_master_is_night_with_lights (test_130_interior_neon.StyleLock.test_recorded_cyber_master_is_night_with_lights) ... skipped 'cyber master not present'",
+    "test_recorded_shibuya (test_131_no_people.Categories.test_recorded_shibuya) ... skipped 'recorded Shibuya analysis not present'",
+    "test_missing_auth_falls_back (test_321_direct_edit.FallbackTests.test_missing_auth_falls_back) ... skipped 'a real ~/.codex/auth.json exists on this machine'"
+  ],
+  "native_checks": 9,
+  "pc_checks": 10,
+  "pure_scene_e2e": true,
+  "guarded_product_e2e_consecutive": 2,
+  "earlier_native_crash_recorded": true,
+  "package_sha256": "fe4d00f80b1544baf9422f3860b58bd20e3ad437fe72b5ded19aa357d234c689",
+  "package_bytes": 610811,
+  "stable_release": false,
+  "real_backend_used": false,
+  "outstanding": [
+    "Global physical image request / billing cap not yet unified",
+    "Historical real-scene and live-backend visual validation missing",
+    "Windows/macOS/Blender 5.1/GPU unverified",
+    "Native crash guard verified in automatic chain; not a proof against every native crash"
+  ]
+}

@@ -170,7 +170,7 @@ class ManagedProcess:
                 pass
 
 
-def run_headless(cli, args, *, cwd, env, timeout):
+def run_headless(cli, args, *, cwd, env, timeout, input_text=None):
     """Run a print-mode request without giving the CLI an interactive TTY.
 
     The official headless contract uses cached credentials and exits with an
@@ -182,6 +182,14 @@ def run_headless(cli, args, *, cwd, env, timeout):
         raise RuntimeError("任务已被用户主动取消。")
     process = ManagedProcess(cli, args, cwd=cwd, env=env, use_tty=False)
     start = time.monotonic()
+    if input_text is not None:
+        def feed():
+            try:
+                process.proc.stdin.write(input_text.encode("utf-8"))
+                process.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        threading.Thread(target=feed, daemon=True, name="WondfulCLIInput").start()
     text = ""
     try:
         while True:
