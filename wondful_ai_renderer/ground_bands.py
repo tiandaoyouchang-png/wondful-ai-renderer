@@ -259,7 +259,17 @@ def _segments(prof):
             lo, hi = max(0, i - 2), min(len(sc), i + 3)
             if sc[i] >= sc[lo:hi].max() and not any(abs(i - c) <= 1 for c in cuts):
                 cuts.append(i)
-        bounds = [r0] + [r0 + c for c in cuts] + [r1]
+        # Real image textures can camouflage a raised curb or put its colour edge
+        # beside its geometry edge. Preserve measured height discontinuities too.
+        height_cuts = []
+        prev = None
+        for k in range(r0, r1):
+            if not np.isfinite(prof["z"][k]):
+                continue
+            if prev is not None and k - prev <= 4 and abs(prof["z"][k] - prof["z"][prev]) > 0.04:
+                height_cuts.append(k)
+            prev = k
+        bounds = sorted(set([r0] + [r0 + c for c in cuts] + height_cuts + [r1]))
         for a, b in zip(bounds[:-1], bounds[1:]):
             if b > a:
                 segs.append((a, b))
@@ -286,13 +296,15 @@ def _merge(prof, segs):
         # 1) too narrow → into the closer neighbour (only when it touches)
         for i, s in enumerate(st):
             w = (s["k1"] - s["k0"]) * prof["bin"]
-            if w >= MIN_BAND_M - 1e-9:
+            raised_narrow = (0 < i < len(st) - 1 and w >= 2 * prof["bin"] - 1e-9
+                             and all(s["z"] - st[j]["z"] > 0.03 for j in (i - 1, i + 1)))
+            if w >= MIN_BAND_M - 1e-9 or raised_narrow:
                 continue
             cands = []
             if i > 0 and st[i - 1]["k1"] == s["k0"]:
-                cands.append((_de(st[i - 1]["lab"], s["lab"]), i - 1))
+                cands.append((_de(st[i - 1]["lab"], s["lab"]) + 500 * abs(st[i - 1]["z"] - s["z"]), i - 1))
             if i + 1 < len(st) and st[i + 1]["k0"] == s["k1"]:
-                cands.append((_de(st[i + 1]["lab"], s["lab"]), i + 1))
+                cands.append((_de(st[i + 1]["lab"], s["lab"]) + 500 * abs(st[i + 1]["z"] - s["z"]), i + 1))
             if not cands:
                 continue
             j = min(cands)[1]
@@ -310,7 +322,7 @@ def _merge(prof, segs):
             if a["k1"] != b["k0"]:
                 continue
             tr = max(a["tex"], b["tex"]) / max(min(a["tex"], b["tex"]), 1e-6)
-            if _de(a["lab"], b["lab"]) < MERGE_DE and tr < 1.6:
+            if _de(a["lab"], b["lab"]) < MERGE_DE and tr < 1.6 and abs(a["z"] - b["z"]) <= 0.035:
                 st[i] = _seg_stats(prof, a["k0"], b["k1"])
                 del st[i + 1]
                 changed = True
@@ -367,7 +379,7 @@ def _limit(prof, st):
     while len(st) > MAX_BANDS:
         best = None
         for i in range(len(st) - 1):
-            if _is_curbish(prof, st, i) or _is_curbish(prof, st, i + 1):
+            if _is_curbish(prof, st, i) or _is_curbish(prof, st, i + 1) or abs(st[i]["z"] - st[i + 1]["z"]) > 0.035:
                 continue
             d = _de(st[i]["lab"], st[i + 1]["lab"])
             if best is None or d < best[0]:
@@ -450,7 +462,8 @@ def _classify(bands, prod_s, words):
             tone = "dark"
         elif dl and all(d >= CURB_TONE_L for d in dl):
             tone = "light"
-        is_curb = (b["width"] <= CURB_MAX_M and len(nb) == 2 and tone != "" and i != main)
+        raised_step = len(nb) == 2 and all(b["z"] - x["z"] > 0.03 for x in nb)
+        is_curb = (b["width"] <= CURB_MAX_M and len(nb) == 2 and (tone != "" or raised_step) and i != main)
         if not is_curb and main is not None and i != main:    # a wide band's tone is judged against the main band
             d = L - float(bands[main]["lab"][0])
             tone = "dark" if d <= -12.0 else ("light" if d >= 12.0 else "")
