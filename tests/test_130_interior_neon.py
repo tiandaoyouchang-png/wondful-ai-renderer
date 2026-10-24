@@ -9,6 +9,7 @@ User: 「视角问题可以通过相机设置解决吧，误判才是大问题�
 3. 风格与光线锁定: the 主视角 look (night, light sources, colours) goes into every new-view prompt; night colour match
    keeps local contrast / emissive pixels; no low-tier retry on night scenes.
 """
+import ast
 import json
 import math
 import os
@@ -436,7 +437,17 @@ class SimplePromptStyle(unittest.TestCase):
     def test_plumbing(self):
         cd = (PKG / "codex_direct.py").read_text(encoding="utf-8")
         self.assertIn("style_text=style_text if use_simple else \"\"", cd)
-        self.assertIn("keep_text=keep_text,\n                                   style_text=style_text)", cd)
+        # Check the style argument itself; additional reference roles may follow it.
+        simple_calls = [node for node in ast.walk(ast.parse(cd))
+                        if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "build_simple_prompt"]
+        self.assertTrue(simple_calls)
+        for call in simple_calls:
+            forwarded = {kw.arg: kw.value.id for kw in call.keywords
+                         if isinstance(kw.value, ast.Name)}
+            self.assertEqual(forwarded.get("keep_text"), "keep_text")
+            self.assertEqual(forwarded.get("style_text"), "style_text")
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
         self.assertIn("direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or \"\")", ops)
         self.assertIn("style_text=direct_style_text,", ops)

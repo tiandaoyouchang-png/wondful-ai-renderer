@@ -56,8 +56,10 @@ INSTRUCTIONS = (
 BUILDING_INSTRUCTIONS = (
     "Use the image_generation tool exactly once to EDIT the first input image and return one PNG. "
     "The first input image is the canvas: keep its framing, camera, horizon, product geometry, position, scale, "
-    "perspective, silhouette and colours exactly. Later input images are architecture references for the "
-    "grey-blue context blocks only, as the text maps them: use their building style, facade, materials and windows "
+    "perspective and silhouette exactly; follow the explicit product appearance lock for colours and materials. "
+    "Later input images have the roles assigned in the text: product references supply identity details, "
+    "structure references supply geometry only, and architecture references apply to the "
+    "grey-blue context blocks only. Use the architecture references' building style, facade, materials and windows "
     "on the matching block while keeping the block's position, height, outline and perspective. Never copy a "
     "reference's camera, composition, sky, vehicles or other objects, and never let it move, resize or restyle "
     "the product. Do not use any other tool."
@@ -69,14 +71,20 @@ ROLE_LABELS = {
     "product": "产品三视图（只看产品造型与身份细节，不取其打光和背景）",
     "person": "人物参考（只看人物身份）",
     "environment": "环境参考图（决定环境、光线方向、色温与氛围）",
+    "scene_reference": "场景粗模来源图（对照曲面连接、遮挡、环境材质与入射光；不接管相机和产品）",
     "building": "环境体块的建筑参考图（只管对应体块的建筑风格，不影响产品和构图）",
     "appearance": "外观参考图集（格内标签见图上 R 编号）",
     "control_bundle": "参考图集（格内标签见图上 R 编号）",
 }
 # Lower number = kept first when the 5-image limit forces a drop.
 SIMPLE_ENV_LIMIT = 2
-ROLE_PRIORITY = {"camera": 0, "product": 1, "environment": 2, "appearance": 2, "control_bundle": 2,
+ROLE_PRIORITY = {"camera": 0, "scene_reference": 0, "product": 1, "environment": 2, "appearance": 2, "control_bundle": 2,
                  "person": 3, "structure": 4}
+SCENE_REFERENCE_POLICY = (
+    "场景粗模来源图用于核对连续曲面的类型、连接、开口与遮挡关系、环境材质和入射光条件；"
+    "保持 Blender 底图已匹配的相机与产品投影，依照来源图还原对应场景结构。"
+    "不复制来源图中的车型、车漆颜色或固定高光形状，目标产品按当前场景重新受光。"
+)
 
 
 class DirectEditError(RuntimeError):
@@ -635,6 +643,64 @@ def select_images(edit_base, references, manifest=None, *, repair=False, limit=M
     return chosen, [(p, role) for _pri, _o, p, role, _l in dropped]
 
 
+def _simple_references(edit_base, references, manifest=None):
+    """Recover identity / structure inputs, including original members of bundle sheets.
+
+    Environment inputs remain text-only. Unpacking existing bundle members avoids
+    sending a mixed product/environment sheet as if every cell were a product view.
+    A sheet is still retained when its original members are no longer available.
+    """
+    from . import static_scene
+    labels = _labels_from_manifest(manifest)
+    groups = {str(Path(g["path"]).resolve()): g for g in manifest or [] if g.get("path")}
+    base = str(Path(edit_base).resolve())
+    images, env, dropped, seen = [], [], [], {base}
+    for ref in references or []:
+        rp = str(Path(ref).resolve())
+        role, label = labels.get(rp, ("reference", "参考图"))
+        members = (groups.get(rp) or {}).get("members") or []
+        if len(members) > 1 and all(m.get("path") and Path(str(m["path"])).is_file() for m in members):
+            entries = [(str(Path(str(m["path"])).resolve()), str(m.get("role", "reference")),
+                        ROLE_LABELS.get(str(m.get("role", "")), "参考图")
+                        + (f" · {m['sub_role']}" if m.get("sub_role") else ""), str(m.get("sub_role") or "")) for m in members]
+        else:
+            sub = str(members[0].get("sub_role") or "") if len(members) == 1 else ""
+            entries = [(rp, role, label, sub)]
+        for path, item_role, item_label, sub in entries:
+            if path in seen:
+                continue
+            seen.add(path)
+            if item_role == "environment":
+                if len(env) < SIMPLE_ENV_LIMIT:
+                    env.append(path)
+                else:
+                    dropped.append((path, "environment_limit"))
+            elif (item_role in {"product", "appearance", "control_bundle"}
+                  or (item_role == "person" and static_scene.PERSON in static_scene.allowed())
+                  or (item_role == "structure" and sub in {"identity_detail", "product_identity"})):
+                if not Path(path).is_file():
+                    raise DirectEditError(f"参考图不存在：{Path(path).name}", kind="input")
+                images.append((path, item_role, item_label))
+            elif item_role != "camera":
+                dropped.append((path, "simple"))
+    return images, env, dropped
+
+
+def _simple_reference_text(images):
+    if len(images) <= 1:
+        return ""
+    lines = ["各图职责：图 1 是唯一相机与产品投影依据；后续参考图不得改变它的机位、透视、主体位置和尺度。"]
+    lines.extend(f"图 {i}：{label}。" for i, (_path, _role, label) in enumerate(images[1:], 2))
+    lines.append("产品参考只校核车型/产品造型、灯组、轮毂、部件与身份细节；配色和材质按显式外观锁定，"
+                 "不取产品参考的灯光、反射亮条或背景。结构图只校核边界、深度和法线，图内颜色不是产品材质。")
+    if any("格内标签" in label for _path, _role, label in images):
+        lines.append("混合图集按格内 R 标签分别读取：只取产品身份格和明确标注的身份细节格，"
+                     "旧 structure 格不能覆盖最新白模的产品投影；人物格服从当前场景是否允许人物的要求。")
+    if any(role == "scene_reference" for _path, role, _label in images):
+        lines.append(SCENE_REFERENCE_POLICY)
+    return "\n".join(lines)
+
+
 def fit_images(images, limit, out_dir, size="", tag=""):
     """1.2.7 参考图拼图 for the direct edit: ``images`` = [(path, role, label)], image 1 = the edit canvas.
     The canvas and the Blender camera white model stay standalone; the rest is merged into labelled sheets
@@ -643,7 +709,7 @@ def fit_images(images, limit, out_dir, size="", tag=""):
     paths = [p for p, _r, _l in images]
     roles = {p: ("environment" if r == "environment" else r) for p, r, _l in images}
     labels = {p: l for p, _r, l in images}
-    fixed = [p for p, r, _l in images if r in ("camera", "candidate")][:2] or paths[:1]
+    fixed = [p for p, r, _l in images if r in ("camera", "candidate", "scene_reference")] or paths[:1]
     new, note, info = RC.fit_inputs(paths, limit, out_dir=str(out_dir), roles=roles, labels=labels, fixed=fixed,
                                     long_edge=RC.size_long_edge(size), tag=(tag or "direct")[-24:])
     by = {p: (p, r, l) for p, r, l in images}
@@ -688,13 +754,14 @@ def build_edit_prompt(prompt, images, *, mask=False, repair=False, correction=""
     return "\n".join(lines)
 
 
-# 1.2.4 摄影化提示词 (internal flag, default OFF until the multi-scene A/B says otherwise). The CG wording
-# below literally asks for an advert render (sharp highlight bands, horizon reflection line, strong
-# contrast); the photographic variant describes a real camera and real surface wear instead, and asks
+# 1.2.4 摄影化提示词 (internal flag, default OFF until the multi-scene A/B says otherwise). Both variants
+# use scene-derived reflections; neither may replace the Blender camera or impose studio light strips.
+# The photographic variant adds real surface wear and asks
 # for scale-appropriate micro-texture in the near foreground (user 2026-10-20: 近处的场景看起来也塑料).
 PHOTO_PROMPT = os.environ.get("WONDFUL_PHOTO_PROMPT", "") == "1"
-CLEARCOAT_CG = ("车身要有真实汽车清漆的分量感和复杂光影：锐利的高光带、天空和远景在车身曲面上的清晰倒影、地平线反射线、"
-                "深色的下部反射和强烈的明暗过渡，轮毂、玻璃和饰条各有不同的反射质感；不要平涂、不要塑料感或玩具模型感。")
+CLEARCOAT_CG = ("车身清漆的光照与反射由目标环境统一决定：根据主光方向、光源大小、建筑遮挡、天空和地面补光重新计算受光，"
+                "高光随真实车身曲率与材质粗糙度形成，反射对应周围环境；建筑遮阴处自然变暗，接触阴影与场景主光一致。"
+                "轮毂、玻璃和饰条保持各自材质，不沿用底图棚拍反光，也不复制参考车辆的高光位置；保持真实材质层次。")
 CLEARCOAT_PHOTO = ("车身清漆按真实相机实拍的样子表现：反射是周围真实环境（天空、地面、路边物体）在曲面上的自然倒影，"
                    "高光随曲面和粗糙度自然展开，亮部有柔和的高光滚降、不过曝，不要人为添加锐利亮条、发光轮廓或棚拍反光板；"
                    "漆面带极细的浮尘和轻微橘皮纹理，轮胎和下裙沾有少量与地面一致的尘土，轮毂、玻璃和饰条各有不同的反射质感；"
@@ -707,8 +774,8 @@ FOREGROUND_PHOTO = ("画面下部的近景地面和近处物体离镜头最近�
                     "——细小颗粒、碎石或沙粒、浮尘、轮胎痕或脚印、裂缝、修补和不均匀的磨损与颜色深浅（室内则是地毯纤维、木纹、"
                     "缝隙和轻微使用痕迹；只用与场景描述一致的类型，描述写了干燥就不要加水渍），越近纹理越细越清楚，"
                     "随机不重复；不要像塑料、蜡面或被涂抹过一样光滑均匀。")
-ENDING_PHOTO = ("地面接触阴影、反射和环境光与新场景一致。整体要像全画幅相机实拍的商业广告照片而不是渲染图：约 50mm 镜头、"
-                "f/5.6、ISO 200，焦点在主体上，远景随距离略微失焦并带自然的大气透视；保留真实传感器的细微颗粒和自然的局部"
+ENDING_PHOTO = ("地面接触阴影、反射和环境光与新场景一致。保持 Blender 相机的机位、投影、焦段观感和景深；"
+                "整体具有真实商业广告摄影的成像质感，保留细微颗粒和自然的局部"
                 "细节差异，色彩是克制的相机直出（不过饱和、不做重度 HDR、不过度锐化、不磨皮式平滑）。只输出一张图。")
 
 
@@ -727,8 +794,9 @@ def ending_styled(style) -> str:
 
 
 def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", terrain_text="", vehicle=False,
-                        massing_text="", building_text="", keep_text="", style_text=""):
-    """Short edit prompt for the simple path: only the clay canvas is sent.
+                        massing_text="", building_text="", keep_text="", style_text="", identity_text="",
+                        reference_text=""):
+    """Short edit prompt with an authoritative clay canvas and identity references.
 
     The environment reference is read separately and arrives here as text
     (``env_text``), so its camera and layout can never pull the composition.
@@ -749,7 +817,7 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     env_text = (env_text or "").strip()
     subj = w["subj"]
     building_text = (building_text or "").strip() if (massing_text or "").strip() else ""
-    canvas = "图 1（Blender 白模渲染图）" if building_text else "这张 Blender 白模渲染图"
+    canvas = "图 1（Blender 白模渲染图）" if building_text or reference_text else "这张 Blender 白模渲染图"
     if style:
         lines = [f"把{canvas}直接编辑成一张商业广告图，环境画风与环境参考一致（{style}风格，不是写实照片），{subj}与环境自然融合。"]
     else:
@@ -757,6 +825,10 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     lines.append(f"产品与构图严格保持原图：{subj}在画面中的位置、大小、角度、透视、轮廓、{w['parts']}都不变；"
                  "不增减、不改形任何部件，不重新设计造型；"
                  "相机机位、地平线和构图不变，不平移、不缩放、不裁切、不旋转。")
+    if (reference_text or "").strip():
+        lines.append(reference_text.strip())
+    if (identity_text or "").strip():
+        lines.append(identity_text.strip())
     lines.append(f"地面的坡度、倾斜方向、起伏以及与{w['contact']}的接触关系以原图白模地面为准（可能是斜坡、坡顶、坡道或路沿；"
                  f"山头/坡顶时{subj}停在山的最高处，四周地面向下掉落，{subj}后方不出现更高的地面，远处只露出低于{subj}的远山、天空或城市），"
                  f"新环境的地面材质贴合这块地面铺设，不要把地面改平、改坡度或让{subj}悬空；相机的俯仰和倾斜也保持不变。")
@@ -772,13 +844,17 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
     if building_text:
         lines.append(building_text)
     if vehicle:
+        colour = ("车漆配色与材质服从上面的显式产品外观锁定，明暗随新环境光变化。" if identity_text.strip() else
+                  "车漆保持原本的颜色色相（固有色），明暗随新环境光变化。")
         lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算车身的光照、高光、反射和投影，"
-                     "不要保留白模里的高光和亮度。车漆保持原本的颜色色相（固有色），明暗随新环境光变化。" + CLEARCOAT_CG)
+                     "不要保留白模里的高光和亮度。" + colour + CLEARCOAT_CG)
     else:
+        colour = ("产品各部分配色与材质服从上面的显式产品外观锁定，明暗随新环境光变化。" if identity_text.strip() else
+                  "产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。")
         lines.append(("原图里的灰色地面、背景和灯光只是占位（灰蓝色体块按上面的要求变成" + block_noun + "，不删除）：" if massing_text
                       else "原图里的灰色地面、背景和灯光只是占位：") + "全部替换为下面描述的环境，并按新环境重新计算产品的光照、高光、反射和投影，"
-                     "不要保留白模里的高光和亮度。产品各部分保持原本的颜色色相（固有色）和材质类别，明暗随新环境光变化。"
+                     "不要保留白模里的高光和亮度。" + colour +
                      "产品表面材质要真实可信、有分量感：按材质各自表现（织物有纤维纹理和柔和漫反射，皮革有细腻褶皱和柔光，"
                      "木材有木纹，金属有清晰高光和环境倒影，塑料和涂层有对应的光泽），明暗过渡自然；不要平涂、不要塑料感或玩具模型感。")
     if env_text and not vehicle:
@@ -790,11 +866,11 @@ def build_simple_prompt(brief, fallback_prompt="", env_count=0, env_text="", ter
         tag = next((t for t in ("车身质感", "表面质感") if t in env_text), "")
         src = "白模原图"
         if tag and vehicle:
-            lines.append(f"描述里的「{tag}」只用来决定我们这台车的漆面光泽、反射、高光和明暗方式：车型、比例、颜色色相、"
-                         f"车门状态、灯组、Logo 和车牌全部以{src}为准，不要照搬参考图里的车。")
+            lines.append(f"描述里的「{tag}」只用于理解环境受光条件，目标车的高光和反射按自身曲面重新计算，不复制参考车的高光位置；"
+                         f"车型、比例、车门状态、灯组、Logo 和车牌以{src}及产品身份参考为准，配色与材质服从显式外观锁定。")
         elif tag:
-            lines.append(f"描述里的「{tag}」只用来决定我们这件产品表面的光泽、反射、高光和明暗方式：产品的造型、比例、颜色色相、"
-                         f"部件和 Logo 全部以{src}为准，不要照搬参考图里的任何物体。")
+            lines.append(f"描述里的「{tag}」只用于理解环境受光条件，目标产品的高光和反射按自身表面重新计算；"
+                         f"产品的造型、比例、部件和 Logo 以{src}及产品身份参考为准，配色与材质服从显式外观锁定。")
         lines.append("环境严格按上面的描述还原：只出现描述里写到的元素" + (("和灰蓝色体块对应的" + block_noun + "（有建筑参考图的体块按各自参考图，其余按描述来）" if building_text
                                                           else "和灰蓝色体块对应的" + block_noun + "（它们的风格和材质也按描述来）")
                                                          if massing_text else "")
@@ -1080,17 +1156,16 @@ def _http_error(status, text, headers=None):
 # --------------------------------------------------------------------------- environment description
 
 ENV_DESCRIBE_PROMPT = (
-    "你是汽车广告摄影的灯光与美术指导。请只阅读这张环境参考图，写一段 150–220 字的中文环境描述（有车时再加一段车身质感），"
+    "你是汽车广告摄影的灯光与美术指导。请只阅读这张环境参考图，写一段 150–220 字的中文环境描述，"
     "供另一张图严格按此重建环境。要求精准、克制，只写图中确实可见的内容，不推测、不美化、不补充。依次写清：\n"
     "1. 场景与背景元素：逐项列出可见的山体、建筑、植被、路牌、护栏等，并写明数量级和远近；\n"
     "2. 地面/路面：材质、颜色、干湿、积雪或积水情况；\n"
     "3. 天气与天空：晴/阴/雾/雪，云量，天空颜色；\n"
     "4. 光线：主光方向（画面左/右/前/后/顶）、太阳高度、太阳是否出现在画面内、光质软硬、阴影长短；\n"
     "5. 色温与主色调、反差、大气通透度与氛围。\n"
-    "6. 若图中有车：另起一段以「车身质感：」开头，写 60–120 字，只写材质与光影——车漆光泽和清漆反射强弱、"
-    "高光的位置和形状（如逆光轮廓光、顶部高光带、边缘亮线）、天空和环境在车身上的倒影、暗部深浅和明暗过渡、"
-    "玻璃、轮毂和饰条的反射；不要写车型、品牌、车身颜色、车门开合、车牌或车的位置。没有车就省略这一段。\n"
-    "不要描述构图、机位、视角、焦段、画面布局或物体在画面中的位置；除「车身质感」外不要提到参考图里的车辆或人物。"
+    "6. 说明建筑对主光和天空光的遮挡、地面与建筑的反射色、亮暗过渡；只描述有图像依据的光源与反射来源，"
+    "供目标产品按自身曲面重新受光。不要提取参考车的漆面光泽或高光位置、形状，不添加棚拍反光板。\n"
+    "不要描述构图、机位、视角、焦段、画面布局或物体在画面中的位置；不要提到参考图里的车型、品牌、配色、车辆或人物。"
     "最后单独一句写「不要出现：」列出这张图里没有、但同类场景常被加上的元素（例如画面内的太阳、眩光、古堡遗迹、云海）。"
     "只输出描述本身，不要标题。"
 )
@@ -1104,8 +1179,8 @@ ENV_DESCRIBE_PROMPT_PRODUCT = (
     "3. 天气与天空：晴/阴/雾/雪，云量，天空颜色；\n"
     "4. 光线：主光方向（画面左/右/前/后/顶）、太阳高度、太阳是否出现在画面内、光质软硬、阴影长短；\n"
     "5. 色温与主色调、反差、大气通透度与氛围。\n"
-    "6. 若图中有一个明显的主体物品：另起一段以「表面质感：」开头，写 40–100 字，只写它表面的光泽、高光位置和形状、"
-    "环境在表面上的倒影、暗部深浅和明暗过渡；不要写它是什么物品、品牌、颜色、造型或位置。没有就省略这一段。\n"
+    "6. 说明环境对主光和天空光的遮挡、周围表面的反射色及亮暗过渡；供目标产品按自身表面重新受光。"
+    "不要提取图中物品自己的光泽、高光位置或形状，不添加没有图像依据的棚拍反光板。\n"
     "不要描述构图、机位、视角、焦段、画面布局或物体在画面中的位置；不要提到参考图里的车辆、交通工具或人物，"
     "也不要使用“车”“车身”“车轮”“车漆”等词——道路只写成“路面”或“地面”。"
     "最后单独一句写「不要出现：」列出这张图里没有、但同类场景常被加上的元素（例如画面内的太阳、眩光、古堡遗迹、云海）。"
@@ -1145,7 +1220,7 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
             except (OSError, ValueError):
                 cache = {}
         for path in paths:
-            key = _file_md5(path) + (":v2" if vehicle else ":p1")
+            key = _file_md5(path) + (":v3_lighting" if vehicle else ":p2_lighting")
             if cache.get(key):
                 texts.append(cache[key])
                 continue
@@ -1191,16 +1266,18 @@ def describe_environment(env_paths, *, auth, auth_path, client_version="", model
 def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, mask_path="", manifest=None,
                repair=False, model="", client_version="", timeout=900, log_dir="", tag="",
                cancel_check=None, correction="", simple_brief=None, terrain_text="", vehicle=False,
-               exact_prompt=False, massing_text="", building_refs=None, keep_text="", style_text="", deadline=None):
+               exact_prompt=False, massing_text="", building_refs=None, keep_text="", style_text="", deadline=None,
+               identity_text="", scene_reference_path=""):
     """Edit ``edit_base_path`` (image 1) and save one PNG to ``output_path``.
 
-    ``simple_brief`` (not None) = simple path: only the canvas is sent, with a
-    short scene prompt, like a hand-made edit on the clay render.
+    ``simple_brief`` (not None) = simple path: the canvas plus identity / geometry
+    references are sent with a short scene prompt and explicit ``identity_text``.
     ``exact_prompt`` sends ``prompt`` verbatim (used by the 分层输出 clean plate).
     ``building_refs`` (1.2.0 环境体块 › 建筑参考, simple path with massing only): the
     ``massing.select_building_refs`` selection; each image is attached after the clay canvas
     (图 2…) and the prompt maps it to its grey-blue block.  Environment references are still
-    read as text only.
+    read as text only. ``scene_reference_path`` is reserved for the recorded source
+    of a reconstructed scene: it remains a standalone geometry / lighting reference.
     """
     started = time.time()
     deadline = deadline or RequestDeadline(timeout)
@@ -1219,25 +1296,29 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     attached_refs = []
     if simple:
         images = [(str(Path(edit_base_path).resolve()), "camera", "白模底图")]
-        labels = _labels_from_manifest(manifest)
-        env = []
-        dropped = []
-        for ref in reference_paths or []:
-            rp = str(Path(ref).resolve())
-            role = labels.get(rp, ("", ""))[0]
-            if role == "environment" and len(env) < SIMPLE_ENV_LIMIT and rp not in env:
-                env.append(rp)
-            else:
-                dropped.append((rp, "simple"))
-        # Environment refs are read as text only; the image model sees just the clay canvas
-        # (plus the 建筑参考 images of grey-blue blocks, each mapped to its block in the text).
-        env_paths = env
+        identity_refs, env_paths, dropped = _simple_references(edit_base_path, reference_paths, manifest)
+        if scene_reference_path:
+            sp = str(Path(scene_reference_path).resolve())
+            if not Path(sp).is_file():
+                raise DirectEditError(f"场景来源图不存在：{Path(sp).name}", kind="input")
+            if sp != images[0][0]:
+                images.append((sp, "scene_reference", ROLE_LABELS["scene_reference"]))
+                identity_refs = [item for item in identity_refs if item[0] != sp]
+            # This source is the primary illumination reference; do not describe it twice.
+            env_paths = [sp] + [p for p in env_paths if p != sp]
+        # Building indices are resolved after any collage packing below. Product
+        # identity references never consume an implicit "discard" budget.
         if (massing_text or "").strip():
             for ref in list(building_refs or []):
                 bp = str(ref.get("path") or "")
-                if bp and Path(bp).is_file() and len(images) < MAX_EDIT_IMAGES and len(attached_refs) < 4:
-                    images.append((str(Path(bp).resolve()), "building", f"建筑参考 · 体块 {ref.get('block')}"))
+                if bp and Path(bp).is_file() and len(attached_refs) < 4:
+                    resolved = str(Path(bp).resolve())
+                    label = f"建筑参考 · 体块 {ref.get('block')}「{ref.get('hint') or ''}」 {ref.get('place') or ''}"
+                    if not any(p == resolved for p, _r, _l in images):
+                        images.append((resolved, "building", label))
                     attached_refs.append(ref)
+        seen = {p for p, _r, _l in images}
+        images.extend(item for item in identity_refs if item[0] not in seen)
     else:
         images, dropped = select_images(edit_base_path, reference_paths, manifest, repair=repair, limit=10 ** 6)
     if not simple:
@@ -1248,6 +1329,12 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
         # 1.2.7 参考图超限自动拼图 (was: the lowest-priority references were silently dropped)
         images, more_dropped, collage_note, collage_info = fit_images(images, MAX_EDIT_IMAGES, log_root, size, tag)
         dropped = list(dropped) + more_dropped
+        lost_identity = [it for it in collage_info.get("text_only", [])
+                         if it.get("role") in {"product", "person", "appearance", "control_bundle", "structure"}]
+        if simple and lost_identity:
+            names = "、".join(str(it.get("file", "")) for it in lost_identity)
+            raise DirectEditError(f"身份参考无法完整装入本轮图像输入：{names}。请减少本轮参考图后再生成。",
+                                  kind="identity_capacity", fatal=True)
     mask, mask_note = prepare_mask(mask_path, _png_size(images[0][0]), log_root)
     env_text, env_note = "", ""
     if simple and env_paths:
@@ -1268,8 +1355,9 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
     elif simple:
         text = build_simple_prompt(simple_brief, prompt, env_text=env_text, terrain_text=terrain_text,
                                    vehicle=bool(vehicle), massing_text=massing_text,
-                                   building_text=_building_text(attached_refs, vehicle), keep_text=keep_text,
-                                   style_text=style_text)
+                                   building_text=_building_text(attached_refs, vehicle, images, collage_info), keep_text=keep_text,
+                                   style_text=style_text, identity_text=identity_text,
+                                   reference_text=_simple_reference_text(images))
     else:
         text = build_edit_prompt(prompt, images, mask=bool(mask), repair=repair, correction=correction)
     if collage_note:
@@ -1284,6 +1372,7 @@ def edit_image(*, prompt, edit_base_path, reference_paths, output_path, size, ma
            "images": [], "dropped": [Path(p).name + f"({r})" for p, r in dropped], "mask_note": mask_note,
            "attempts": [], "simple": simple, "vehicle": bool(vehicle), "prompt": text[:6000],
            "env_refs_as_text": [Path(p).name for p in env_paths] if simple else [], "env_note": env_note,
+           "scene_reference": Path(scene_reference_path).name if simple and scene_reference_path else "",
            "building_refs": [{"block": r.get("block"), "file": Path(str(r.get("path"))).name} for r in attached_refs],
            "collage": collage_info}
     model_used = chain[0]
@@ -1420,11 +1509,29 @@ def _sleep_cancellable(seconds, cancel_check=None):
         time.sleep(min(0.25, max(0.0, end - time.time())))
 
 
-def _building_text(refs, vehicle=False) -> str:
+def _building_text(refs, vehicle=False, images=None, collage_info=None) -> str:
     if not refs:
         return ""
     from .massing import building_ref_text
-    return building_ref_text(refs, first_index=2, vehicle=bool(vehicle))
+    if images is None:
+        return building_ref_text(refs, first_index=2, vehicle=bool(vehicle))
+    selectors, retained = {}, []
+    for ref in refs:
+        path = str(Path(str(ref["path"])).resolve())
+        selector = next((f"图{i}" for i, (p, _r, _l) in enumerate(images, 1) if p == path), "")
+        if not selector:
+            for sheet in (collage_info or {}).get("sheets", []):
+                index = next((i for i, (p, _r, _l) in enumerate(images, 1) if p == sheet["path"]), None)
+                cell = next((c for c in sheet.get("cells", []) if c.get("file") == Path(path).name
+                             and c.get("role") == "building"), None)
+                if index and cell:
+                    selector = f"图{index} 的 {cell['letter']} 格"
+                    break
+        if selector:
+            selectors[len(retained) + 2] = selector
+            retained.append(ref)
+    text = building_ref_text(retained, first_index=2, vehicle=bool(vehicle))
+    return re.sub(r"图(\d+)", lambda m: selectors.get(int(m[1]), m[0]), text)
 
 
 def fallback_with_building_refs(kwargs, building_refs, vehicle=False, limit=4):
@@ -1458,7 +1565,7 @@ def short_reason(exc) -> str:
 def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bundle_note="",
                            client_version="", on_status=None, cancel_check=None,
                            simple_base="", simple_brief=None, terrain_text="", vehicle=False, massing_text="",
-                           building_refs=None, keep_text="", style_text=""):
+                           building_refs=None, keep_text="", style_text="", identity_text="", scene_reference_path=""):
     """Try the direct edit; on any failure log it and run ``fallback(**kwargs)`` (codex exec).
 
     ``state`` is a per-render dict: once a fatal error happens (auth, endpoint),
@@ -1478,7 +1585,9 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
     if use_simple:
         edit_base = simple_base
     if state.get("stopped"):
-        raise DirectEditStop(stop_message("rate" if state["stopped"] == "rate_limit_long" else state["stopped"]),
+        message = state.get("stopped_message") or stop_message(
+            "rate" if state["stopped"] == "rate_limit_long" else state["stopped"])
+        raise DirectEditStop(message,
                              kind=state["stopped"])
     if not state["disabled"]:
         prompt = kwargs.get("prompt", "")
@@ -1499,6 +1608,8 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 building_refs=building_refs if use_simple else None,
                 keep_text=keep_text if use_simple else "",
                 style_text=style_text if use_simple else "",
+                identity_text=identity_text if use_simple else "",
+                scene_reference_path=scene_reference_path if use_simple else "",
             )
             state["direct_ok"] += 1
             if (result.get("collage") or {}).get("merged"):
@@ -1509,6 +1620,19 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
                 raise RuntimeError("任务已取消") from exc
             if exc.kind == "timeout":
                 raise DirectEditStop(str(exc), kind="timeout") from exc
+            if exc.kind == "identity_capacity":
+                # An agent fallback uses the same input budget. Retrying there
+                # would turn the lost identity view into a silent text fallback.
+                state["errors"].append({"kind": exc.kind, "message": str(exc)})
+                state["stopped"] = exc.kind
+                state["disabled"] = state["last_reason"] = short_reason(exc)
+                state["stopped_message"] = str(exc)
+                if on_status:
+                    try:
+                        on_status(str(exc))
+                    except Exception:
+                        pass
+                raise DirectEditStop(str(exc), kind=exc.kind) from exc
             if exc.kind in STOP_KINDS:
                 # 1.2.3: quota / login / long rate limit stop the render; codex exec runs on the same
                 # account and would hit the same wall, so it is never tried for these.
@@ -1549,13 +1673,57 @@ def generate_with_fallback(kwargs, *, fallback, state, size, manifest=None, bund
     except TimeoutError as exc:
         raise DirectEditStop(str(exc), kind="timeout") from exc
     kwargs = dict(kwargs, timeout=0 if remaining is None else remaining)
-    state["fallbacks"] += 1
     kwargs = fallback_with_building_refs(kwargs, building_refs, vehicle=bool(vehicle))
     if manifest:      # 1.2.7: the 参考图拼图 names every cell by its bundle role
         roles = dict(kwargs.get("reference_roles") or {})
         for path, (role, label) in _labels_from_manifest(manifest).items():
             roles.setdefault(path, ("sheet" if label.startswith("参考图集") else role, label))
         kwargs = dict(kwargs, reference_roles=roles)
+    if use_simple:
+        # The agent fallback keeps its established Camera Base / repair-mask
+        # arrangement. Carry the new source role explicitly so a direct failure
+        # cannot silently degrade reconstruction back to a short description.
+        if identity_text and identity_text not in kwargs.get("prompt", ""):
+            kwargs["prompt"] = str(kwargs.get("prompt") or "").rstrip() + "\n" + identity_text
+        if scene_reference_path:
+            source = str(Path(scene_reference_path).resolve())
+            if not Path(source).is_file():
+                raise DirectEditError(f"场景来源图不存在：{Path(source).name}", kind="input")
+            paths = list(kwargs.get("reference_paths") or [])
+            if source not in {str(Path(p).resolve()) for p in paths}:
+                paths.append(source)
+            roles = dict(kwargs.get("reference_roles") or {})
+            roles[source] = ("scene_reference", ROLE_LABELS["scene_reference"])
+            kwargs = dict(kwargs, reference_paths=paths, reference_roles=roles,
+                          prompt=str(kwargs.get("prompt") or "").rstrip()
+                          + f"\n参考图「{Path(source).name}」是场景粗模来源图。" + SCENE_REFERENCE_POLICY)
+    # A direct auth/endpoint failure can happen before edit_image plans its inputs.
+    # Check required geometry-identity views against the agent's actual packing
+    # plan as well; their subtype otherwise survives only in a human label while
+    # reference_collage still treats the path as an expendable structure map.
+    required_details = {str(Path(g["path"]).resolve()) for g in manifest or [] if g.get("path")
+                        and any(m.get("sub_role") in {"identity_detail", "product_identity"}
+                                for m in g.get("members", []))}
+    if required_details:
+        from . import reference_collage as _RC
+        refs = [str(Path(p).resolve()) for p in kwargs.get("reference_paths", []) if p]
+        assets = [str(Path(kwargs[k]).resolve()) for k in ("edit_base_path", "edit_mask_path") if kwargs.get(k)]
+        attached = list(dict.fromkeys(refs + assets))
+        roles = {str(Path(p).resolve()): (v[0] if isinstance(v, (tuple, list)) else v)
+                 for p, v in (kwargs.get("reference_roles") or {}).items()}
+        fixed = set(refs[:1] + assets + [p for p in attached if roles.get(p) == "scene_reference"])
+        if len(attached) > MAX_EDIT_IMAGES:
+            _standalone, _sheets, omitted = _RC.plan(
+                [(p, roles.get(p, "reference")) for p in attached if p not in fixed], MAX_EDIT_IMAGES, len(fixed))
+            lost = [Path(p).name for p, _role in omitted if p in required_details]
+            if lost:
+                message = "身份参考无法完整装入本轮图像输入：" + "、".join(lost) + "。请减少本轮参考图后再生成。"
+                state["stopped"] = "identity_capacity"
+                state["stopped_message"] = message
+                state["disabled"] = state["last_reason"] = short_reason(message)
+                state["errors"].append({"kind": "identity_capacity", "message": message})
+                raise DirectEditStop(message, kind="identity_capacity")
+    state["fallbacks"] += 1
     try:
         result = fallback(**kwargs)
     except TypeError as exc:
@@ -1590,7 +1758,8 @@ def _engine_note(state) -> str:
     if state.get("stopped"):
         kind = state["stopped"]
         return {"quota": "已停止：Codex 生图额度已用完（未改用代理生成）",
-                "auth": "已停止：Codex 登录无效，请运行 codex login（未改用代理生成）"}.get(
+                "auth": "已停止：Codex 登录无效，请运行 codex login（未改用代理生成）",
+                "identity_capacity": "已停止：身份参考超过图像输入容量，请减少参考图（未改用代理生成）"}.get(
             kind, "已停止：Codex 限流时间较长（未改用代理生成）") + (f" · 已完成直连 {ok} 次" if ok else "")
     if ok and not fb:
         return "生图：Codex 图像编辑（直连）"

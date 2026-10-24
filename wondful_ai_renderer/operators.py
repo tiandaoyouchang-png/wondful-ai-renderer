@@ -1328,6 +1328,58 @@ def _sb_reference(props):
     return (bpy.path.abspath(style[0]), "step3") if style else ("", "")
 
 
+def _sb_generation_reference(context, props):
+    """Return the verified source of the blockout actually used by this scene.
+
+    A newly selected environment image is not proof that an existing blockout
+    was reconstructed from it. Use the recorded snapshot and content hash on
+    that blockout, never the global text datablock or the current UI selection.
+    """
+    from . import massing as MS
+    if not bool(getattr(props, "massing_enabled", True)):
+        return "", ""
+    root = MS.find_collection(context.scene, props)
+    if root is None:
+        return "", ""
+    if root not in list(context.scene.collection.children_recursive) and root != context.scene.collection:
+        return "", "所选环境体块不在当前场景中，未使用其参考图"
+    rendered = set(MS.massing_objects(root, getattr(props, "product_collection", None)))
+    if not rendered:
+        return "", ""
+    sources, warnings, seen = set(), [], set()
+    pending = [root]
+    while pending:
+        coll = pending.pop()
+        ident = coll.as_pointer() if hasattr(coll, "as_pointer") else id(coll)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if bool(getattr(coll, "hide_render", False)):
+            continue
+        pending.extend(getattr(coll, "children", ()))
+        if not coll.get("wondful_scene_blockout"):
+            continue
+        if not any(obj in rendered for obj in coll.all_objects):
+            continue
+        raw = str(coll.get("wondful_sb_reference_image", "") or "")
+        expected = str(coll.get("wondful_sb_reference_sha256", "") or "")
+        if not raw or not expected:
+            warnings.append("旧场景粗模未记录参考来源，重新生成粗模后可带入原图")
+            continue
+        path = Path(bpy.path.abspath(raw)).expanduser()
+        try:
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                warnings.append("粗模参考副本已丢失或改变，请重新从参考图生成粗模")
+                continue
+        except OSError:
+            warnings.append("无法读取粗模参考副本，请重新从参考图生成粗模")
+            continue
+        sources.add(str(path.resolve()))
+    if len(sources) > 1:
+        return "", "当前环境含多个不同来源的粗模，未自动选择单张结构参考"
+    return (next(iter(sources)) if sources else ""), "；".join(dict.fromkeys(warnings))
+
+
 def _sb_prepare_png(src, dst, long_edge):
     """The analysis copy of the photo: a real PNG (also for the numpy fit score), long edge ≤ ``long_edge``;
     returns (path, (w, h)). Main thread only (bpy.data.images)."""
@@ -1395,7 +1447,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     bl_label = "从参考图生成场景粗模"
     bl_description = ("让 AI 分析环境参考图（③ 第一张，或 ④ 里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
                       "放进环境体块里的「Wondful 场景粗模」集合（重新生成会替换它），每个体块都按照片命名；产品位置不变。"
-                      "参考图只用于分析，不会发给生图模型")
+                      "记录原图来源，生成时辅助保留连续结构、材质与环境光照；产品以当前模型为准")
     bl_options = {"REGISTER", "UNDO"}
 
     analysis_json: StringProperty(name="分析结果", description="（测试 / 离线）直接用这个 JSON 文件，不调用 AI",
@@ -1588,6 +1640,9 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         coll = getattr(props, "product_collection", None)
         data = dict(data)
         data.setdefault("_frame", {"w": self._sb["frame"][0], "h": self._sb["frame"][1]})
+        reference_snapshot = Path(self._sb["upload"])
+        data["_reference_image_path"] = str(reference_snapshot.resolve())
+        data["_reference_image_sha256"] = hashlib.sha256(reference_snapshot.read_bytes()).hexdigest()
         try:   # 1.2.6 只做场景相关物体: the completion stats never see people / other vehicles either
             from . import static_scene as _SS
             self._sb["analysis"] = _SS.strip_dynamic(data, _SS.wanted(getattr(props, "scene_brief", "") or ""))[0]
@@ -1610,7 +1665,10 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             SBB.render_preview(context, info, str(path))
         photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
         render = read_png(str(path)).astype("float32")
-        sc = SB.fit_score(photo, render)
+        subject = (self._sb.get("analysis") or {}).get("reference_subject") or {}
+        sc = SB.fit_score(photo, render, exclude_bbox=subject.get("bbox") if subject.get("present") else None)
+        if info.get("framing_fit"):
+            sc["product_framing"] = info["framing_fit"]
         pr = self._sb.get("precise_rounds") or []
         k = 1 if tag == "r2" else 0
         if len(pr) > k and pr[k].get("err_after_pct") is not None:
@@ -3141,6 +3199,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         color_source, appearance_lock_text, identity_items = _appearance_context(props)
         if structure.get("enabled") and identity_items:
             structure["identity_checklist"] = list(identity_items)
+        from .appearance_lock import identity_block
+        direct_identity_text = "\n".join(x for x in (appearance_lock_text, identity_block(identity_items)) if x)
         render_prompt = build_render_prompt(
             current_prompt,
             camera_w,
@@ -3252,6 +3312,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_terrain_text = ""
             direct_massing_text = ""
             direct_building_refs = []
+            direct_scene_reference = ""
+            scene_reference_note = ""
             from .product_kind import is_vehicle as _is_vehicle
             try:
                 direct_vehicle = _is_vehicle(props)
@@ -3263,6 +3325,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 direct_keep_text = keep_prompt(direct_vehicle, self._detail.get("keep_texts") or ())
             direct_state["vehicle"] = direct_vehicle
             if bool(getattr(prefs, "codex_direct_simple", True)):
+                source_reference, scene_reference_note = _sb_generation_reference(context, props)
+                if source_reference:
+                    try:
+                        copied_reference = copy_references(
+                            [source_reference], self._session, "scene_layout_reference")
+                        if not copied_reference:
+                            raise OSError("已记录的参考副本不可用")
+                        direct_scene_reference = str(copied_reference[0])
+                    except OSError as exc:
+                        scene_reference_note = f"场景参考复制失败：{exc}"
                 clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
                 try:
                     from .viewport_capture import render_clay_base, LAST_CLAY_INFO
@@ -3312,6 +3384,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
             direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
                                              for r in direct_building_refs]
+            direct_state["scene_reference"] = Path(direct_scene_reference).name if direct_scene_reference else ""
+            direct_state["scene_reference_note"] = scene_reference_note
+            if scene_reference_note:
+                props.last_massing_note = (str(getattr(props, "last_massing_note", "") or "")
+                                           + " · " + scene_reference_note).strip(" ·")
 
             def _direct_status(text):
                 self._phase = text
@@ -3327,6 +3404,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     building_refs=direct_building_refs or None,
                     keep_text=direct_keep_text,
                     style_text=direct_style_text,
+                    identity_text=direct_identity_text,
+                    scene_reference_path=direct_scene_reference,
                 )
         if self._detail and not Path(self._detail["detail"]).is_file():
             # no clay base this run (other canvas / provider): render the detail pass on its own

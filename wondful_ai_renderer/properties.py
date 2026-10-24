@@ -964,7 +964,7 @@ class WONDFUL_AISettings(PropertyGroup):
     # 1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
     # ui_show_scene_blockout: the old 高级 disclosure; unused since ④, kept so saved .blend files load unchanged
     ui_show_scene_blockout: BoolProperty(name="从参考图生成场景粗模", default=False)
-    sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；这张图只用于分析，不会发给生图模型",
+    sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；重建相机与结构，并记录原图用于连续结构、材质与光照参照",
                                   subtype="FILE_PATH", default="")
     sb_set_camera: BoolProperty(name="同时设置相机", default=True,
                                 description="按照片估计的机位高度、俯仰、视角新建 / 更新「Wondful 参考相机」并设为场景相机；"

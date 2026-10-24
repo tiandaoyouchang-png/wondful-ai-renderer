@@ -601,7 +601,9 @@ def generate_image(
         try:
             attached, collage_note, collage_info = _RC.fit_inputs(
                 attached, _MAXP, out_dir=str(session_dir), roles=roles, labels=labels,
-                fixed=[p for p in (refs[:1] + [edit_base, edit_mask]) if p], long_edge=int(collage_long_edge or 2048),
+                fixed=[p for p in (refs[:1] + [edit_base, edit_mask]
+                                   + [path for path in attached if roles.get(path) == "scene_reference"]) if p],
+                long_edge=int(collage_long_edge or 2048),
                 tag=target.stem[-24:])
         except _RC.CollageError as exc:
             raise ReferenceLimitError(f"参考图拼图失败：{exc}") from exc

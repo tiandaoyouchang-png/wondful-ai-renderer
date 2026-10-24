@@ -279,9 +279,9 @@ class WiringTests(unittest.TestCase):
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         self.assertIn("sb_set_camera: BoolProperty(name=\"同时设置相机\", default=True", props)
         self.assertIn("sb_correct: BoolProperty(name=\"自动校正一轮\", default=False", props)
-        self.assertIn("这张图只用于分析，不会发给生图模型", props)   # 1.2.3: the hint moved into the tooltip
+        self.assertIn("记录原图用于连续结构、材质与光照参照", props)
 
-    def test_operator_never_sends_reference_to_image_model(self):
+    def test_blockout_build_does_not_trigger_image_generation(self):
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
         body = ops.split("class WONDFUL_OT_scene_blockout_build")[1].split("\nclass ")[0]
         for call in ("edit_image", "generate_image", "style_images.add", "load_reference"):

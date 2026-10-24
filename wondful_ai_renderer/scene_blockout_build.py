@@ -150,7 +150,8 @@ def product_info(product_collection, exclude=()):
     mn, mx = xs.min(0), xs.max(0)
     base = Vector((float((mn[0] + mx[0]) / 2), float((mn[1] + mx[1]) / 2), float(zmin)))
     return {"base": base, "dims": (max(lmin, 0.05), max(lmaj, 0.05), max(zmax - zmin, 0.05)), "axis": angle,
-            "half_diag": float(np.max(np.hypot(xs[:, 0] - c[0], xs[:, 1] - c[1])))}
+            "half_diag": float(np.max(np.hypot(xs[:, 0] - base.x, xs[:, 1] - base.y))),
+            "bounds": [tuple(float(v) for v in point) for point in pts]}
 
 
 def camera_yaw(cam):
@@ -170,7 +171,7 @@ class _Builder:
         self.coll = coll
         self.fw, self.fh = frame
         self.hw = self.fh / float(self.fw)
-        self.warn = []
+        self.warn = list(self.S.get("_geometry_warnings") or [])
         self.mats = {}
         self.groups = []           # [(label, [objects])]
         self.interior = self.S.get("scene_kind") == "interior"
@@ -705,6 +706,21 @@ class _Builder:
                 self.warn.append(f"移除了与产品重叠的{label}（{p.get('id', '')}）")
             self.group(label, objs)
 
+    def ribbons(self):
+        """Connected, smooth paired-edge surfaces; never substitute stacked primitives."""
+        for ribbon in self.S.get("ribbons", []):
+            label = SB.element_label("ribbon", ribbon, self.interior)
+            try:
+                vertices, faces = SB.ribbon_mesh(ribbon["sections"], ribbon["thickness_m"])
+                vertices[:, 2] += self.foot
+                obj = self.mesh(label, vertices, faces, "building", smooth=True)
+                obj["wondful_env_type"] = "ribbon"
+                obj["wondful_material"] = ribbon.get("material", "")
+                obj["wondful_sb_connected_surface"] = 1
+                self.group(label, [obj])
+            except (ValueError, TypeError, KeyError) as exc:
+                self.warn.append(f"{label}：{exc}，已跳过")
+
     # ---------------------------------------------------------------- foliage
     def _lumpy(self, name, lump, seed):
         bm = bmesh.new()
@@ -961,6 +977,7 @@ class _Builder:
         self.bands()
         self.cliffs()
         self.primitives()
+        self.ribbons()
         self.foliage()
         return self
 
@@ -1012,28 +1029,19 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     coll = bpy.data.collections.new(SB.COLLECTION_NAME)
     coll["wondful_scene_blockout"] = 1
     coll["wondful_sb_kind"] = "interior" if S.get("scene_kind") == "interior" else "outdoor"   # 1.2.6: 室内/室外 authority
+    if S.get("_reference_image_path"):
+        coll["wondful_sb_reference_image"] = str(S["_reference_image_path"])
+    if S.get("_reference_image_sha256"):
+        coll["wondful_sb_reference_sha256"] = str(S["_reference_image_sha256"])
     (parent_collection or scene.collection).children.link(coll)
     prod = product_info(product_collection, exclude=massing_objects)
     spot = S["product_spot"]
-    pad = None
-    moved = ""
-    if prod is not None:
-        # the analysed spot can be too tight for this product; nudge it (≤ 2.5 × its radius, still in frame) off standing blocks
-        # before anything is removed
-        free = SB.free_spot(S.get("primitives", []), spot["x"], spot["y"], prod["half_diag"] * 0.85, prod["dims"][2],
-                           hfov_deg=S["camera"]["hfov_deg"])
-        if free is not None and free[2] > 0:
-            spot["x"], spot["y"] = free[0], free[1]
-            moved = f"产品位置挪了 {free[2]:.2f} m，避开周围体块"
-        # (x, y, level-ground radius, remove-obstacle radius, product height), analysis coordinates
-        pad = (spot["x"], spot["y"], prod["half_diag"] + 0.6, prod["half_diag"] * 0.85, prod["dims"][2])
-    b = _Builder(S, coll, frame, pad=pad).run()
-    sx, sy = spot["x"], spot["y"]
-    zs = b.surface_at(sx, sy)
-    # yaw: the user's own camera direction when the camera is not set from the analysis, else the product's long
-    # axis along the analysed spot heading
+    subject = S["reference_subject"]
+    locked = bool(set_camera and prod is not None and subject["present"])
+    if locked and subject["heading_confidence"] >= 0.5:
+        spot["rot_z_deg"] = subject["heading_deg"]
+    own = camera_yaw(scene.camera) if (scene.camera is not None and not scene.camera.get("wondful_sb_camera")) else None
     yaw = 0.0
-    own = camera_yaw(scene.camera) if (scene.camera is not None and scene.camera.name != SB.CAMERA_NAME) else None
     if not set_camera and own is not None:
         yaw = own
     elif prod is not None and prod["axis"] is not None:
@@ -1041,6 +1049,65 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     elif own is not None:
         yaw = own
     Rz = Matrix.Rotation(yaw, 4, "Z")
+    framing_fit = {"enabled": False, "reason": "NO_REFERENCE_SUBJECT" if not subject["present"] else
+                   ("CAMERA_NOT_SELECTED" if not set_camera else "NO_PRODUCT")}
+    target_points = None
+    if locked:
+        # Rotate actual object bounds into analysis coordinates; never distort the target
+        # to fit the original product's silhouette or height.
+        inv_rotation = np.array([list(row) for row in Rz.to_3x3()]).T
+        target_points = (np.asarray(prod["bounds"]) - np.asarray(prod["base"])) @ inv_rotation.T
+        probe = _Builder(S, coll, frame)
+
+        def ground_probe(x, y):
+            return 0.0 if probe.interior else float(probe.height_raw(np.asarray([x]), np.asarray([y]))[0])
+        framing_fit = SB.fit_subject_framing(S["camera"], frame, subject, target_points,
+                                            (spot["x"], spot["y"]), ground_probe)
+        framing_fit["heading_applied"] = bool(subject["heading_confidence"] >= 0.5 and prod["axis"] is not None)
+        framing_fit["geometry_basis"] = "OBJECT_BOUNDS"
+        if framing_fit.get("enabled"):
+            spot["x"], spot["y"] = framing_fit["x"], framing_fit["y"]
+    pad = None
+    moved = ""
+    if prod is not None:
+        # the analysed spot can be too tight for this product; nudge it (≤ 2.5 × its radius, still in frame) off standing blocks
+        # before anything is removed
+        free = None if locked else SB.free_spot(S.get("primitives", []), spot["x"], spot["y"],
+                                               prod["half_diag"] * 0.85, prod["dims"][2],
+                                               hfov_deg=S["camera"]["hfov_deg"])
+        if free is not None and free[2] > 0:
+            spot["x"], spot["y"] = free[0], free[1]
+            moved = f"产品位置挪了 {free[2]:.2f} m，避开周围体块"
+        # (x, y, level-ground radius, remove-obstacle radius, product height), analysis coordinates
+        # A locked composition must not silently move the subject OR delete a conflicting
+        # building. Keep both and report the modelling conflict for correction.
+        pad = (spot["x"], spot["y"], prod["half_diag"] + 0.6,
+               0.0 if locked else prod["half_diag"] * 0.85, prod["dims"][2])
+    b = _Builder(S, coll, frame, pad=pad).run()
+    sx, sy = spot["x"], spot["y"]
+    zs = b.surface_at(sx, sy)
+    # yaw: the user's own camera direction when the camera is not set from the analysis, else the product's long
+    # axis along the analysed spot heading
+    if locked:
+        obstacles = SB.blocking_footprints(S.get("primitives", []), prod["dims"][2])
+        if SB.clearance(obstacles, sx, sy) < prod["half_diag"] * 0.85:
+            b.warn.append("参考主体位置与环境体块重叠，已保留投影位置及体块；请校正重叠结构")
+        if framing_fit.get("enabled"):
+            # Report the actual built ground/road elevation, not only the flat-ground estimate.
+            actual = SB.framing_metrics(S["camera"], frame, target_points, (sx, sy, zs),
+                                        float(b.CAMPOS.z) - S["camera"]["height_m"])
+            if actual is not None:
+                errors = SB.framing_errors(subject, actual)
+                residual = max(abs(v) for v in errors.values())
+                framing_fit.update(metrics=actual, errors=errors, max_error_frac=residual,
+                                   status="FITTED" if residual <= 0.025 else "RESIDUAL", z=float(zs))
+                if residual > 0.025:
+                    b.warn.append(f"主体投影仍有 {residual * 100:.1f}% 画幅残差；保留真实模型尺寸，需复核参考相机")
+            else:
+                framing_fit.update(status="NOT_VISIBLE", max_error_frac=None)
+                b.warn.append("主体部分落在相机后方，请复核参考相机")
+        else:
+            b.warn.append("参考主体投影拟合未成功，已保留分析位置；请复核相机与主体锚点")
     base = prod["base"] if prod is not None else Vector((0.0, 0.0, 0.0))
     local_spot = Vector((sx, sy, zs))
     world = Matrix.Translation(base - (Rz @ local_spot)) @ Rz
@@ -1048,12 +1115,13 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     roots = _assemble(b, world)
     note = SB.scene_note(S)
     if note and getattr(b, "terrain_obj", None) is not None:
-        b.terrain_obj[SB.SCENE_NOTE_PROP] = note[:400]
+        b.terrain_obj[SB.SCENE_NOTE_PROP] = note[:900]
     cam_world = world @ b.cam_local
     cam_obj = None
     if set_camera:
-        cam_obj = bpy.data.objects.get(SB.CAMERA_NAME)
-        if cam_obj is None or cam_obj.type != "CAMERA":
+        # A user-created camera can have our display name; only reuse owned cameras.
+        cam_obj = next((o for o in scene.objects if o.type == "CAMERA" and o.get("wondful_sb_camera")), None)
+        if cam_obj is None:
             cd = bpy.data.cameras.new(SB.CAMERA_NAME)
             cam_obj = bpy.data.objects.new(SB.CAMERA_NAME, cd)
             scene.collection.objects.link(cam_obj)
@@ -1090,6 +1158,7 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
             "cam_world": [list(r) for r in cam_world], "yaw_deg": round(math.degrees(yaw), 2), "frame": list(frame),
             "labels": [lab for lab, _o in b.groups], "notes": notes, "scene_note": note,
             "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot),
+            "framing_fit": framing_fit, "ribbons": sum(bool(o.get("wondful_sb_connected_surface")) for o in coll.all_objects),
             # 1.2.5 细节粗模: analysis → world matrix, camera height in the local frame, product spot + pad
             "world": [list(r) for r in world], "cam_local_z": float(b.CAMPOS.z), "spot_local": [sx, sy, zs],
             "pad_radius": float(pad[2]) if pad else 2.5}

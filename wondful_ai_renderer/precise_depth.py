@@ -9,9 +9,10 @@ numpy only (no scipy / PIL / SegFormer):
 2. ``depth_block(geo)``: the MEASURED GEOMETRY text appended to the analysis prompt (variant D): fixed camera,
    an 8×6 depth grid and the biggest depth blobs.
 3. ``apply_camera(data, cam)``: the measured camera overrides whatever the LLM returned (fixed values).
-4. ``snap(data, geo)``: every LLM block is moved to the measured distance of its own screen footprint (scale
-   about the camera: screen size kept, metric distance + size right); optionally (P1, ``SIZE_SNAP_ENABLED``, off)
-   its height and width are set from the measured points of that depth region (clamped).
+4. ``snap(data, geo)``: every LLM block is moved to the measured distance of its own screen footprint, scaling
+   horizontal positions and dimensions while keeping its terrain-relative base. This is not a camera-centred
+   3D scale: vertical screen position can change when ground contact is retained. Optionally (P1,
+   ``SIZE_SNAP_ENABLED``, off) its height and width are set from that depth region's measured points (clamped).
 5. ``range_error(data, geo)``: the 3D fit number: median |distance error| of blocks vs the measured depth.
 
 Classes come from the depth itself (no segmentation model): sky = MoGe mask off; ground = upward normal and
@@ -176,10 +177,11 @@ def camera_from_plane(n, d):
     xax /= np.linalg.norm(xax)
     yax = np.cross(z, xax)
     R = np.stack([xax, yax, z])
-    fwd = R @ np.array([0, 1.0, 0])
-    rgt = R @ np.array([1.0, 0, 0])
-    pitch = math.degrees(math.asin(max(-1.0, min(1.0, fwd[2]))))
-    roll_up = math.degrees(math.asin(max(-1.0, min(1.0, rgt[2]))))
+    # For the builder's XYZ Euler, the ground normal in this camera frame is
+    # (-sin(roll), cos(roll)*sin(pitch), cos(roll)*cos(pitch)).  asin(fwd.z)
+    # measures elevation, not the Euler pitch, and is biased when roll != 0.
+    pitch = math.degrees(math.atan2(z[1], z[2]))
+    roll_up = math.degrees(math.asin(max(-1.0, min(1.0, z[0]))))
     return R, float(d), pitch, -roll_up
 
 
@@ -304,14 +306,24 @@ def apply_camera(data, cam, frame) -> dict:
 
 
 class Projector:
+    """Project the ground-aligned local frame with the builder's camera convention.
+
+    Horizontal sensor fit, square pixels, zero shift; (u, v) have a top-left
+    origin. The rotation is Blender's Euler((90 + pitch), roll, 0), 'XYZ'.
+    """
+
     def __init__(self, cam, frame):
         self.h = float(cam["height_m"])
         p = math.radians(float(cam["pitch_deg"]))
+        r = math.radians(float(cam.get("roll_deg", 0.0)))
+        sp, cp, sr, cr = math.sin(p), math.cos(p), math.sin(r), math.cos(r)
         self.tx = math.tan(math.radians(float(cam["hfov_deg"])) / 2)
         self.ty = self.tx * frame[1] / float(frame[0])
-        self.f = np.array([0, math.cos(p), math.sin(p)])
-        self.up = np.array([0, -math.sin(p), math.cos(p)])
-        self.rt = np.array([1.0, 0, 0])
+        # Ry(roll) @ Rx(90 + pitch): local -Z is forward, +Y up, +X right.
+        # A 2D rotation after projection is not equivalent at nonzero pitch.
+        self.f = np.array([sr * sp, cp, cr * sp])
+        self.up = np.array([sr * cp, -sp, cr * cp])
+        self.rt = np.array([cr, 0.0, -sr])
 
     def __call__(self, pt):
         d = np.asarray(pt, float) - np.array([0, 0, self.h])
@@ -443,6 +455,14 @@ def fov_warning(llm_cam, cam):
 # ---------------------------------------------------------------------------------------- snap (P0 distance + P1 size)
 
 def _scale_about_camera(item, ratio, keys_size):
+    """Rescale a grounded layout in XY (legacy name; not a full 3D homothety).
+
+    ``z_offset`` is clearance above terrain, not an absolute world-space Z.
+    The builder re-anchors the base on the terrain at the new XY. Inserting a
+    camera-height correction here would float or bury grounded buildings.
+    Keep that clearance; vertical projection is allowed to change as depth is
+    corrected. A screen-invariant adjustment requires a terrain-aware solve.
+    """
     item["x"] = item["x"] * ratio
     item["y"] = item["y"] * ratio
     for k in keys_size:

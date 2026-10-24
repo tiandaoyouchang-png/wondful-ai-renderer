@@ -1517,7 +1517,7 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
                      keep_path: str = "", matid_path: str = "", geometry_prefix: str = "",
                      geometry_size=None, detail: str = "") -> bool:
-    """Render the Scene Camera with a temporary floor, sun and light-gray world.
+    """Render the Scene Camera with a temporary floor and soft neutral illumination.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
     with ground contact gives the image model a photographic starting point, so
@@ -1540,8 +1540,12 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     snap = {
         "engine": render.engine, "filepath": render.filepath, "x": render.resolution_x, "y": render.resolution_y,
         "pct": render.resolution_percentage, "fmt": _snapshot_image_format(render.image_settings),
+        "color_mode": render.image_settings.color_mode,
         "world": scene.world, "film": getattr(render, "film_transparent", False),
     }
+    cycles = getattr(scene, "cycles", None)
+    if cycles is not None:
+        snap["cycles"] = (cycles.samples, cycles.use_denoising)
     frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
     created = []
     restore = []  # undo steps for the temporary product pose (自定义地形), run before cleanup
@@ -1559,6 +1563,14 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         slope = math.degrees(math.acos(max(-1.0, min(1.0, up.z))))
         LAST_CLAY_INFO.clear()
         LAST_CLAY_INFO.update({"user_ground": ground.name if ground else "", "slope_deg": round(slope, 1)})
+        # The edit canvas describes shape and material identity, not the final lighting.
+        # Existing scene lamps must not combine with our temporary illumination (or
+        # leave studio reflections baked into a later outdoor / reference-lit edit).
+        for obj in list(scene.objects):
+            if obj.type == "LIGHT" and not obj.hide_render:
+                obj.hide_render = True
+                restore.append(lambda obj=obj: setattr(obj, "hide_render", False))
+        LAST_CLAY_INFO["lighting"] = "neutral"
         mesh = bpy.data.meshes.new("_wondful_clay_floor")
         s = 500.0
         mesh.from_pydata([(-s, -s, 0), (s, -s, 0), (s, s, 0), (-s, s, 0)], [], [(0, 1, 2, 3)])
@@ -1633,36 +1645,21 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             if note and LAST_CLAY_INFO["massing_text"]:
                 LAST_CLAY_INFO["massing_text"] += "\n" + note
         sun_data = bpy.data.lights.new("_wondful_clay_sun", type="SUN")
-        sun_data.energy = 4.0
+        sun_data.energy = 1.0
         try:
-            sun_data.angle = 0.12
+            sun_data.angle = 0.8
         except Exception:
             pass
         sun = bpy.data.objects.new("_wondful_clay_sun", sun_data)
         sun.rotation_euler = (0.85, 0.0, 0.75)
         scene.collection.objects.link(sun)
         created += [("obj", sun), ("light", sun_data)]
-        if pts:  # two long softbox strips: crisp highlight bands across the clear coat
-            from mathutils import Vector as _V
-            c = sum(pts, _V()) / len(pts)
-            span = max((p - c).length for p in pts)
-            for i, (off, rot, energy) in enumerate((((0.0, 0.0, 2.2), (0.0, 0.0, 0.6), 900.0),
-                                                     ((-1.6, 1.4, 0.9), (1.2, 0.0, -0.9), 500.0))):
-                ld = bpy.data.lights.new(f"_wondful_clay_strip{i}", type="AREA")
-                ld.shape = "RECTANGLE"
-                ld.size, ld.size_y = span * 2.2, span * 0.18
-                ld.energy = energy * (span / 2.5) ** 2
-                lo = bpy.data.objects.new(f"_wondful_clay_strip{i}", ld)
-                lo.location = c + _V(off) * span
-                lo.rotation_euler = rot
-                scene.collection.objects.link(lo)
-                created += [("obj", lo), ("light", ld)]
         world = bpy.data.worlds.new("_wondful_clay_world")
         world.use_nodes = True
         bg = world.node_tree.nodes.get("Background")
         if bg:
-            bg.inputs[1].default_value = 1.0
-            _clay_sky_gradient(world.node_tree, bg)
+            bg.inputs[0].default_value = (0.6, 0.6, 0.6, 1.0)
+            bg.inputs[1].default_value = 0.8
         scene.world = world
         created.append(("world", world))
         for k in frame_options:
@@ -1778,6 +1775,9 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         render.filepath = snap["filepath"]
         render.resolution_x, render.resolution_y, render.resolution_percentage = snap["x"], snap["y"], snap["pct"]
         _restore_image_format(render.image_settings, snap["fmt"])
+        render.image_settings.color_mode = snap["color_mode"]
+        if "cycles" in snap:
+            cycles.samples, cycles.use_denoising = snap["cycles"]
         if hasattr(render, "film_transparent"):
             render.film_transparent = snap["film"]
         for k, v in frame_options.items():
