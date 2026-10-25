@@ -700,8 +700,14 @@ def fit_subject_framing(camera, frame, subject, relative_points, initial_xy=(0.0
             "iterations": iterations, "height_matched": False, "heading_undirected": True}
 
 
-def ribbon_mesh(sections, thickness_m=0.2, subdivisions=6):
-    """Closed, connected ruled ribbon mesh with bounded Hermite smoothing (no bpy)."""
+def ribbon_mesh(sections, thickness_m=0.2, subdivisions=6, width_subdivisions=None, return_layout=False):
+    """Closed ruled ribbon with bounded Hermite edges and a tessellated width.
+
+    The legacy two-value return is unchanged. ``return_layout`` additionally
+    exposes skin/rim face ranges so Blender can keep their shading normals apart.
+    Width tessellation preserves the source edges and thickness offsets exactly;
+    it resolves twisted ruled surfaces that one wide quad cannot represent.
+    """
     normalized, _warnings = normalize_ribbons([{"sections": sections, "thickness_m": thickness_m}])
     if not normalized:
         raise ValueError("没有可用的连续曲面截面")
@@ -740,24 +746,58 @@ def ribbon_mesh(sections, thickness_m=0.2, subdivisions=6):
         if normals[i] @ normals[i - 1] < 0:
             normals[i] *= -1
     half = min(source["thickness_m"], float(np.min(np.linalg.norm(rows[:, 1] - rows[:, 0], axis=1))) * 0.5) / 2
-    vertices = []
-    for pair, normal in zip(rows, normals):
-        vertices.extend((pair[0] + normal * half, pair[1] + normal * half,
-                         pair[0] - normal * half, pair[1] - normal * half))
+    upper, lower = rows + normals[:, None, :] * half, rows - normals[:, None, :] * half
+
+    def grid(steps):
+        t = np.linspace(0.0, 1.0, steps + 1)[None, :, None]
+        return tuple(edge[:, :1] * (1 - t) + edge[:, 1:] * t for edge in (upper, lower))
+
+    def twist_degrees(surfaces):
+        maximum = 0.0
+        for surface in surfaces:
+            a, b, c, d = surface[:-1, :-1], surface[:-1, 1:], surface[1:, 1:], surface[1:, :-1]
+            # Both possible diagonals, so the bound is independent of Blender's
+            # triangulation choice for a nonplanar quad.
+            for first, second in ((np.cross(b - a, c - a), np.cross(c - a, d - a)),
+                                  (np.cross(b - a, d - a), np.cross(c - b, d - b))):
+                denom = np.linalg.norm(first, axis=-1) * np.linalg.norm(second, axis=-1)
+                cosine = np.sum(first * second, axis=-1) / np.maximum(denom, 1e-20)
+                maximum = max(maximum, float(np.degrees(np.arccos(np.clip(cosine, -1, 1))).max()))
+        return maximum
+
+    steps = 1 if width_subdivisions is None else max(1, min(64, int(width_subdivisions)))
+    surfaces = grid(steps)
+    twist = twist_degrees(surfaces)
+    if width_subdivisions is None:
+        while twist > 6.0 and steps < 64:
+            steps *= 2
+            surfaces = grid(steps)
+            twist = twist_degrees(surfaces)
+    columns, stride = steps + 1, (steps + 1) * 2
+    vertices = np.concatenate(surfaces, axis=1).reshape(-1, 3)
     faces = []
     for i in range(len(rows) - 1):
-        a, b = 4 * i, 4 * (i + 1)
-        faces.extend(((a, a + 1, b + 1, b), (a + 2, b + 2, b + 3, a + 3),
-                      (a, b, b + 2, a + 2), (a + 1, a + 3, b + 3, b + 1)))
-    end = 4 * (len(rows) - 1)
-    faces.extend(((0, 2, 3, 1), (end, end + 1, end + 3, end + 2)))
-    vertices = np.array(vertices, float)
+        a, b = stride * i, stride * (i + 1)
+        for j in range(steps):
+            faces.extend(((a + j, a + j + 1, b + j + 1, b + j),
+                          (a + columns + j, b + columns + j, b + columns + j + 1, a + columns + j + 1)))
+    skin_faces = len(faces)
+    for i in range(len(rows) - 1):
+        a, b = stride * i, stride * (i + 1)
+        faces.extend(((a, b, b + columns, a + columns),
+                      (a + steps, a + columns + steps, b + columns + steps, b + steps)))
+    end = stride * (len(rows) - 1)
+    for j in range(steps):
+        faces.extend(((j, columns + j, columns + j + 1, j + 1),
+                      (end + j, end + j + 1, end + columns + j + 1, end + columns + j)))
     corners = vertices[np.array(faces)]
     area = np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
     area += np.linalg.norm(np.cross(corners[:, 2] - corners[:, 0], corners[:, 3] - corners[:, 0]), axis=1)
     if not np.isfinite(vertices).all() or np.any(area < 1e-8):
         raise ValueError("曲面插值产生退化面，请调整截面")
-    return vertices, faces
+    layout = {"rows": len(rows), "columns": columns, "width_subdivisions": steps,
+              "skin_faces": skin_faces, "max_quad_twist_deg": twist}
+    return (vertices, faces, layout) if return_layout else (vertices, faces)
 
 
 # ---------------------------------------------------------------------------------------- product spot

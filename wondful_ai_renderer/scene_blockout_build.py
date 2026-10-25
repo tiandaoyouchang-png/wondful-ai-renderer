@@ -154,6 +154,125 @@ def product_info(product_collection, exclude=()):
             "bounds": [tuple(float(v) for v in point) for point in pts]}
 
 
+def _mesh_projection_points(mesh):
+    """Vertices of the actual surface, reduced by its convex hull when worthwhile.
+
+    A perspective coordinate attains its extrema on the convex hull while the
+    geometry is in front of the camera. Unlike a local bounding box or vertex
+    subsampling, this reduction retains the mesh's projected outline bounds at
+    every position considered by the framing solver. Loose vertices do not render.
+    """
+    if not mesh.polygons or not mesh.vertices:
+        return np.empty((0, 3), dtype=float), 0, False
+    indices = np.empty(len(mesh.loops), dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", indices)
+    coordinates = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", coordinates)
+    points = coordinates.reshape(-1, 3)[np.unique(indices)]
+    if not np.isfinite(points).all():
+        raise ValueError("non-finite evaluated mesh coordinates")
+    count = len(points)
+    if count <= 64:
+        return points.astype(float), count, False
+    bm = bmesh.new()
+    try:
+        vertices = [bm.verts.new(point) for point in points]
+        result = bmesh.ops.convex_hull(bm, input=vertices, use_existing_faces=False)
+        hull = np.asarray([tuple(v.co) for v in result["geom"] if isinstance(v, bmesh.types.BMVert)], dtype=float)
+        if len(hull) >= 3:
+            return hull, count, True
+    except (ValueError, RuntimeError):
+        # Degenerate/coplanar input can defeat hull construction; full vertices
+        # remain an accurate, only slower, fallback. Never sample away extrema.
+        pass
+    finally:
+        bm.free()
+    return points.astype(float), count, False
+
+
+def product_projection_geometry(context, product_collection, exclude=()):
+    """World-space evaluated surface points and explicit fidelity metadata.
+
+    This is separate from product_info's inexpensive footprint/axis estimate.
+    Only the framing path needs the detailed mesh. Render modifier settings are
+    evaluated temporarily and restored, including subdivision and parent scale.
+    If evaluation fails for an object, its bounding box is an explicitly reported
+    approximation instead of silently masquerading as the rendered silhouette.
+    """
+    import time
+    started = time.perf_counter()
+    excluded = set(exclude or ())
+    render_objects = set()
+
+    def collect(layer):
+        if layer.exclude or layer.collection.hide_render:
+            return
+        render_objects.update(layer.collection.objects)
+        for child in layer.children:
+            collect(child)
+    collect(context.view_layer.layer_collection)
+    objects = [obj for obj in product_collection.all_objects
+               if obj.type == "MESH" and obj not in excluded and obj in render_objects
+               and not obj.hide_render and getattr(obj, "visible_camera", True)] if product_collection else []
+    chunks, fallbacks, modifier_warnings, restore = [], [], [], []
+    vertex_count = hull_count = mesh_count = 0
+    try:
+        # evaluated_depsgraph_get() is normally a viewport graph. Match the
+        # relevant render switches without persisting changes to the product.
+        for obj in objects:
+            for modifier in obj.modifiers:
+                settings = [("show_viewport", modifier.show_render)]
+                if modifier.show_render and modifier.type in {"SUBSURF", "MULTIRES"}:
+                    settings.append(("levels", modifier.render_levels))
+                for attr, value in settings:
+                    old = getattr(modifier, attr)
+                    if old == value:
+                        continue
+                    try:
+                        setattr(modifier, attr, value)
+                        restore.append((modifier, attr, old))
+                    except (AttributeError, RuntimeError, TypeError) as exc:
+                        modifier_warnings.append({"object": obj.name, "modifier": modifier.name,
+                                                  "setting": attr, "reason": str(exc)[:160]})
+        context.view_layer.update()
+        depsgraph = context.evaluated_depsgraph_get()
+        for obj in objects:
+            evaluated = None
+            try:
+                evaluated = obj.evaluated_get(depsgraph)
+                mesh = evaluated.to_mesh()
+                if mesh is None:
+                    raise ValueError("evaluated mesh unavailable")
+                local, count, reduced = _mesh_projection_points(mesh)
+                if not len(local):
+                    continue
+                matrix = np.asarray(evaluated.matrix_world, dtype=float)
+                chunks.append(local @ matrix[:3, :3].T + matrix[:3, 3])
+                vertex_count += count
+                hull_count += int(reduced)
+                mesh_count += 1
+            except (AttributeError, RuntimeError, ValueError, TypeError) as exc:
+                corners = np.asarray([tuple(obj.matrix_world @ Vector(c)) for c in obj.bound_box], dtype=float)
+                if len(corners) and np.isfinite(corners).all():
+                    chunks.append(corners)
+                fallbacks.append({"object": obj.name, "reason": str(exc)[:160]})
+            finally:
+                if evaluated is not None:
+                    evaluated.to_mesh_clear()
+    finally:
+        for modifier, attr, value in reversed(restore):
+            setattr(modifier, attr, value)
+        if restore:
+            context.view_layer.update()
+    points = np.concatenate(chunks) if chunks else np.empty((0, 3), dtype=float)
+    basis = "EVALUATED_MESH_CONVEX_HULL" if hull_count else "EVALUATED_MESH_VERTICES"
+    if fallbacks:
+        basis = "MIXED_EVALUATED_MESH_AND_OBJECT_BOUNDS" if mesh_count else "OBJECT_BOUNDS_FALLBACK"
+    return {"points": points, "basis": basis, "mesh_count": mesh_count, "vertex_count": vertex_count,
+            "point_count": len(points), "hull_mesh_count": hull_count, "fallbacks": fallbacks,
+            "modifier_warnings": modifier_warnings, "elapsed_seconds": time.perf_counter() - started}
+
+
 def camera_yaw(cam):
     if cam is None or cam.type != "CAMERA":
         return None
@@ -711,12 +830,29 @@ class _Builder:
         for ribbon in self.S.get("ribbons", []):
             label = SB.element_label("ribbon", ribbon, self.interior)
             try:
-                vertices, faces = SB.ribbon_mesh(ribbon["sections"], ribbon["thickness_m"])
+                vertices, faces, layout = SB.ribbon_mesh(ribbon["sections"], ribbon["thickness_m"], return_layout=True)
                 vertices[:, 2] += self.foot
                 obj = self.mesh(label, vertices, faces, "building", smooth=True)
+                # The thin rim is a sharp geometric boundary. Averaging it into
+                # the broad skins tilts every edge normal by about 45 degrees.
+                # With a single width span that polluted the entire surface.
+                edge_skins = {}
+                for face in obj.data.polygons:
+                    skin = face.index < layout["skin_faces"]
+                    face.use_smooth = skin
+                    for edge in face.edge_keys:
+                        edge_skins.setdefault(tuple(sorted(edge)), set()).add(skin)
+                for edge in obj.data.edges:
+                    edge.use_edge_sharp = len(edge_skins.get(tuple(sorted(edge.vertices)), ())) > 1
+                obj.data.update()
                 obj["wondful_env_type"] = "ribbon"
                 obj["wondful_material"] = ribbon.get("material", "")
                 obj["wondful_sb_connected_surface"] = 1
+                obj["wondful_sb_skin_faces"] = layout["skin_faces"]
+                obj["wondful_sb_width_subdivisions"] = layout["width_subdivisions"]
+                obj["wondful_sb_quad_twist_deg"] = layout["max_quad_twist_deg"]
+                if layout["max_quad_twist_deg"] > 6.0:
+                    self.warn.append(f"{label}局部曲面仍有较大扭曲，请复核截面")
                 self.group(label, [obj])
             except (ValueError, TypeError, KeyError) as exc:
                 self.warn.append(f"{label}：{exc}，已跳过")
@@ -1053,10 +1189,11 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
                    ("CAMERA_NOT_SELECTED" if not set_camera else "NO_PRODUCT")}
     target_points = None
     if locked:
-        # Rotate actual object bounds into analysis coordinates; never distort the target
-        # to fit the original product's silhouette or height.
+        # Rotate evaluated surface points into analysis coordinates. Rotated local
+        # box corners can overestimate a curved product's width substantially.
+        geometry = product_projection_geometry(context, product_collection, exclude=massing_objects)
         inv_rotation = np.array([list(row) for row in Rz.to_3x3()]).T
-        target_points = (np.asarray(prod["bounds"]) - np.asarray(prod["base"])) @ inv_rotation.T
+        target_points = (geometry["points"] - np.asarray(prod["base"])) @ inv_rotation.T
         probe = _Builder(S, coll, frame)
 
         def ground_probe(x, y):
@@ -1064,7 +1201,8 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
         framing_fit = SB.fit_subject_framing(S["camera"], frame, subject, target_points,
                                             (spot["x"], spot["y"]), ground_probe)
         framing_fit["heading_applied"] = bool(subject["heading_confidence"] >= 0.5 and prod["axis"] is not None)
-        framing_fit["geometry_basis"] = "OBJECT_BOUNDS"
+        framing_fit["geometry_basis"] = geometry["basis"]
+        framing_fit["geometry"] = {k: v for k, v in geometry.items() if k not in {"points", "basis"}}
         if framing_fit.get("enabled"):
             spot["x"], spot["y"] = framing_fit["x"], framing_fit["y"]
     pad = None
@@ -1089,6 +1227,10 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     # yaw: the user's own camera direction when the camera is not set from the analysis, else the product's long
     # axis along the analysed spot heading
     if locked:
+        if framing_fit["geometry"]["fallbacks"]:
+            b.warn.append("部分产品网格无法求值，主体投影含包围盒估算；请复核产品轮廓")
+        if framing_fit["geometry"]["modifier_warnings"]:
+            b.warn.append("部分产品修改器无法按渲染设置求值；请复核产品轮廓")
         obstacles = SB.blocking_footprints(S.get("primitives", []), prod["dims"][2])
         if SB.clearance(obstacles, sx, sy) < prod["half_diag"] * 0.85:
             b.warn.append("参考主体位置与环境体块重叠，已保留投影位置及体块；请校正重叠结构")
