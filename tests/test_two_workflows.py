@@ -98,6 +98,7 @@ def defaults(class_name):
 
 def props(**kw):
     p = defaults("WONDFUL_AISettings")
+    p.product_images = [NS(image=NS(name="Identity",size=(160,90),filepath=__file__,preview_ensure=lambda:None), source_path=__file__, instruction="")]
     p.__dict__.update(kw)
     return p
 
@@ -177,7 +178,7 @@ MV = stub("multiview", scene_blockout_exists=lambda scene: any(c.get("wondful_sc
           checked_views=lambda slots, is_present: [c for c, enabled in slots if c and enabled and is_present(c)])
 MS = load("massing")
 OPS = function_namespace("_reference_paths", "_reference_instructions", "_sb_reference", "_sb_generation_reference",
-                         "_sb_ground_band_line", "generate_needs_polish", "generate_views", "workflow_preflight",
+                         "_sb_ground_band_line", "generate_needs_polish", "generate_views", "workflow_preflight", "identity_preflight",
                          classes=("WONDFUL_OT_generate", "WONDFUL_OT_ai_render"))
 OPS.update(bpy=bpy, image_filepath=lambda image: getattr(image, "filepath", "") if image else "",
            _addon_prefs=lambda c: c.preferences.addons[PACKAGE].preferences,
@@ -185,7 +186,8 @@ OPS.update(bpy=bpy, image_filepath=lambda image: getattr(image, "filepath", "") 
            _LAST_REPORT={}, _analysis_provider=lambda p, pref: {"id":"codex"},
            needs_reference_policy_refresh=lambda p: False,
            prompt_profiles=NS(needs_target_refresh=lambda p,pref: False),
-           _product_autofill_key=lambda *a: "")
+           _product_autofill_key=lambda *a: "",
+           _load_reference_image=lambda path:NS(size=(160,90)))
 
 
 class WorkflowStateTests(unittest.TestCase):
@@ -248,11 +250,11 @@ class ReferenceAndGuardTests(unittest.TestCase):
     def test_both_workflows_require_product_and_camera(self):
         for p in (props(),self.ready()):
             self.assertTrue(self.check(p,has_product=False));self.assertTrue(self.check(p,has_camera=False))
-    def test_replica_requires_all_review_inputs(self):
+    def test_replica_requires_source_inputs_but_not_review_checkbox(self):
         p=self.ready()
         for change in (dict(has_blockout=False),dict(target_path=""),dict(source_ok=False)):
             self.assertTrue(self.check(p,**change))
-        p.replica_reviewed=False;self.assertTrue(self.check(p))
+        p.replica_reviewed=False;self.assertEqual(self.check(p),"")
     def test_changed_same_path_file_is_rejected(self):
         p=self.ready();self.target.write_bytes(b"replacement")
         self.assertIn("不一致",self.check(p))
@@ -428,17 +430,17 @@ class UILayoutContractTests(unittest.TestCase):
         ref=self.draw(props(workflow_mode=WF.REFERENCE))
         self.assertFalse(any(x[0]=="prop" and x[1]=="sb_image_path" for x in env))
         self.assertFalse(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in env))
-        self.assertTrue(any(x[0]=="prop" and x[1]=="sb_image_path" for x in ref))
+        self.assertTrue(any(x[:2]==("operator","wondful.target_load") for x in ref))
         self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in ref))
         for calls in (env,ref):
             for prop in ("workflow_mode","product_collection","camera","output_directory","long_edge","render_count"):
                 self.assertTrue(any(x[0]=="prop" and x[1]==prop for x in calls),prop)
             self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.polish_prompt" for x in calls))
-    def test_replica_render_requires_review_in_ui(self):
-        p=props(workflow_mode=WF.REFERENCE,codex_account_state="LOGGED_IN",sb_image_path="target.png")
+    def test_replica_render_no_longer_requires_review_in_ui(self):
+        p=props(workflow_mode=WF.REFERENCE,codex_account_state="LOGGED_IN",sb_image_path="target.png",sb_built_target_hash="built-target")
         with patch.object(MV,"scene_blockout_exists",return_value=True):
             before=self.draw(p);p.replica_reviewed=True;after=self.draw(p)
-        self.assertFalse(next(x[2] for x in before if x[:2]==("operator","wondful.generate")))
+        self.assertTrue(next(x[2] for x in before if x[:2]==("operator","wondful.generate")))
         self.assertTrue(next(x[2] for x in after if x[:2]==("operator","wondful.generate")))
     def test_ui_draw_scenario_matrix(self):
         scenarios=0

@@ -913,7 +913,7 @@ def parse_reply(text) -> dict:
     return json.loads(m.group(0))
 
 
-def call_analysis(content, *, effort=EFFORT_FIRST, model="", client_version="", cancel_check=None, timeout=900) -> dict:
+def call_analysis(content, *, effort=EFFORT_FIRST, model="", client_version="", cancel_check=None, timeout=900, schema=None) -> dict:
     """One strict-JSON reasoning call with the user's Codex login (codex_direct auth / SSE)."""
     import os
     from . import codex_direct as CD
@@ -925,6 +925,9 @@ def call_analysis(content, *, effort=EFFORT_FIRST, model="", client_version="", 
         auth = CD.refresh_auth(auth, auth_path)
     base = os.environ.get(CD.BASE_URL_ENV, "").strip() or CD.DEFAULT_BASE_URL
     body = payload(content, (model or "").strip() or CD.DEFAULT_MODEL, effort)
+    if schema is not None:
+        body["text"]["format"].update(schema=schema, name="wondful_replica_revision_v1")
+        body["instructions"] = "Apply the requested bounded scene correction as strict JSON. Do not use any tool."
     refreshed = dropped = False
     while True:
         try:

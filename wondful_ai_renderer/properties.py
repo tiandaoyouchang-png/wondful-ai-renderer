@@ -123,6 +123,9 @@ def _reference_instruction_update(self, context):
         pass
 
 def _refresh_compare_update(self, context):
+    if workflow.is_reference(self) and self.compare_pair != "CAMERA_RESULT" and self.compare_mode == "OUTLINE":
+        self.compare_mode = "SPLIT"
+        return
     try:
         if context and getattr(context, "scene", None) and getattr(context.scene, "wondful_ai", None):
             from .comparison_view import refresh_compare_image
@@ -301,71 +304,57 @@ class WONDFUL_AddonPreferences(AddonPreferences):
     )
 
     def draw(self, context):
-        layout = self.layout
-        info = layout.box()
-        info.label(text="无需 OpenAI / Google / DeepSeek / Seedream API Key。", icon="INFO")
-        info.label(text="Codex 复用 ChatGPT OAuth；Antigravity 复用 Google Keychain / OAuth。插件不保存、不记录 Token。")
-        info.label(text="图像编辑直连会读取 Codex 的 auth.json 登录信息，令牌过期时按 Codex 方式刷新并写回。")
-
-        codex = layout.box()
-        codex.label(text="Codex", icon="CONSOLE")
-        codex.prop(self, "codex_cli_path")
-        codex.prop(self, "codex_model")
-
-        antigravity = layout.box()
-        antigravity.label(text="Antigravity", icon="WORLD")
-        antigravity.prop(self, "antigravity_cli_path")
-        antigravity.prop(self, "antigravity_model")
-
+        from . import ui_components as UIC
         from .ui import draw_github_footer
-        draw_github_footer(layout)
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        update = layout.box()
-        update.label(text="更新", icon="FILE_REFRESH")
+        def section(title, icon, help_text=""):
+            box = layout.box()
+            row = box.row(align=True)
+            row.label(text=title, icon=icon)
+            UIC.help_icon(row, help_text)
+            return box
+
+        codex = section("Codex", "CONSOLE", "Codex 复用本地登录；直连会读取 auth.json，并可能刷新该登录文件")
+        UIC.field(codex, self, "codex_cli_path", "CLI 路径")
+        UIC.field(codex, self, "codex_model", "推理模型")
+        antigravity = section("Antigravity", "WORLD", "Antigravity 使用 Google Keychain / OAuth 登录")
+        UIC.field(antigravity, self, "antigravity_cli_path", "CLI 路径")
+        UIC.field(antigravity, self, "antigravity_model", "推理模型")
+        update = section("更新", "FILE_REFRESH")
+        UIC.field(update, self, "auto_check_updates", "自动检查")
         row = update.row(align=True)
-        row.prop(self, "auto_check_updates")
+        row.scale_y = UIC.ACTION_HEIGHT
         row.operator("wondful.update_check", text="检查更新", icon="FILE_REFRESH")
         try:
             from . import update_ops
-            if update_ops.STATE.get("message"):
-                update.label(text=update_ops.STATE["message"][:90])
+            message = update_ops.STATE.get("message", "")
+            if message:
+                update.label(text=UIC.short_text(message, 60))
+                UIC.help_icon(update, message)
         except Exception:
             pass
-
-        output = layout.box()
-        output.label(text="输出", icon="FILE_FOLDER")
-        output.prop(self, "output_directory")
-
-        col = layout.column(align=True)
-        col.prop(self, "long_edge")
-        col.prop(self, "codex_imagegen_enabled")
-        col.prop(self, "codex_direct_edit")
-        col.prop(self, "codex_direct_simple")
-        col.prop(self, "antigravity_imagegen_enabled")
-        col.prop(self, "codex_polish_timeout")
-        col.prop(self, "codex_audit_timeout")
-        col.prop(self, "codex_render_timeout")
-        col.prop(self, "antigravity_polish_timeout")
-        col.prop(self, "antigravity_audit_timeout")
-        col.prop(self, "antigravity_render_timeout")
-        col.separator()
-        col.prop(self, "strict_composition_lock")
-        col.prop(self, "structure_guides_enabled")
-        col.prop(self, "masked_alignment_repair")
-        col.prop(self, "identity_preserve_enabled")
+        output = section("输出", "FILE_FOLDER")
+        UIC.field(output, self, "output_directory", "默认目录")
+        UIC.field(output, self, "long_edge", "默认长边")
+        engine = section("生成设置", "RENDER_STILL")
+        for name in ("codex_imagegen_enabled", "codex_direct_edit", "codex_direct_simple", "antigravity_imagegen_enabled",
+                     "codex_polish_timeout", "codex_audit_timeout", "codex_render_timeout", "antigravity_polish_timeout",
+                     "antigravity_audit_timeout", "antigravity_render_timeout"):
+            UIC.field(engine, self, name, None)
+        quality = section("保真与校验", "MODIFIER")
+        for name in ("strict_composition_lock", "structure_guides_enabled", "masked_alignment_repair", "identity_preserve_enabled"):
+            UIC.field(quality, self, name, None)
         if self.identity_preserve_enabled:
-            col.prop(self, "identity_preserve_padding")
-            col.prop(self, "identity_hard_restore")
-        col.prop(self, "auto_alignment_retry")
+            UIC.field(quality, self, "identity_preserve_padding", None)
+            UIC.field(quality, self, "identity_hard_restore", None)
+        UIC.field(quality, self, "auto_alignment_retry", None)
         if self.auto_alignment_retry:
-            col.prop(self, "alignment_threshold")
-        col.prop(self, "alignment_max_attempts")
-
-        box = layout.box()
-        box.label(text="运行依赖")
-        box.label(text="Codex：官方 Codex CLI + ChatGPT OAuth；Antigravity：官方 Antigravity CLI + Google OAuth。")
-        box.label(text="统一 Provider：选择 Codex 时润色/验收/生图都走 Codex；选择 Antigravity 时全部走 Antigravity。")
-        box.label(text=f"参考图：产品造型 1 张（建议三视图）；人物 / 环境风格每类最多 {MAX_REFERENCES_PER_KIND} 张。")
+            UIC.field(quality, self, "alignment_threshold", None)
+        UIC.field(quality, self, "alignment_max_attempts", None)
+        draw_github_footer(layout)
 
 
 class WONDFUL_PromptLine(PropertyGroup):
@@ -574,8 +563,16 @@ class WONDFUL_AISettings(PropertyGroup):
     workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
     auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=False,
         description="可选；关闭时直接使用手写提示词或一句话需求，不强制调用 AI 润色")
-    replica_reviewed: BoolProperty(name="已检查，可以渲染", default=False,
-        description="确认当前相机、车模位置与粗模结构；重新生成粗模或更换目标图后需再次检查")
+    replica_reviewed: BoolProperty(default=False, options={"HIDDEN"})  # legacy only
+    ui_empty_note: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})
+    sb_target_note: StringProperty(name="参考重点", default="",
+        description="指定目标图中需保留的构图、建筑或光照特征")
+    replica_feedback: StringProperty(name="修改意见", default="", maxlen=4000,
+        description="填写对当前粗模和相机的修改要求，例如降低机位、加宽左侧建筑。点击按意见修改才发起在线请求")
+    replica_revision_status: StringProperty(default="", options={"SKIP_SAVE"})
+    replica_preview_signature: StringProperty(default="", options={"HIDDEN"})
+    replica_revision_count: IntProperty(default=0, min=0, options={"HIDDEN"})
+    replica_can_undo: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     sb_built_target_hash: StringProperty(default="", options={"HIDDEN"})
     sb_reference_image: PointerProperty(name="复刻目标图", type=bpy.types.Image)
     sb_preview_image: PointerProperty(name="粗模预览", type=bpy.types.Image)
@@ -1114,7 +1111,7 @@ class WONDFUL_AISettings(PropertyGroup):
     compare_drag_active: BoolProperty(name="鼠标拖动已启用", default=False)
     ui_show_account: BoolProperty(name="账户详情", default=False)
     ui_show_references: BoolProperty(name="参考图", default=True)
-    ui_show_product_refs: BoolProperty(name="产品参考图", default=False)
+    ui_show_product_refs: BoolProperty(name="产品身份参考", default=True)
     ui_show_person_refs: BoolProperty(name="人物参考图", default=False)
     ui_show_style_refs: BoolProperty(name="环境／风格参考图", default=True)
     ui_show_advanced: BoolProperty(name="高级设置", default=False)

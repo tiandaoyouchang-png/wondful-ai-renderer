@@ -106,16 +106,52 @@ def main():
         blocks["wondful_sb_reference_image"] = image.filepath_raw
         blocks["wondful_sb_reference_sha256"] = digest
         blocks["wondful_sb_original_sha256"] = digest
-        check("render blocked before approval", bool(ops.workflow_preflight(bpy.context, props)))
+        check("missing identity is blocked", bool(ops.workflow_preflight(bpy.context, props)))
+        identity = props.product_images.add()
+        identity.image = image
+        identity.source_path = image.filepath_raw
+        props.replica_reviewed = False
+        check("valid source passes without a checkbox", ops.workflow_preflight(bpy.context, props) == "")
+        for name in ("ui_help", "target_load", "target_paste", "target_clear", "replica_refine", "replica_undo"):
+            check(name + " registered", getattr(bpy.ops.wondful, name).get_rna_type() is not None)
         preview = ops._render_replica_preview(bpy.context, props, out)
         check("native preview created", Path(preview).is_file() and props.sb_preview_image is not None)
-        check("preview requires fresh approval", props.replica_reviewed is False)
+        check("preview does not introduce a manual approval gate", ops.workflow_preflight(bpy.context, props) == "")
         check("target loaded via RNA callback", props.sb_reference_image is not None)
         comparison = cv.refresh_compare_image(bpy.context, force_cache=True)
         check("comparison works before final AI result", comparison is not None and props.result_image is None)
-        props.replica_reviewed = True
-        check("valid reviewed source passes local guard", ops.workflow_preflight(bpy.context, props) == "")
+        check("valid source passes local guard", ops.workflow_preflight(bpy.context, props) == "")
         check("preview preserves current camera", scene.camera == cam and before == [list(row) for row in cam.matrix_world])
+        # Local correction plans only. No analysis service / credentials calls.
+        from wondful_ai_renderer import replica_revision_blender as rb, preview_cache
+        snapshot, mapping, owner = rb.snapshot(bpy.context, props)
+        ident = next(row["id"] for row in snapshot["objects"] if ground.name == row["name"])
+        plan = {"summary":"Native smoke", "unresolved":[],
+                "camera":{"apply":False, "translation":[0,0,0], "rotation_deg":[0,0,0],
+                          "lens_mm":cam.data.lens, "shift_x":0, "shift_y":0},
+                "edits":[{"id":ident,"translation":[1,0,0],"rotation_deg":[0,0,0],
+                          "scale":[1,1,1],"hidden":False}], "ribbons":[], "additions":[]}
+        original_ground = ground.matrix_world.copy()
+        original_product = obj.matrix_world.copy()
+        rb.apply_plan(bpy.context, props, plan, snapshot["signature"], lambda: None)
+        check("revision moved only the owned block", ground.matrix_world != original_ground and obj.matrix_world == original_product)
+        rb.undo(bpy.context, props)
+        check("undo restores native transform", ground.matrix_world == original_ground)
+        original_preview = props.sb_preview_image
+        def broken_preview():
+            raise RuntimeError("Intentional preview failure")
+        snapshot = rb.snapshot(bpy.context, props)[0]
+        try:
+            rb.apply_plan(bpy.context, props, plan, snapshot["signature"], broken_preview)
+        except RuntimeError as exc:
+            check("preview failure is reported", "Intentional" in str(exc))
+        else:
+            raise AssertionError("Expected preview rollback")
+        check("failed revision restores native geometry and preview", ground.matrix_world == original_ground and props.sb_preview_image == original_preview)
+        image.pack()
+        preview_cache.icon_for_image(image)
+        preview_cache._tick()
+        check("packed reference has a real thumbnail", preview_cache.icon_for_image(image) > 0)
         result["status"] = "PASSED"
     except Exception:
         result["status"] = "FAILED"

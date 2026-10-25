@@ -380,7 +380,7 @@ def _reference_instructions(props):
     return {
         "product": notes(props.product_images)[:MAX_PRODUCT_REFERENCES],
         "person": notes(props.person_images),
-        "style": (["复刻目标：参考场景材质、光照与氛围；结构以已确认底图为准"]
+        "style": (["复刻目标：材质和光照参考；结构以当前底图为准。" + getattr(props, "sb_target_note", "")]
                   if _sb_reference(props)[0] else []) if workflow.is_reference(props) else notes(props.style_images),
     }
 
@@ -471,19 +471,21 @@ def _resolve_reference_index(props, ref_kind, requested_index=-1):
     if requested_index is None or int(requested_index) < 0:
         idx = min(getattr(props, index_attr), len(collection) - 1)
     else:
-        idx = max(0, min(int(requested_index), len(collection) - 1))
+        idx = int(requested_index)
+        if idx >= len(collection):
+            return collection, index_attr, -1
         setattr(props, index_attr, idx)
     return collection, index_attr, idx
 
 
 def _load_reference_image(filepath):
-    image = bpy.data.images.load(str(filepath), check_existing=True)
-    # If the same path was overwritten externally, Blender may return an existing
-    # datablock with stale pixels. Reload it before using it as the current ref.
-    try:
-        image.reload()
-    except Exception:
-        pass
+    path = Path(bpy.path.abspath(str(filepath))).expanduser()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("图片文件不可用")
+    image = bpy.data.images.load(str(path), check_existing=True)
+    image.reload()
+    if min(image.size) <= 0:
+        raise RuntimeError("图片无法解码")
     return image
 
 
@@ -943,7 +945,25 @@ def generate_needs_polish(props, prefs):
     return bool(key) and _product_autofill_needed(props, key)
 
 
+def identity_preflight(props):
+    if not workflow.identity_available(props):
+        return "请先添加有效的产品身份参考图"
+    path = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath)
+    if not path:
+        return "产品身份参考文件不可用，请重新选择"
+    try:
+        _load_reference_image(path)
+    except Exception:
+        return "产品身份参考无法解码，请替换图片"
+    # Packed references are materialized once at the action boundary, never in draw.
+    props.product_images[0].source_path = path
+    return ""
+
+
 def workflow_preflight(context, props):
+    identity_error = identity_preflight(props)
+    if identity_error:
+        return identity_error
     from .multiview import scene_blockout_exists
     target, _source = _sb_reference(props)
     source_ok = True
@@ -960,7 +980,7 @@ def workflow_preflight(context, props):
     return workflow.preflight(props, has_camera=context.scene.camera is not None,
                               has_product=getattr(props, "product_collection", None) is not None,
                               has_blockout=scene_blockout_exists(context.scene),
-                              target_path=target, source_ok=source_ok)
+                              target_path=target, source_ok=source_ok, identity_ok=True)
 
 
 class WONDFUL_OT_generate(Operator):
@@ -1487,16 +1507,17 @@ def _render_replica_preview(context, props, directory):
     root = find_collection(scene, props)
     if root is None:
         raise RuntimeError("请先生成相机与粗模")
+    Path(directory).mkdir(parents=True, exist_ok=True)
     path = Path(directory) / "review_blockout.png"
     info = {"collection": root.name, "frame": list(camera_output_dimensions(context)),
             "lens": cam.data.lens, "sensor_width": cam.data.sensor_width, "sensor_height": cam.data.sensor_height,
             "sensor_fit": cam.data.sensor_fit, "shift_x": cam.data.shift_x, "shift_y": cam.data.shift_y,
             "cam_world": [list(row) for row in cam.matrix_world], "kind": root.get("wondful_sb_kind", "outdoor")}
-    SBB.render_preview(context, info, str(path), width=960, product_collection=props.product_collection)
+    if not SBB.render_preview(context, info, str(path), width=960, product_collection=props.product_collection):
+        raise RuntimeError("预览渲染未输出有效图片")
     image = load_image(str(path), "Wondful_Blockout_Preview")
     image.pack()
     props.sb_preview_image = image
-    workflow.target_changed(props, context)
     props.compare_pair = "TARGET_BLOCKOUT"
     return str(path)
 
@@ -1519,6 +1540,130 @@ class WONDFUL_OT_replica_preview(Operator):
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+
+class WONDFUL_OT_replica_refine(_BaseAsyncOperator):
+    bl_idname = "wondful.replica_refine"
+    bl_label = "按意见修改"
+    bl_description = ("根据当前预览和修改意见调整已有粗模及相机；会调用在线分析。"
+                      "不改车身网格与材质；无法执行的要求会列出，不假装已完成")
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.wondful_ai
+        return not _ACTIVE_LOCK.locked() and workflow.is_reference(p) and p.status not in workflow.BUSY
+
+    def execute(self, context):
+        from . import replica_revision as RR
+        from . import replica_revision_blender as RB
+        from . import scene_blockout as SB
+        from . import codex_direct as CD
+        props = context.scene.wondful_ai
+        if not self.poll(context):
+            return {"CANCELLED"}
+        error = workflow_preflight(context, props)
+        feedback = (props.replica_feedback or "").strip()
+        if error or not feedback:
+            self.report({"ERROR"}, error or "请先填写修改意见")
+            return {"CANCELLED"}
+        prefs = _addon_prefs(context)
+        if _analysis_provider(props, prefs)["id"] != "codex":
+            self.report({"ERROR"}, "按意见修改目前需要 Codex 登录")
+            return {"CANCELLED"}
+        session = create_session()
+        try:
+            preview = _render_replica_preview(context, props, session.directory)
+            snapshot, _map, _owner = RB.snapshot(context, props)
+            target, _ = _sb_reference(props)
+            identity = workflow.identity_path(props, resolve=bpy.path.abspath)
+            content = RR.content(CD.data_url(target)[0], CD.data_url(preview)[0],
+                                 CD.data_url(identity)[0], snapshot, feedback)
+            save = {"feedback": feedback, "snapshot": snapshot}
+            (session.directory / "revision_request.json").write_text(json.dumps(save, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc)); return {"CANCELLED"}
+        self._revision_session = session.directory
+        self._revision_signature = snapshot["signature"]
+        self._revision_feedback = feedback
+        model = str(getattr(prefs, "codex_model", "") or "")
+        client_version = str(getattr(props, "codex_cli_version", "") or "")
+        self._phase = "根据意见调整粗模"
+        self._estimated_total = 120.0
+        _status(props, "BLOCKOUT")
+        props.sb_stage = ""
+        props.replica_revision_status = "正在分析修改意见"
+        def job():
+            from .cli_transport import is_cancellation_requested as cancelled
+            return SB.call_analysis(content, effort=SB.EFFORT_CORRECT, model=model,
+                                    client_version=client_version, cancel_check=cancelled, schema=RR.SCHEMA)
+        if not self._start_thread(context, job):
+            _status(props, "IDLE"); props.replica_revision_status = "未启动修改"
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def _modal(self, context, event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        props = self._origin_scene.wondful_ai
+        if self._thread and self._thread.is_alive():
+            self._progress_update(props); return {"RUNNING_MODAL"}
+        try:
+            if self._error:
+                raise self._error[0]
+            from . import replica_revision_blender as RB
+            (self._revision_session / "revision_response.json").write_text(
+                json.dumps(self._result, ensure_ascii=False, indent=2), encoding="utf-8")
+            plan = RB.apply_plan(context, props, self._result, self._revision_signature,
+                lambda: _render_replica_preview(context, props, self._revision_session / "revised"))
+            if plan.get("no_change"):
+                message = "未应用修改"
+            else:
+                message = "已更新粗模与预览"
+            if plan["unresolved"]:
+                message += "；未处理：" + "；".join(plan["unresolved"])
+            if plan["summary"]:
+                message += "\n" + plan["summary"]
+            props.replica_revision_status = message
+            props.last_sb_note = message
+            _status(props, "IDLE")
+            self.report({"WARNING"} if plan["unresolved"] else {"INFO"}, message[:200])
+            return {"FINISHED"}
+        except Exception as exc:
+            message = "修改未应用：" + str(exc)
+            props.replica_revision_status = message
+            _status(props, "ERROR", message)
+            self.report({"ERROR"}, message[:200]); return {"CANCELLED"}
+        finally:
+            props.progress = 0.0
+            self._cleanup(context)
+            _redraw_all()
+
+    def _on_cancelled(self, props):
+        props.replica_revision_status = "已取消，保留原场景与修改意见"
+
+
+class WONDFUL_OT_replica_undo(Operator):
+    bl_idname = "wondful.replica_undo"
+    bl_label = "撤销上次调整"
+    bl_description = "撤销本次会话最后一次按意见修改；已有后续手动编辑时不覆盖。重开文件后不保留该记录"
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.wondful_ai
+        return not _ACTIVE_LOCK.locked() and p.status not in workflow.BUSY and workflow.is_reference(p) and bool(p.replica_can_undo)
+    def execute(self, context):
+        if not self.poll(context):
+            return {"CANCELLED"}
+        from . import replica_revision_blender as RB
+        p = context.scene.wondful_ai
+        try:
+            RB.undo(context,p)
+            p.replica_revision_status = "已撤销上次调整"
+            p.last_sb_note = p.replica_revision_status
+        except Exception as exc:
+            self.report({"ERROR"},str(exc));return {"CANCELLED"}
         return {"FINISHED"}
 
 
@@ -1548,6 +1693,10 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import sb_progress as SP
         scene = context.scene
         props = scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
         if not workflow.is_reference(props):
             self.report({"ERROR"}, "请先切换到「参考图复刻」")
             return {"CANCELLED"}
@@ -1616,6 +1765,8 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                          "set_camera": bool(props.sb_set_camera), "correct": correct, "stage": 1, "scores": [],
                          "rounds": [], "model": model, "client_version": client_version, "source": source})
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
+        if (props.sb_target_note or "").strip():
+            content.append({"type": "input_text", "text": "Reference priorities: " + props.sb_target_note.strip()})
         self._sb["content"] = content
         self._estimated_total = 8.0 if cached else 240.0
         rgb = None
@@ -2504,6 +2655,10 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
 
     def execute(self, context):
         props = context.scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
         prefs = _addon_prefs(context)
 
         provider = _analysis_provider(props, prefs)
@@ -4267,7 +4422,16 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
         ]
     )
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
+    append_to_set: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
         selected = []
@@ -4283,7 +4447,7 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
         # STYLE upload means "replace the current style set". In 2.17 this
         # button appended new images behind the first upload, while the first
         # image remained the hard-coded primary style forever.
-        if self.ref_kind == "STYLE":
+        if self.ref_kind == "STYLE" and not self.append_to_set:
             added, failures = _replace_style_set(props, selected)
             if len(selected) > MAX_REFERENCES_PER_KIND:
                 self.report({"WARNING"}, f"风格参考最多 {MAX_REFERENCES_PER_KIND} 张，多余图片未添加。")
@@ -4337,10 +4501,20 @@ class WONDFUL_OT_paste_reference(Operator):
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
+    item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
+    append_to_set: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
-        if self.ref_kind not in {"STYLE", "PRODUCT"} and len(collection) >= MAX_REFERENCES_PER_KIND:
+        if self.ref_kind not in {"STYLE", "PRODUCT"} and self.item_index < 0 and len(collection) >= MAX_REFERENCES_PER_KIND:
             self.report({"WARNING"}, f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。")
             return {"CANCELLED"}
         clipboard_dir = CONFIG_DIR / "clipboard"
@@ -4348,7 +4522,17 @@ class WONDFUL_OT_paste_reference(Operator):
         destination = clipboard_dir / f"clipboard_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
         try:
             path = save_clipboard_image(destination)
-            if self.ref_kind == "STYLE":
+            if self.ref_kind != "PRODUCT" and self.item_index >= 0:
+                if self.item_index >= len(collection):
+                    raise RuntimeError("该参考图已被移除")
+                image = _load_reference_image(path)
+                collection[self.item_index].image = image
+                collection[self.item_index].source_path = str(path)
+                _mark_reference_changed(props, self.ref_kind)
+            elif self.ref_kind == "STYLE" and self.append_to_set:
+                _append_reference_from_path(props, "STYLE", path)
+                _mark_reference_changed(props, "STYLE")
+            elif self.ref_kind == "STYLE":
                 added, failures = _replace_style_set(props, [path])
                 if not added:
                     raise RuntimeError(failures[0] if failures else "无法读取剪贴板风格图")
@@ -4363,20 +4547,28 @@ class WONDFUL_OT_paste_reference(Operator):
         except Exception as exc:
             self.report({"ERROR"}, f"粘贴参考图失败：{exc}")
             return {"CANCELLED"}
-        self.report({"INFO"}, "已从剪贴板添加参考图。")
+        self.report({"INFO"}, "参考图已更新")
         return {"FINISHED"}
 
 
 class WONDFUL_OT_replace_reference(Operator, ImportHelper):
     bl_idname = "wondful.replace_reference"
     bl_label = "替换参考图"
+    bl_description = '只替换当前卡片的图片，保留其他参考图'
 
     filename_ext = ""
     filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.webp", options={"HIDDEN"})
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if idx < 0:
@@ -4395,11 +4587,19 @@ class WONDFUL_OT_replace_reference(Operator, ImportHelper):
 class WONDFUL_OT_clear_reference(Operator):
     bl_idname = "wondful.clear_reference"
     bl_label = "删除参考图"
+    bl_description = '只移除当前参考卡片，不删除原始图片文件'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if idx >= 0:
@@ -4412,10 +4612,18 @@ class WONDFUL_OT_clear_reference(Operator):
 class WONDFUL_OT_clear_all_references(Operator):
     bl_idname = "wondful.clear_all_references"
     bl_label = "清空本类参考图"
+    bl_description = '清空本类参考图，不删除原始文件'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
         had_items = bool(collection)
@@ -4429,12 +4637,20 @@ class WONDFUL_OT_clear_all_references(Operator):
 class WONDFUL_OT_move_reference(Operator):
     bl_idname = "wondful.move_reference"
     bl_label = "调整参考图顺序"
+    bl_description = '调整当前参考顺序，第一张为主参考'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     direction: EnumProperty(items=[("UP", "前移", ""), ("DOWN", "后移", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if len(collection) < 2 or idx < 0:
@@ -4670,6 +4886,10 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         from .layered_output import resize
         scene = context.scene
         props = scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
         if not workflow.is_reference(props):
             self.report({"ERROR"}, "多角度扩展属于「参考图复刻」，请先切换模式")
             return {"CANCELLED"}

@@ -1,7 +1,7 @@
 """Explicit workflows and reversible capture isolation; no network or import-time bpy.
 
 ENVIRONMENT keeps the user's camera and appearance references. REFERENCE uses an
-explicit target, a reviewed blockout, and that target's appearance. Switching mode
+explicit target, a valid blockout, and that target's appearance. Switching mode
 never changes cameras, geometry, materials, lights or visibility.
 """
 from contextlib import contextmanager
@@ -12,7 +12,7 @@ from pathlib import Path
 
 ENVIRONMENT = "ENVIRONMENT"
 REFERENCE = "REFERENCE"
-BUILD_ID = "two-workflows-r1"
+BUILD_ID = "two-workflows-ui-r2"
 BUSY = {"POLISHING", "RENDERING", "AUTHENTICATING", "BLOCKOUT", "CHECKING", "AUTOFILLING", "CLASSIFYING", "REFRESHING_MODELS"}
 DRAFT_FIELDS = ("prompt", "scene_brief", "scene_brief_used", "prompt_source", "last_ai_prompt",
                 "prompt_style_fingerprint", "prompt_style_revision", "prompt_reference_policy_version",
@@ -97,8 +97,12 @@ def file_hash(path):
 
 def target_changed(props, context):
     """Loading a target is explicit; errors leave no stale preview or approval."""
-    props.replica_reviewed = False
+    props.replica_reviewed = False  # legacy serialized field; no longer a gate
     props.sb_reference_image = None
+    props.sb_preview_image = None
+    props.replica_preview_signature = ""
+    props.replica_revision_status = ""
+    props.replica_can_undo = False
     if is_reference(props):
         props.style_prompt_dirty = True
     raw = (getattr(props, "sb_image_path", "") or "").strip()
@@ -111,6 +115,44 @@ def target_changed(props, context):
                 props.sb_reference_image.reload()
         except (OSError, RuntimeError, ValueError):
             pass
+
+
+def identity_available(props):
+    """Cheap UI readiness only. On-disk / decoder checks belong to action preflight."""
+    items = getattr(props, "product_images", ())
+    if not items:
+        return False
+    image = getattr(items[0], "image", None)
+    try:
+        return image is not None and len(image.size) == 2 and min(image.size) > 0
+    except (AttributeError, TypeError, ReferenceError):
+        return False
+
+
+def identity_path(props, *, resolve=None, packed_export=None):
+    """Only the actual first identity slot is authoritative; no second-slot fallback."""
+    if not identity_available(props):
+        return ""
+    item = props.product_images[0]
+    image = item.image
+    resolve = resolve or (lambda p: str(Path(p).expanduser()))
+    for raw in (getattr(item, "source_path", ""), getattr(image, "filepath_raw", ""), getattr(image, "filepath", "")):
+        if not raw:
+            continue
+        try:
+            path = Path(resolve(raw))
+            if path.is_file() and path.stat().st_size > 0:
+                return str(path)
+        except (OSError, ValueError):
+            pass
+    if getattr(image, "packed_file", None) and packed_export:
+        try:
+            path = packed_export(image)
+            if path and Path(path).is_file() and Path(path).stat().st_size > 0:
+                return str(path)
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return ""
 
 
 def render_text(props, references_changed=False):
@@ -135,9 +177,11 @@ def contract(props):
             "不得照搬其中的机位或车辆位置；不引用任何旧复刻粗模或其分析。" + common)
 
 
-def preflight(props, *, has_camera, has_product, has_blockout, target_path="", source_ok=True):
+def preflight(props, *, has_camera, has_product, has_blockout, target_path="", source_ok=True, identity_ok=None):
     if not has_product:
         return "请先选择车模所在的产品集合"
+    if not (identity_available(props) if identity_ok is None else identity_ok):
+        return "请先添加有效的产品身份参考图"
     if not has_camera:
         return "请先选择活动相机"
     if not is_reference(props):
@@ -151,8 +195,6 @@ def preflight(props, *, has_camera, has_product, has_blockout, target_path="", s
         return "粗模参考来源不可用；请重新生成粗模"
     if target_hash != str(getattr(props, "sb_built_target_hash", "") or ""):
         return "目标图与当前粗模不一致，或旧粗模缺少来源记录；请重新生成粗模"
-    if not getattr(props, "replica_reviewed", False):
-        return "请先检查当前相机与粗模，并勾选「已检查，可以渲染」"
     return ""
 
 
