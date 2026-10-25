@@ -4,6 +4,7 @@
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import AddonPreferences, PropertyGroup
+from . import workflow
 
 
 MAX_REFERENCES_PER_KIND = 8
@@ -565,6 +566,29 @@ class WONDFUL_AISettings(PropertyGroup):
                ("3", "3", "每次生成 3 张"), ("4", "4", "每次生成 4 张")],
         default="4",
     )
+    workflow_mode: EnumProperty(
+        name="工作模式", items=[("ENVIRONMENT", "环境参考渲染", "当前相机 + 车模 + 环境参考"),
+                                  ("REFERENCE", "参考图复刻", "目标图 → 相机与粗模 → 检查 → 渲染")],
+        default="ENVIRONMENT", update=workflow.switch_mode)
+    workflow_last_mode: StringProperty(default="ENVIRONMENT", options={"HIDDEN"})
+    workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
+    auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=False,
+        description="可选；关闭时直接使用手写提示词或一句话需求，不强制调用 AI 润色")
+    replica_reviewed: BoolProperty(name="已检查，可以渲染", default=False,
+        description="确认当前相机、车模位置与粗模结构；重新生成粗模或更换目标图后需再次检查")
+    sb_built_target_hash: StringProperty(default="", options={"HIDDEN"})
+    sb_reference_image: PointerProperty(name="复刻目标图", type=bpy.types.Image)
+    sb_preview_image: PointerProperty(name="粗模预览", type=bpy.types.Image)
+    workflow_multiview: BoolProperty(name="使用多视角列表", default=False,
+        description="仅参考图复刻：第一个勾选的视角作为主视角；关闭时只渲染当前相机")
+    result_workflow: StringProperty(default="", options={"HIDDEN"})
+    compare_pair: EnumProperty(name="对比对象", items=[
+        ("CAMERA_RESULT", "底图 / 成片", "检查车辆和相机构图"),
+        ("TARGET_BLOCKOUT", "目标 / 粗模", "渲染前检查场景复刻"),
+        ("TARGET_RESULT", "目标 / 成片", "检查最终复刻效果")],
+        default="CAMERA_RESULT", update=_refresh_compare_update)
+    ui_show_replica_advanced: BoolProperty(name="复刻进阶", default=False)
+
     two_step: BoolProperty(
         name="分两步",
         description="打开后「生成」只写提示词，确认后再点「渲染」",
@@ -596,10 +620,10 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_expanded: BoolProperty(name="展开提示词", description="展开自动换行全文或收起为 6 行；完整编辑按钮支持多行输入", default=False)
     render_mode: EnumProperty(
         name="渲染模式",
-        description="控制单次渲染的远程调用数量。张数在 ⑥ 选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
+        description="控制单次渲染的远程调用数量。张数在输出区选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
         items=[
-            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按 ⑥ 的选择；用于快速看方向"),
-            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按 ⑥ 的选择；推荐默认"),
+            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按输出区的选择；用于快速看方向"),
+            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按输出区的选择；推荐默认"),
             ("STRICT", "严格对齐", "使用完整 Structure Packet（含 Part ID），生成后远程验收；未达阈值时按设置自动修复重试"),
         ],
         default="STANDARD",
@@ -614,14 +638,14 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_line_index: IntProperty(default=0, min=0)
 
     # 2.14: changing style references invalidates any prompt that was generated
-    # from the previous style set. Rendering stays blocked until prompt polish
-    # succeeds against the new references. The revision guard also prevents a
+    # from the previous style set. Manual copy can still render; stale AI prose
+    # is discarded or explicitly polished. The revision guard also prevents a
     # polish started on one style set from accidentally validating a newer set.
     style_reference_revision: IntProperty(default=0, min=0)
     prompt_style_revision: IntProperty(default=0, min=0)
     style_prompt_dirty: BoolProperty(
         name="风格提示词待刷新",
-        description="风格参考图已变化；必须先重新生成提示词，再允许最终生图",
+        description="风格参考图已变化；旧 AI 文案不会沿用，手写提示词仍可直接生成",
         default=False,
     )
     style_sync_initialized: BoolProperty(
@@ -964,8 +988,8 @@ class WONDFUL_AISettings(PropertyGroup):
     # 1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
     # ui_show_scene_blockout: the old 高级 disclosure; unused since ④, kept so saved .blend files load unchanged
     ui_show_scene_blockout: BoolProperty(name="从参考图生成场景粗模", default=False)
-    sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；重建相机与结构，并记录原图用于连续结构、材质与光照参照",
-                                  subtype="FILE_PATH", default="")
+    sb_image_path: StringProperty(name="参考图", description="独立的复刻目标图；不自动沿用环境参考渲染的图片",
+                                  subtype="FILE_PATH", default="", update=workflow.target_changed)
     sb_set_camera: BoolProperty(name="同时设置相机", default=True,
                                 description="按照片估计的机位高度、俯仰、视角新建 / 更新「Wondful 参考相机」并设为场景相机；"
                                             "不勾选时不动任何相机，体块朝向跟随当前场景相机")
@@ -977,7 +1001,7 @@ class WONDFUL_AISettings(PropertyGroup):
                                          "宽高按实测深度对齐。第一次使用会下载约 155 MB（深度模型 + 运行库），参考图不上传；"
                                          "装不上时自动改用普通模式")
     # 1.2.5 场景补全 (④ 场景粗模, default on): infer what the reference photo does not show
-    sb_complete: BoolProperty(name="场景补全", default=True,
+    sb_complete: BoolProperty(name="场景补全", default=False,
                               description="搭场景粗模时按参考图里看到的街道推测看不到的部分并补上体块：道路按实测方向和宽度继续、"
                                           "路沿，两侧房屋按实测的退线、高度、进深和间距延续（只有一侧时按对侧推测），树篱 / 树 / 电杆"
                                           "按看到的节奏延续；只放在参考相机看不到、也不挡产品周围的位置。换角度渲染时背面不再是空地 / 白墙")
@@ -1090,7 +1114,7 @@ class WONDFUL_AISettings(PropertyGroup):
     compare_drag_active: BoolProperty(name="鼠标拖动已启用", default=False)
     ui_show_account: BoolProperty(name="账户详情", default=False)
     ui_show_references: BoolProperty(name="参考图", default=True)
-    ui_show_product_refs: BoolProperty(name="产品参考图", default=True)
+    ui_show_product_refs: BoolProperty(name="产品参考图", default=False)
     ui_show_person_refs: BoolProperty(name="人物参考图", default=False)
     ui_show_style_refs: BoolProperty(name="环境／风格参考图", default=True)
     ui_show_advanced: BoolProperty(name="高级设置", default=False)
@@ -1111,7 +1135,7 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     ui_show_terrain: BoolProperty(name="自定义地形", default=True)
     ui_show_block_refs: BoolProperty(name="建筑参考", default=True)
-    ui_show_prompt: BoolProperty(name="提示词", default=False)
+    ui_show_prompt: BoolProperty(name="提示词", default=True)
     alignment_score: FloatProperty(name="构图对齐分数", default=-1.0, min=-1.0, max=100.0)
     alignment_message: StringProperty(name="构图对齐说明", default="")
     alignment_attempts: IntProperty(name="生成尝试次数", default=0, min=0, max=40)

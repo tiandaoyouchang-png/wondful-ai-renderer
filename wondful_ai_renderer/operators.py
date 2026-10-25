@@ -52,6 +52,7 @@ from .viewport_capture import capture_camera_reference, camera_output_dimensions
 from .structure_packet import build_structure_packet
 from .properties import MAX_REFERENCES_PER_KIND, MAX_PRODUCT_REFERENCES, reference_limit
 from . import prompt_profiles
+from . import workflow
 from .reference_bundle import MAX_ANTIGRAVITY_IMAGE_PATHS, MAX_IMAGE_PATHS, prepare_bundle
 from .model_catalog import discover_models
 from .antigravity_auth import AuthSession
@@ -116,6 +117,8 @@ def _mv_analysis(massing_coll, coll) -> dict:
 def _sb_ground_band_line(context, props) -> str:
     """1.2.8 地面分带 line of the ④ analysis for the 主视角 request ("" when off / no blockout / no bands)."""
     if not bool(getattr(props, "sb_ground_bands", True)):
+        return ""
+    if not workflow.is_reference(props):
         return ""
     try:
         from .massing import SB_TEXT as _SB_TEXT
@@ -357,7 +360,8 @@ def _reference_paths(props):
     return {
         "product": paths(props.product_images)[:MAX_PRODUCT_REFERENCES],
         "person": paths(props.person_images),
-        "style": paths(props.style_images),
+        "style": ([_sb_reference(props)[0]] if _sb_reference(props)[0] else [])
+                 if workflow.is_reference(props) else paths(props.style_images),
     }
 
 
@@ -376,7 +380,8 @@ def _reference_instructions(props):
     return {
         "product": notes(props.product_images)[:MAX_PRODUCT_REFERENCES],
         "person": notes(props.person_images),
-        "style": notes(props.style_images),
+        "style": (["复刻目标：参考场景材质、光照与氛围；结构以已确认底图为准"]
+                  if _sb_reference(props)[0] else []) if workflow.is_reference(props) else notes(props.style_images),
     }
 
 
@@ -920,7 +925,9 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
 
 
 def generate_needs_polish(props, prefs):
-    """3.1.9: decide whether 「生成」 must (re)write the prompt before rendering."""
+    """Only opt-in automatic polish may rewrite before generation."""
+    if not bool(getattr(props, "auto_polish_on_generate", False)):
+        return False
     brief = (getattr(props, "scene_brief", "") or "").strip()
     if not (props.prompt or "").strip():
         return True
@@ -929,18 +936,38 @@ def generate_needs_polish(props, prefs):
     if needs_reference_policy_refresh(props) or prompt_profiles.needs_target_refresh(props, prefs):
         return True
     if (props.style_prompt_dirty
-            or int(props.prompt_style_revision) != int(props.style_reference_revision)
-            or (len(props.style_images) > 0 and not bool(props.style_sync_initialized))):
+            or int(props.prompt_style_revision) != workflow.reference_revision(props)
+            or (bool(_reference_paths(props)["style"]) and not bool(props.style_sync_initialized))):
         return True
     key = _product_autofill_key(props, _analysis_provider(props, prefs))
     return bool(key) and _product_autofill_needed(props, key)
 
 
+def workflow_preflight(context, props):
+    from .multiview import scene_blockout_exists
+    target, _source = _sb_reference(props)
+    source_ok = True
+    if workflow.is_reference(props):
+        source, _note = _sb_generation_reference(context, props)
+        from . import massing as MS
+        root = MS.find_collection(context.scene, props)
+        owners = ([root] + list(root.children_recursive)) if root is not None else []
+        rendered = set(MS.massing_objects(root, getattr(props, "product_collection", None))) if root else set()
+        original_hashes = {str(c.get("wondful_sb_original_sha256", "") or "") for c in owners
+                           if c.get("wondful_scene_blockout") and any(o in rendered for o in c.all_objects)}
+        built_hash = str(getattr(props, "sb_built_target_hash", "") or "")
+        source_ok = bool(source and built_hash and original_hashes == {built_hash})
+    return workflow.preflight(props, has_camera=context.scene.camera is not None,
+                              has_product=getattr(props, "product_collection", None) is not None,
+                              has_blockout=scene_blockout_exists(context.scene),
+                              target_path=target, source_ok=source_ok)
+
+
 class WONDFUL_OT_generate(Operator):
-    """3.1.9 single entry point: polish when needed, then render."""
+    """Shared render entry: validate mode, optionally polish, then render."""
     bl_idname = "wondful.generate"
     bl_label = "生成"
-    bl_description = "自动完成：读产品图 → 分析环境 → 写提示词 → 渲染与验收"
+    bl_description = "按当前工作模式渲染与检查；AI 润色可选，不会自动执行粗模重建"
 
     @classmethod
     def poll(cls, context):
@@ -951,6 +978,12 @@ class WONDFUL_OT_generate(Operator):
 
     def execute(self, context):
         props = context.scene.wondful_ai
+        error = workflow_preflight(context, props)
+        if error:
+            _status(props, "ERROR", error)
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
         props.model_notice = ""
         brief = (props.scene_brief or "").strip()
@@ -1015,6 +1048,8 @@ class WONDFUL_OT_generate(Operator):
 
 def generate_views(context, props):
     """Cameras 「生成」 renders from the ⑥ 渲染视角 list: [] when there is no 场景粗模 or nothing is checked."""
+    if not workflow.is_reference(props) or not getattr(props, "workflow_multiview", False):
+        return []
     from . import multiview as MV
     scene = context.scene
     if not MV.scene_blockout_exists(scene):
@@ -1320,12 +1355,11 @@ class WONDFUL_OT_massing_hull_build(Operator):
 
 
 def _sb_reference(props):
-    """从参考图生成场景粗模: the photo to analyse (the file field, else ③'s first environment reference)."""
-    custom = bpy.path.abspath((getattr(props, "sb_image_path", "") or "").strip())
-    if custom:
-        return custom, "file"
-    style = [p for p in _reference_paths(props)["style"] if p]
-    return (bpy.path.abspath(style[0]), "step3") if style else ("", "")
+    """The explicitly selected reconstruction target (never the environment list)."""
+    if not workflow.is_reference(props):
+        return "", ""
+    raw = (getattr(props, "sb_image_path", "") or "").strip()
+    return (bpy.path.abspath(raw), "replica_target") if raw else ("", "")
 
 
 def _sb_generation_reference(context, props):
@@ -1335,6 +1369,8 @@ def _sb_generation_reference(context, props):
     was reconstructed from it. Use the recorded snapshot and content hash on
     that blockout, never the global text datablock or the current UI selection.
     """
+    if not workflow.is_reference(props):
+        return "", ""
     from . import massing as MS
     if not bool(getattr(props, "massing_enabled", True)):
         return "", ""
@@ -1441,11 +1477,56 @@ def _sb_precise_prepare(sb, rgb, frame, geo_path, need_install, cancelled):
         print("[Wondful] 精确模式深度测量失败，改用普通模式：\n" + traceback.format_exc())
 
 
+def _render_replica_preview(context, props, directory):
+    from . import scene_blockout_build as SBB
+    from .massing import find_collection
+    scene = context.scene
+    cam = scene.camera
+    if cam is None or cam.data.type != "PERSP":
+        raise RuntimeError("请先选择透视相机，再刷新粗模预览")
+    root = find_collection(scene, props)
+    if root is None:
+        raise RuntimeError("请先生成相机与粗模")
+    path = Path(directory) / "review_blockout.png"
+    info = {"collection": root.name, "frame": list(camera_output_dimensions(context)),
+            "lens": cam.data.lens, "sensor_width": cam.data.sensor_width, "sensor_height": cam.data.sensor_height,
+            "sensor_fit": cam.data.sensor_fit, "shift_x": cam.data.shift_x, "shift_y": cam.data.shift_y,
+            "cam_world": [list(row) for row in cam.matrix_world], "kind": root.get("wondful_sb_kind", "outdoor")}
+    SBB.render_preview(context, info, str(path), width=960, product_collection=props.product_collection)
+    image = load_image(str(path), "Wondful_Blockout_Preview")
+    image.pack()
+    props.sb_preview_image = image
+    workflow.target_changed(props, context)
+    props.compare_pair = "TARGET_BLOCKOUT"
+    return str(path)
+
+
+class WONDFUL_OT_replica_preview(Operator):
+    bl_idname = "wondful.replica_preview"
+    bl_label = "刷新粗模预览"
+    bl_description = "用当前相机渲染已有粗模；不重新分析、不改模型、不调用在线 AI"
+
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and workflow.is_reference(context.scene.wondful_ai)
+
+    def execute(self, context):
+        props = context.scene.wondful_ai
+        props.replica_reviewed = False
+        try:
+            session = create_session()
+            _render_replica_preview(context, props, session.directory)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     """1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
     bl_idname = "wondful.scene_blockout_build"
     bl_label = "从参考图生成场景粗模"
-    bl_description = ("让 AI 分析环境参考图（③ 第一张，或 ④ 里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
+    bl_description = ("让 AI 分析独立的复刻目标图，搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
                       "放进环境体块里的「Wondful 场景粗模」集合（重新生成会替换它），每个体块都按照片命名；产品位置不变。"
                       "记录原图来源，生成时辅助保留连续结构、材质与环境光照；产品以当前模型为准")
     bl_options = {"REGISTER", "UNDO"}
@@ -1455,19 +1536,33 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     precise_geo: StringProperty(name="深度测量结果", description="（测试 / 离线）精确模式直接用这个已记录的深度测量（.npz），不运行深度模型",
                                 default="", options={"HIDDEN", "SKIP_SAVE"})
 
+    def invoke(self, context, event):
+        from .multiview import scene_blockout_exists
+        if scene_blockout_exists(context.scene):
+            return context.window_manager.invoke_confirm(self, event)
+        return self.execute(context)
+
     def execute(self, context):
         from . import scene_blockout as SB
         from . import codex_direct as CD
         from . import sb_progress as SP
         scene = context.scene
         props = scene.wondful_ai
+        if not workflow.is_reference(props):
+            self.report({"ERROR"}, "请先切换到「参考图复刻」")
+            return {"CANCELLED"}
+        if getattr(props, "product_collection", None) is None:
+            self.report({"ERROR"}, "请先选择车模所在的产品集合")
+            return {"CANCELLED"}
+        props.replica_reviewed = False
+        props.sb_preview_image = None
         prefs = _addon_prefs(context)
         props.sb_failed_stage = ""
         props.sb_stage = ""
         props.sb_elapsed = 0
         ref, source = _sb_reference(props)
         if not ref or not Path(ref).is_file():
-            msg = "请先在 ③ 放一张环境参考图，或在 ④ 选择一张参考图。" if not ref else f"参考图不存在：{ref}"
+            msg = "请先选择独立的复刻目标图。" if not ref else f"参考图不存在：{ref}"
             props.last_sb_note = msg
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
@@ -1475,7 +1570,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         if not cached:
             provider = _analysis_provider(props, prefs)
             if provider["id"] != "codex":
-                msg = "从参考图生成场景粗模需要 Codex 登录（① 连接 Codex）。"
+                msg = "参考图分析需要 Codex 登录，请在顶部连接或设置中切换服务。"
                 props.last_sb_note = msg
                 self.report({"ERROR"}, msg)
                 return {"CANCELLED"}
@@ -1493,8 +1588,11 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         props.sb_stage_ids = SP.encode(ids)
         props.sb_stage = SP.READ
         session = create_session()
+        target_sha256 = workflow.file_hash(ref)
         try:
             upload, frame = _sb_prepare_png(ref, session.directory / "scene_ref.png", SB.WORK_LONG)
+            if not target_sha256 or workflow.file_hash(ref) != target_sha256:
+                raise RuntimeError("读取过程中目标图发生变化，请重新选择目标图")
         except Exception as exc:
             props.sb_failed_stage = SP.READ
             props.sb_stage = ""
@@ -1514,6 +1612,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         self._sb.update({"session": session.directory, "upload": upload, "frame": frame,
+                         "target_sha256": target_sha256,
                          "set_camera": bool(props.sb_set_camera), "correct": correct, "stage": 1, "scores": [],
                          "rounds": [], "model": model, "client_version": client_version, "source": source})
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
@@ -1643,6 +1742,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         reference_snapshot = Path(self._sb["upload"])
         data["_reference_image_path"] = str(reference_snapshot.resolve())
         data["_reference_image_sha256"] = hashlib.sha256(reference_snapshot.read_bytes()).hexdigest()
+        data["_reference_original_sha256"] = self._sb.get("target_sha256", "")
         try:   # 1.2.6 只做场景相关物体: the completion stats never see people / other vehicles either
             from . import static_scene as _SS
             self._sb["analysis"] = _SS.strip_dynamic(data, _SS.wanted(getattr(props, "scene_brief", "") or ""))[0]
@@ -1699,7 +1799,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         detail_line = ""
         from . import detail_blockout as DB
         DB.remove_inferred()
-        complete = bool(getattr(props, "sb_complete", True))     # 1.2.5 场景补全 (④ 高级, default on)
+        complete = bool(getattr(props, "sb_complete", False))    # Out-of-frame completion is opt-in.
         detail_done = False
         if self._sb.get("geo") is not None and info.get("world") and bool(getattr(props, "sb_detail_carrier", True)):
             # 1.2.5 细节粗模: measured near / mid-ground carrier for 多角度场景一致 (hidden; far field stays LLM)
@@ -1733,10 +1833,19 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             detail_line = (detail_line + " · " + line) if detail_line else line
         props.last_sb_note = SB.summary(info) + (f" · {detail_line}" if detail_line else "")
         print("[Wondful] " + props.last_sb_note)
+        props.sb_built_target_hash = self._sb.get("target_sha256", "")
+        props.replica_reviewed = False
+        props.sb_preview_image = None
+        try:
+            preview_path = _render_replica_preview(context, props, self._sb["session"])
+            info["review_preview"] = {"ok": True, "path": preview_path}
+        except Exception as exc:
+            info["review_preview"] = {"ok": False, "reason": str(exc)[:140]}
+            props.last_sb_note += " · 预览未完成，请刷新当前预览：" + str(exc)[:140]
         try:
             Path(self._sb["session"], "scene_blockout_info.json").write_text(
                 json.dumps(info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-        except Exception:
+        except OSError:
             pass
         props.progress = 0.0
         props.eta_seconds = 0
@@ -2429,16 +2538,16 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         self._camera_name_at_start = context.scene.camera.name if context.scene.camera else ""
         self._reference_sources_at_start = {kind: _reference_manifest(paths) for kind, paths in refs.items()}
         self._reference_instructions_at_start = ref_instructions
-        self._style_revision_at_start = int(getattr(props, "style_reference_revision", 0))
+        self._style_revision_at_start = workflow.reference_revision(props)
         self._style_fingerprint_at_start = _reference_fingerprint(refs["style"])
-        fingerprint_relevant = bool(len(props.style_images) > 0 or getattr(props, "style_sync_initialized", False))
+        fingerprint_relevant = bool(bool(_reference_paths(props)["style"]) or getattr(props, "style_sync_initialized", False))
         self._style_refresh_requested = bool(
             needs_reference_policy_refresh(props)
             or prompt_profiles.needs_target_refresh(props, prefs)
             or getattr(props, "style_prompt_dirty", False)
             or int(getattr(props, "prompt_style_revision", 0)) != self._style_revision_at_start
             or (fingerprint_relevant and str(getattr(props, "prompt_style_fingerprint", "")) != self._style_fingerprint_at_start)
-            or (len(props.style_images) > 0 and not bool(getattr(props, "style_sync_initialized", False)))
+            or (bool(_reference_paths(props)["style"]) and not bool(getattr(props, "style_sync_initialized", False)))
         )
 
         visible_prompt = _get_prompt_text(props)
@@ -2660,7 +2769,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             final_prompt_now = _get_prompt_text(props)
             props.last_ai_prompt = final_prompt_now
             props.prompt_target_key = self._prompt_profile["target_key"]
-            current_style_revision = int(getattr(props, "style_reference_revision", 0))
+            current_style_revision = workflow.reference_revision(props)
             current_style_fingerprint = _reference_fingerprint(_reference_paths(props)["style"])
             same_style_set = (
                 current_style_revision == int(getattr(self, "_style_revision_at_start", current_style_revision))
@@ -2767,7 +2876,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             if not bool(getattr(props, "layered_output", False)):
                 return None
             if getattr(props, "product_collection", None) is None:
-                props.last_layers_note = "分层输出需要先在 ② 选择产品集合，本次已跳过"
+                props.last_layers_note = "分层输出需要先在首步选择车模集合，本次已跳过"
                 return None
             from .product_kind import is_vehicle
             try:
@@ -2800,7 +2909,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 return None
             coll = getattr(props, "product_collection", None)
             if coll is None:
-                props.last_detail_note = "细节修复需要先在 ② 选择产品集合，本次已跳过"
+                props.last_detail_note = "细节修复需要先在首步选择车模集合，本次已跳过"
                 return None
             work = Path(self._session.viewport_reference).parent
             from .viewport_capture import keep_exact_slots, keep_exact_texts, mirrored_keep_parts
@@ -3072,12 +3181,19 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         props.last_export_paths = json.dumps(exported_paths, ensure_ascii=False)
         try:
             props.result_image = load_image(str(best_exported), "Wondful_Result")
+            props.result_workflow = getattr(self, "_workflow_mode_at_start", "")
         except Exception:
             pass
 
     def execute(self, context):
         self._request_started_at = time.perf_counter()
         props = context.scene.wondful_ai
+        error = workflow_preflight(context, props)
+        if error:
+            _status(props, "ERROR", error)
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         planned_variant_count = render_variant_count(provider["id"], props)
@@ -3095,33 +3211,24 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             self.report({"ERROR"}, f"未检测到 {provider['label']} CLI。")
             return {"CANCELLED"}
 
-        if prompt_profiles.needs_target_refresh(props, prefs):
-            self.report({"WARNING"}, "生图引擎或提示词规则已变化，请先点‘适配当前引擎’重新生成提示词。")
-            return {"CANCELLED"}
         self._prompt_profile = prompt_profiles.metadata(provider["id"], provider["model"])
-        current_prompt = _get_prompt_text(props)
-        if not current_prompt:
-            self.report({"ERROR"}, "提示词为空。可以先输入简短需求，或点击重新生成提示词。")
-            return {"CANCELLED"}
-
-        current_style_revision = int(getattr(props, "style_reference_revision", 0))
+        current_style_revision = workflow.reference_revision(props)
         prompt_style_revision = int(getattr(props, "prompt_style_revision", 0))
         current_style_fingerprint = _reference_fingerprint(_reference_paths(props)["style"])
         self._style_fingerprint_at_render = current_style_fingerprint
-        fingerprint_relevant = bool(len(props.style_images) > 0 or getattr(props, "style_sync_initialized", False))
+        fingerprint_relevant = bool(bool(_reference_paths(props)["style"]) or getattr(props, "style_sync_initialized", False))
         policy_needs_refresh = needs_reference_policy_refresh(props)
         style_needs_refresh = bool(
             policy_needs_refresh
             or getattr(props, "style_prompt_dirty", False)
             or prompt_style_revision != current_style_revision
             or (fingerprint_relevant and str(getattr(props, "prompt_style_fingerprint", "")) != current_style_fingerprint)
-            or (len(props.style_images) > 0 and not bool(getattr(props, "style_sync_initialized", False)))
+            or (bool(_reference_paths(props)["style"]) and not bool(getattr(props, "style_sync_initialized", False)))
         )
+        current_prompt = workflow.render_text(props, references_changed=style_needs_refresh)
+        current_prompt += "\n\n" + workflow.contract(props)
         if style_needs_refresh:
-            message = ("参考职责已更新为产品造型、环境打光，请先重新生成提示词。" if policy_needs_refresh
-                       else "环境／风格参考图尚未与当前提示词同步，请先重新生成提示词。")
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
+            props.prompt_notice = "使用当前参考图；旧 AI 风格文案不会沿用，手写提示词保留。AI 润色可选。"
 
         # 2.19: Structure Lock no longer infers product meshes from the whole scene
         # or from red materials. When structure guides are enabled, one explicit
@@ -3359,12 +3466,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面"
                                                    + (f" · 建筑参考 {len(direct_building_refs)} 张" if direct_building_refs else "")
                                                    if massing_coll else "")
-                        direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
+                        direct_simple_brief = current_prompt
                 except Exception as exc:
                     print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
                 if direct_simple_brief is None and Path(self._session.viewport_reference).is_file():
                     direct_simple_base = str(self._session.viewport_reference)
-                    direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
+                    direct_simple_brief = current_prompt
             # 1.2.6 风格与光线锁定: the ④ analysis' 画风 (voxel, cartoon…) / night lighting also locks the 主视角
             direct_style_text = ""
             if direct_simple_brief is not None:
@@ -3373,7 +3480,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     from .multiview import scene_blockout_exists as _sb_exists
                     from .massing import SB_TEXT as _SB_TEXT
                     _txt = bpy.data.texts.get(_SB_TEXT)
-                    if _txt is not None and _sb_exists(context.scene):
+                    if workflow.is_reference(props) and _txt is not None and _sb_exists(context.scene):
                         direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or "")
                 except Exception as exc:
                     print(f"[Wondful] 风格锁定读取失败：{exc}")
@@ -3458,7 +3565,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 except Exception as exc:
                     print(f"[Wondful] 轮廓验收：产品遮罩渲染失败：{exc}")
             if not gate_mask:
-                props.last_iou_note = "轮廓验收需要先在 ② 选择产品集合，本次未验收、未自动重生成"
+                props.last_iou_note = "轮廓验收需要先在首步选择车模集合，本次未验收、未自动重生成"
         else:
             gate_max = 1
         self._gate_mask = gate_mask
@@ -4563,6 +4670,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         from .layered_output import resize
         scene = context.scene
         props = scene.wondful_ai
+        if not workflow.is_reference(props):
+            self.report({"ERROR"}, "多角度扩展属于「参考图复刻」，请先切换模式")
+            return {"CANCELLED"}
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):

@@ -8,6 +8,8 @@ bl_info = {
     "category": "Render",
 }
 
+BUILD_ID = "two-workflows-r1"
+
 import bpy
 
 try:
@@ -49,6 +51,7 @@ from .operators import (
     WONDFUL_OT_block_select,
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
+    WONDFUL_OT_replica_preview,
     WONDFUL_OT_mv_set_master,
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,
@@ -109,6 +112,7 @@ CLASSES = (
     WONDFUL_OT_block_select,
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
+    WONDFUL_OT_replica_preview,
     WONDFUL_OT_mv_set_master,
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,

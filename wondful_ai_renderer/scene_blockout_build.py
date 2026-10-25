@@ -1167,6 +1167,8 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     coll["wondful_sb_kind"] = "interior" if S.get("scene_kind") == "interior" else "outdoor"   # 1.2.6: 室内/室外 authority
     if S.get("_reference_image_path"):
         coll["wondful_sb_reference_image"] = str(S["_reference_image_path"])
+    if S.get("_reference_original_sha256"):
+        coll["wondful_sb_original_sha256"] = str(S["_reference_original_sha256"])
     if S.get("_reference_image_sha256"):
         coll["wondful_sb_reference_sha256"] = str(S["_reference_image_sha256"])
     (parent_collection or scene.collection).children.link(coll)
@@ -1308,11 +1310,13 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
 
 # ------------------------------------------------------------------------------------------- preview render
 
-def render_preview(context, info, path, width=480):
-    """Render the blockout alone from the analysis camera (own tints, background transparent) → RGBA PNG.
+def render_preview(context, info, path, width=480, product_collection=None):
+    """Render a blockout, optionally including the real product, to a transparent PNG.
 
-    A temporary scene shares only the blockout collection, so the user's scene, product and render settings are
-    untouched.  Background Blender uses Cycles (no GL); the UI uses Workbench (about a second)."""
+    A temporary scene shares the blockout and optional product collection. The
+    user's scene and render settings are untouched. Background Blender uses
+    Cycles (no GL); interactive Blender uses Workbench.
+    """
     coll = bpy.data.collections.get(info["collection"])
     if coll is None:
         raise RuntimeError("场景粗模集合不存在")
@@ -1321,8 +1325,14 @@ def render_preview(context, info, path, width=480):
     made = []
     try:
         tmp.collection.children.link(coll)
+        if product_collection is not None and product_collection != coll and product_collection not in coll.children_recursive:
+            tmp.collection.children.link(product_collection)
         cd = bpy.data.cameras.new("_wondful_sb_preview_cam")
-        cd.sensor_fit, cd.sensor_width, cd.lens = "HORIZONTAL", 36.0, info["lens"]
+        cd.sensor_fit = info.get("sensor_fit", "HORIZONTAL")
+        cd.sensor_width = info.get("sensor_width", 36.0)
+        cd.sensor_height = info.get("sensor_height", 24.0)
+        cd.lens = info["lens"]
+        cd.shift_x, cd.shift_y = info.get("shift_x", 0.0), info.get("shift_y", 0.0)
         cd.clip_start, cd.clip_end = 0.1, 100000.0
         cam = bpy.data.objects.new("_wondful_sb_preview_cam", cd)
         made += [cam, cd]

@@ -28,6 +28,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .workflow import isolated_capture
+
 import bpy
 import numpy as np
 
@@ -574,6 +576,7 @@ def _select_generation_refs(packet: dict, mode: str) -> tuple[list[str], list[st
     return refs, roles
 
 
+@isolated_capture
 def build_structure_packet(
     context,
     props,

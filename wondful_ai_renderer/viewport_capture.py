@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Tuple
 
+from .workflow import isolated_capture
+
 import bpy
 
 from .composition import image_dimensions
@@ -174,6 +176,7 @@ def _capture_camera_opengl(context, filepath: str) -> bool:
                 pass
 
 
+@isolated_capture
 def capture_camera_reference(context, filepath: str) -> tuple[int, int, str]:
     """Capture the current Scene Camera frame as the sole composition reference.
 
@@ -1464,6 +1467,7 @@ def _render_matid(scene, product, matid_path, orig_mats, created, slot_undo) -> 
     return Path(matid_path).exists()
 
 
+@isolated_capture
 def render_detail_pass(context, filepath: str, collection, keep_path: str = "", massing=None,
                        matid_path: str = "") -> dict:
     """Standalone 细节回贴 detail pass (when no clay base was rendered): scene camera, output size."""
@@ -1490,6 +1494,7 @@ def render_detail_pass(context, filepath: str, collection, keep_path: str = "", 
             setattr(render, k, v)
 
 
+@isolated_capture
 def render_product_mask(context, filepath: str, collection, massing=None) -> bool:
     """Product silhouette from the scene camera at the camera output size (no clay base)."""
     scene = context.scene
@@ -1513,6 +1518,7 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
             setattr(render, k, v)
 
 
+@isolated_capture
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
                      keep_path: str = "", matid_path: str = "", geometry_prefix: str = "",
