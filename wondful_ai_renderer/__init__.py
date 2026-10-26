@@ -8,6 +8,8 @@ bl_info = {
     "category": "Render",
 }
 
+BUILD_ID = "two-workflows-ui-r4"
+
 import bpy
 
 try:
@@ -49,6 +51,9 @@ from .operators import (
     WONDFUL_OT_block_select,
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
+    WONDFUL_OT_replica_preview,
+    WONDFUL_OT_replica_refine,
+    WONDFUL_OT_replica_undo,
     WONDFUL_OT_mv_set_master,
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,
@@ -78,7 +83,7 @@ from .operators import (
 )
 from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, WONDFUL_MVCameraItem, sync_prompt_editor
 from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items, WONDFUL_UL_render_views
-from . import update_ops
+from . import update_ops, ui_actions
 
 
 CLASSES = (
@@ -109,6 +114,9 @@ CLASSES = (
     WONDFUL_OT_block_select,
     WONDFUL_OT_massing_hull_build,
     WONDFUL_OT_scene_blockout_build,
+    WONDFUL_OT_replica_preview,
+    WONDFUL_OT_replica_refine,
+    WONDFUL_OT_replica_undo,
     WONDFUL_OT_mv_set_master,
     WONDFUL_OT_mv_camera_add,
     WONDFUL_OT_mv_camera_remove,
@@ -144,6 +152,7 @@ CLASSES = (
     WONDFUL_OT_compare_modal,
     WONDFUL_PT_compare_workspace,
     *update_ops.CLASSES,
+    *ui_actions.CLASSES,
     WONDFUL_PT_main,
 )
 
@@ -171,8 +180,19 @@ def _recover_stale_task_states():
             pass
 
 
+def _reset_ui_runtime():
+    from . import preview_cache, replica_revision_blender
+    preview_cache.reset()
+    replica_revision_blender.reset()
+    for scene in getattr(bpy.data, "scenes", ()):
+        props = getattr(scene, "wondful_ai", None)
+        if props is not None:
+            props.replica_can_undo = False
+
+
 @persistent
 def _wondful_load_post(_dummy):
+    _reset_ui_runtime()
     from .operators import cancel_auth_session
     cancel_auth_session(detach=True, context=bpy.context)
     for wm in getattr(bpy.data, "window_managers", []):
@@ -235,11 +255,13 @@ def register():
         pass
     _initialize_prompt_editors()
     _recover_stale_task_states()
+    _reset_ui_runtime()
     bpy.types.TEXT_HT_header.append(draw_prompt_editor_header)
     update_ops.schedule_startup_check()
 
 
 def unregister():
+    _reset_ui_runtime()
     update_ops.unregister_timers()
     from .operators import cancel_auth_session
     cancel_auth_session(detach=True, context=bpy.context)

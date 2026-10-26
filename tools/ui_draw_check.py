@@ -1,4 +1,4 @@
-"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模 as main-flow step ④（可选）, six step cards).
+"""Headless panel draw check (3.2.0; 3.2.1 adds direct-edit result states; 1.1.0 custom terrain; 1.2.0 分层输出, 环境体块 + 建筑参考 + 三视图建筑体块; 1.2.3 从参考图生成场景粗模 as main-flow step ④（可选）, six step cards; 1.2.5 细节粗模 toggles).
 
 Installs the release ZIP, enables it, then draws WONDFUL_PT_main against a
 strict recording layout in several panel states. Every layout call is checked
@@ -18,7 +18,7 @@ ZIP = argv[0]
 UI = bpy.types.UILayout.bl_rna
 ICONS = set(UI.functions["prop"].parameters["icon"].enum_items.keys())
 problems = []
-ADV_TABS = ("MODEL", "OUTPUT", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
+ADV_TABS = ("MODEL", "OUTPUT", "FINISH", "PRODUCT", "SCENE", "MULTIVIEW", "DIAG")
 
 
 def _check_kwargs(fn, kwargs):
@@ -595,6 +595,33 @@ def main():
     props.sb_image_path = ref_png
     props.last_sb_note = ""
     check_six_steps("scene_blockout_ready", draw("scene_blockout_ready"))
+    # 1.2.5 精确模式: a small checkbox in ④ (default off); on + not installed → one download hint
+    if "prop sb_precise" not in "\n".join(step4(draw("scene_blockout_precise_off"))) or props.sb_precise:
+        problems.append("sb precise: ④ has no 精确模式 checkbox, or it is on by default")
+    # 1.2.5 场景补全: part of building the 场景粗模 (④), default on
+    if "prop sb_complete" not in "\n".join(step4(draw("scene_blockout_complete"))) or not props.sb_complete:
+        problems.append("sb 场景补全: ④ has no 场景补全 checkbox, or it is off by default")
+    from wondful_ai_renderer import precise_setup as _PS
+    os.environ["WONDFUL_PRECISE_DIR"] = os.path.join(tmp, "precise_empty")
+    _PS._CACHE["v"] = None
+    props.sb_precise = True
+    text4 = "\n".join(step4(draw("scene_blockout_precise_on")))
+    if not _PS.status()["ready"] and "首次使用下载约" not in text4:
+        problems.append("sb precise on (not installed): ④ should show the first-use download hint")
+    from wondful_ai_renderer import sb_progress as _SP
+    for stage in (_SP.INSTALL, _SP.DEPTH):
+        ids = _SP.stages(True, True, precise=True, install=True)
+        props.sb_stage_ids = _SP.encode(ids)
+        props.status, props.sb_stage, props.sb_elapsed = "BLOCKOUT", stage, 12
+        props.progress = _SP.fraction(ids, stage, 12, inner=0.4)
+        props.task_phase = "场景粗模：" + _SP.status_text(stage, 12)
+        text4 = "\n".join(step4(draw("scene_blockout_precise_" + stage.lower())))
+        if _SP.label(stage) not in text4 or "op wondful.cancel_task" not in text4:
+            problems.append(f"sb precise running {stage}: stage label or 取消 missing in ④")
+    props.status, props.sb_stage, props.sb_stage_ids, props.progress, props.task_phase = "IDLE", "", "", 0.0, ""
+    props.sb_precise = False
+    os.environ.pop("WONDFUL_PRECISE_DIR", None)
+    _PS._CACHE["v"] = None
     import json as _json
     from pathlib import Path as _P
     fixture = _P(__file__).resolve().parents[1] / "tests" / "fixtures" / "scene_blockout" / "desert_v3.json"
@@ -795,6 +822,33 @@ def main():
     props.status = "IDLE"
     props.task_phase = ""
     props.progress = 0.0
+
+    # 4d. 1.2.4 高级 › 成片 › 照片质感 (关 / 细微 / 标准 + last note) and 多角度 › 统一调色
+    props.ui_show_advanced = True
+    props.ui_adv_tab = "FINISH"
+    for level in ("OFF", "SUBTLE", "STANDARD"):
+        props.photo_finish = level
+        text = "\n".join(draw("finish_" + level.lower()))
+        if "photo_finish" not in text:
+            problems.append(f"成片: photo_finish selector missing ({level})")
+    props.last_finish_note = "照片质感：细微"
+    draw("finish_note")
+    props.last_finish_note = "照片质感失败（已保留原图）：测试"
+    draw("finish_note_fail")
+    props.last_finish_note = ""
+    props.photo_finish = "SUBTLE"
+    props.ui_adv_tab = "MULTIVIEW"
+    if "mv_colour_match" not in "\n".join(draw("multiview_colour_match")):
+        problems.append("多角度: 统一调色 toggle missing")
+    # 1.2.5 细节粗模: 细节粗模投影 (default on) + 白模也用 (default off, greyed when 投影 is off)
+    rec = "\n".join(draw("multiview_detail_on"))
+    if "sb_detail_carrier" not in rec or "sb_detail_clay" not in rec:
+        problems.append("多角度: 细节粗模 toggles missing")
+    if not props.sb_detail_carrier or props.sb_detail_clay:
+        problems.append("多角度: 细节粗模 defaults wrong (投影 on, 白模 off)")
+    props.sb_detail_carrier = False
+    draw("multiview_detail_off")
+    props.sb_detail_carrier = True
 
     # 5. error + antigravity provider + authenticating
     props.status = "ERROR"

@@ -608,6 +608,8 @@ def generate_image(
     The CLI agent owns the Google OAuth session. Wondful only stages local images into the
     isolated render workspace and asks the agent to call generate_image with ImagePaths.
     """
+    from . import static_scene as _SS
+    prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
     cli = discover_antigravity_cli(explicit_path)
     if not cli:
         raise AntigravityNotInstalledError("未找到 Antigravity CLI（agy）。请先安装官方 Antigravity CLI。")
@@ -658,6 +660,30 @@ def generate_image(
         ordered_sources.append(("Edit Base", edit_base_path))
     if edit_mask_path and Path(edit_mask_path).expanduser().is_file():
         ordered_sources.append(("Edit Mask", edit_mask_path))
+    # 1.2.7 参考图超限自动拼图: over AGY's 3 ImagePaths, Reference 1 / Edit Base / Edit Mask stay standalone and
+    # the rest is merged into labelled sheets (or described as text when no slot is left)
+    from .reference_bundle import MAX_ANTIGRAVITY_IMAGE_PATHS as _AGYMAX
+    collage_note, collage_info = "", {}
+    _uniq = list(dict.fromkeys(str(Path(src).expanduser().resolve()) for _l, src in ordered_sources))
+    if len(_uniq) > _AGYMAX:
+        from . import reference_collage as _RC
+        fixed = [str(Path(ordered_sources[0][1]).expanduser().resolve())] + [
+            str(Path(src).expanduser().resolve()) for lab, src in ordered_sources if lab in ("Edit Base", "Edit Mask")]
+        try:
+            kept, collage_note, collage_info = _RC.fit_inputs(_uniq, _AGYMAX, out_dir=str(workdir), fixed=fixed,
+                                                              tag=target.stem[-24:])
+        except _RC.CollageError as exc:
+            raise AntigravityError(f"参考图拼图失败：{exc}") from exc
+        keep = set(kept)
+        sheets = [p for p in kept if p not in _uniq]
+        ordered_sources = [(lab, src) for lab, src in ordered_sources
+                           if str(Path(src).expanduser().resolve()) in keep]
+        ordered_sources += [(f"Reference Sheet {i}", p) for i, p in enumerate(sheets, 1)]
+        msg = _RC.panel_text(collage_info)
+        if msg:
+            print(f"[Wondful] {msg}（Antigravity {collage_info['before']} → {collage_info['after']} 张）")
+        if collage_note:
+            prompt = prompt.rstrip() + "\n" + collage_note
 
     staged_refs: list[str] = []
     semantic_lines: list[str] = []
@@ -808,6 +834,7 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
                         "image_tool": ("image-generator" if any(_image_subagents(i) for i in tool_infos)
                                        else "generate_image"),
                         "conversation_id": conversation_ids[-1] if conversation_ids else "",
+                        "collage": collage_info,
                     }
                 except OSError:
                     continue

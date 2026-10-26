@@ -95,7 +95,9 @@ class Wiring(unittest.TestCase):
             self.assertIn(name, props)
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
         self.assertIn('"WONDFUL_UL_render_views", "", props, "mv_cameras"', ui)
-        self.assertIn("if _scene_blockout_exists(context):", ui)                # box only with a 粗模
+        # The list is shown only after the user explicitly enables multiview in
+        # reference workflow; environment renders never inherit it.
+        self.assertIn('if props.workflow_multiview:\n                _draw_render_views(output,context,props,busy,cells)', ui)
         init = (PKG / "__init__.py").read_text(encoding="utf-8")
         for name in ("WONDFUL_UL_render_views", "WONDFUL_OT_mv_camera_move", "WONDFUL_OT_view_result_step"):
             self.assertEqual(init.count(name), 2, name)

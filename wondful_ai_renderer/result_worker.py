@@ -35,7 +35,7 @@ def fit_to_canvas(src, dst, width: int, height: int) -> bool:
     width×height, centred, transparent padding, written as RGBA PNG. False if the source is
     not a PNG this reader understands (the main thread then uses Blender's loader)."""
     from .png_io import read_png, write_png
-    from .layered_output import resize
+    from .layered_output import upscale
     try:
         rgba = read_png(src)
     except Exception:
@@ -47,7 +47,7 @@ def fit_to_canvas(src, dst, width: int, height: int) -> bool:
     fh = max(1, min(height, int(round(sh * scale))))
     img = rgba.astype(np.float32)
     if (fw, fh) != (sw, sh):
-        img = resize(img, fw, fh)
+        img = upscale(img, fw, fh)      # 1.2.4: Lanczos-3 when enlarging (was bilinear)
     canvas = np.zeros((height, width, 4), np.float32)
     ox, oy = (width - fw) // 2, (height - fh) // 2
     canvas[oy:oy + fh, ox:ox + fw] = img
@@ -78,21 +78,79 @@ def gate_score(candidate, mask_path, width, height, work_dir, tag, cancel_check=
 
 
 def gate_rank(rep) -> tuple:
-    """Pass > review > fail, then IoU (higher first)."""
+    """Pass > review > fail, then (1.2.4, passing tries only) a non-``low`` image-quality tier, then IoU."""
     if not rep:
-        return (-1, -1.0)
+        return (-1, 0, -1.0)
     iou = rep.get("iou")
-    return (VERDICT_ORDER.get(rep.get("verdict"), -1), float(iou) if iou is not None else -1.0)
+    order = VERDICT_ORDER.get(rep.get("verdict"), -1)
+    tier_ok = int(order == VERDICT_ORDER["通过"] and not is_low_tier(rep.get("image_quality")))
+    return (order, tier_ok, float(iou) if iou is not None else -1.0)
+
+
+# --------------------------------------------------------------------------- 1.2.4 low quality tier
+
+LOW_TIER_RETRY = True        # user decision 2026-10-20: one retry when the backend reports quality "low"
+
+
+def is_low_tier(tier) -> bool:
+    return str(tier or "").strip().lower() == "low"
+
+
+def generation_budget(pref_max, gate_on=False, gate_max=GATE_MAX, strict_retry=False) -> int:
+    """Image generations allowed per image (the first one included).
+
+    偏好设置「最多生成次数」 (``pref_max``) is the hard quota cap for every path: the 轮廓验收 regenerations
+    (``gate_max``), the 严格对齐 audit retry and the low-tier retry all stay inside it. Before 1.2.5 the gate
+    replaced the preference entirely, so 「最多生成次数 = 1」 still allowed 3 generations per image."""
+    try:
+        cap = max(1, min(GATE_MAX, int(pref_max)))
+    except (TypeError, ValueError):
+        cap = GATE_MAX
+    if gate_on:
+        try:
+            g = max(1, min(GATE_MAX, int(gate_max)))
+        except (TypeError, ValueError):
+            g = GATE_MAX
+        return min(g, cap)
+    return cap if strict_retry else 1
+
+
+def crop_regen_allowed(pref_max) -> bool:
+    """细节修复 crop regeneration costs extra image calls: off when 「最多生成次数」 is 1 (Blender paste stays)."""
+    try:
+        return int(pref_max) >= 2
+    except (TypeError, ValueError):
+        return True
+
+
+def call_budget_note(variants, attempts, crop_regen=True) -> str:
+    """Log line: the most image calls one 「生成」 can spend."""
+    v, a = max(1, int(variants)), max(1, int(attempts))
+    extra = "（另含细节修复局部重生成）" if crop_regen else "（细节修复只用 Blender 回贴）"
+    return f"生图预算：{v} 张 × 每张最多 {a} 次 = 最多 {v * a} 次{extra}"
+
+
+def low_tier_retry(tier, attempt_index, planned_attempts, used) -> bool:
+    """Whether a generation that already passed its checks is regenerated once because the backend
+    reported the ``low`` quality tier. Inside the existing budget only: never past ``planned_attempts``,
+    only after the first try, and at most once per image (``used``)."""
+    return bool(LOW_TIER_RETRY and is_low_tier(tier) and not used and int(attempt_index) == 1
+                and int(planned_attempts) >= 2)
 
 
 def gate_note(gate: dict) -> str:
     """Panel line for one variant's acceptance."""
-    from .contour_iou import PASS_IOU
     if not gate or not gate.get("tries"):
         return ""
     best = gate.get("best") or {}
     iou = best.get("iou")
     n = len(gate["tries"])
+    low = " · 画质档 low 已重试 1 次" if gate.get("low_tier_retry") else ""
+    return _gate_note_core(gate, best, iou, n) + low
+
+
+def _gate_note_core(gate, best, iou, n) -> str:
+    from .contour_iou import PASS_IOU
     if iou is None:
         return f"轮廓 IoU：无法计算（待复核）· 生成 {n} 次"
     v = best.get("verdict", "")
@@ -167,13 +225,29 @@ def paste_and_score(variant_final, variant_index, spec, cancel_check=None, on_st
 
 
 def finish_variant(source, variant_index, spec, width, height, session_dir, cancel_check=None,
-                   on_status=None) -> dict | None:
-    """Whole numpy result path of one variant: canvas fit + paste + scores. None when the file
-    cannot be read here (the main thread then runs the Blender-based path)."""
+                   on_status=None, finish=None) -> dict | None:
+    """Whole numpy result path of one variant: canvas fit + paste + scores (+ 1.2.4 照片质感 last).
+    None when the file cannot be read here (the main thread then runs the Blender-based path)."""
     _check(cancel_check)
     variant_final = Path(session_dir) / f"output_variant_{variant_index:02d}.png"
     if not fit_to_canvas(source, variant_final, width, height):
         return None
     res = paste_and_score(variant_final, variant_index, spec, cancel_check, on_status=on_status)
     res["canvas"] = str(variant_final)
+    _check(cancel_check)
+    res.update(photo_finish_step(res["final"], Path(session_dir) / f"output_variant_{variant_index:02d}_finish.png",
+                                 finish))
     return res
+
+
+def photo_finish_step(src, dst, finish) -> dict:
+    """1.2.4 照片质感 on one finished canvas: {} when off; else {"final": finished, "clean": src,
+    "finish_report": …}. ``finish``: {"level": OFF|SUBTLE|STANDARD, "mask": product mask path}."""
+    from . import photo_finish as PF
+    level = (finish or {}).get("level", PF.LEVEL_OFF)
+    if level not in PF.LEVELS or not src or not Path(src).is_file():
+        return {}
+    rep = PF.apply_file(src, dst, (finish or {}).get("mask", ""), level)
+    if not rep.get("applied"):
+        return {"finish_report": rep}
+    return {"final": str(dst), "clean": str(src), "finish_report": rep}

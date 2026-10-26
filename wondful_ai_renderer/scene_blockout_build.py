@@ -24,6 +24,7 @@ from mathutils import Euler, Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from . import scene_blockout as SB
+from . import studio_frames as SF
 
 MAT_PREFIX = "Wondful粗模_"
 TINT = {
@@ -108,7 +109,7 @@ def _rect_dist(px, py, p):
 # ------------------------------------------------------------------------------------------- scene helpers
 
 def remove_existing():
-    """Delete the previous 「Wondful 场景粗模」 collection, its objects and their meshes."""
+    """Dangerous legacy manual cleanup; generation never calls this function."""
     removed = 0
     for coll in [c for c in bpy.data.collections if c.name == SB.COLLECTION_NAME or c.get("wondful_scene_blockout")]:
         for ob in list(coll.all_objects):
@@ -150,7 +151,127 @@ def product_info(product_collection, exclude=()):
     mn, mx = xs.min(0), xs.max(0)
     base = Vector((float((mn[0] + mx[0]) / 2), float((mn[1] + mx[1]) / 2), float(zmin)))
     return {"base": base, "dims": (max(lmin, 0.05), max(lmaj, 0.05), max(zmax - zmin, 0.05)), "axis": angle,
-            "half_diag": float(np.max(np.hypot(xs[:, 0] - c[0], xs[:, 1] - c[1])))}
+            "half_diag": float(np.max(np.hypot(xs[:, 0] - base.x, xs[:, 1] - base.y))),
+            "bounds": [tuple(float(v) for v in point) for point in pts]}
+
+
+def _mesh_projection_points(mesh):
+    """Vertices of the actual surface, reduced by its convex hull when worthwhile.
+
+    A perspective coordinate attains its extrema on the convex hull while the
+    geometry is in front of the camera. Unlike a local bounding box or vertex
+    subsampling, this reduction retains the mesh's projected outline bounds at
+    every position considered by the framing solver. Loose vertices do not render.
+    """
+    if not mesh.polygons or not mesh.vertices:
+        return np.empty((0, 3), dtype=float), 0, False
+    indices = np.empty(len(mesh.loops), dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", indices)
+    coordinates = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", coordinates)
+    points = coordinates.reshape(-1, 3)[np.unique(indices)]
+    if not np.isfinite(points).all():
+        raise ValueError("non-finite evaluated mesh coordinates")
+    count = len(points)
+    if count <= 64:
+        return points.astype(float), count, False
+    bm = bmesh.new()
+    try:
+        vertices = [bm.verts.new(point) for point in points]
+        result = bmesh.ops.convex_hull(bm, input=vertices, use_existing_faces=False)
+        hull = np.asarray([tuple(v.co) for v in result["geom"] if isinstance(v, bmesh.types.BMVert)], dtype=float)
+        if len(hull) >= 3:
+            return hull, count, True
+    except (ValueError, RuntimeError):
+        # Degenerate/coplanar input can defeat hull construction; full vertices
+        # remain an accurate, only slower, fallback. Never sample away extrema.
+        pass
+    finally:
+        bm.free()
+    return points.astype(float), count, False
+
+
+def product_projection_geometry(context, product_collection, exclude=()):
+    """World-space evaluated surface points and explicit fidelity metadata.
+
+    This is separate from product_info's inexpensive footprint/axis estimate.
+    Only the framing path needs the detailed mesh. Render modifier settings are
+    evaluated temporarily and restored, including subdivision and parent scale.
+    If evaluation fails for an object, its bounding box is an explicitly reported
+    approximation instead of silently masquerading as the rendered silhouette.
+    """
+    import time
+    started = time.perf_counter()
+    excluded = set(exclude or ())
+    render_objects = set()
+
+    def collect(layer):
+        if layer.exclude or layer.collection.hide_render:
+            return
+        render_objects.update(layer.collection.objects)
+        for child in layer.children:
+            collect(child)
+    collect(context.view_layer.layer_collection)
+    objects = [obj for obj in product_collection.all_objects
+               if obj.type == "MESH" and obj not in excluded and obj in render_objects
+               and not obj.hide_render and getattr(obj, "visible_camera", True)] if product_collection else []
+    chunks, fallbacks, modifier_warnings, restore = [], [], [], []
+    vertex_count = hull_count = mesh_count = 0
+    try:
+        # evaluated_depsgraph_get() is normally a viewport graph. Match the
+        # relevant render switches without persisting changes to the product.
+        for obj in objects:
+            for modifier in obj.modifiers:
+                settings = [("show_viewport", modifier.show_render)]
+                if modifier.show_render and modifier.type in {"SUBSURF", "MULTIRES"}:
+                    settings.append(("levels", modifier.render_levels))
+                for attr, value in settings:
+                    old = getattr(modifier, attr)
+                    if old == value:
+                        continue
+                    try:
+                        setattr(modifier, attr, value)
+                        restore.append((modifier, attr, old))
+                    except (AttributeError, RuntimeError, TypeError) as exc:
+                        modifier_warnings.append({"object": obj.name, "modifier": modifier.name,
+                                                  "setting": attr, "reason": str(exc)[:160]})
+        context.view_layer.update()
+        depsgraph = context.evaluated_depsgraph_get()
+        for obj in objects:
+            evaluated = None
+            try:
+                evaluated = obj.evaluated_get(depsgraph)
+                mesh = evaluated.to_mesh()
+                if mesh is None:
+                    raise ValueError("evaluated mesh unavailable")
+                local, count, reduced = _mesh_projection_points(mesh)
+                if not len(local):
+                    continue
+                matrix = np.asarray(evaluated.matrix_world, dtype=float)
+                chunks.append(local @ matrix[:3, :3].T + matrix[:3, 3])
+                vertex_count += count
+                hull_count += int(reduced)
+                mesh_count += 1
+            except (AttributeError, RuntimeError, ValueError, TypeError) as exc:
+                corners = np.asarray([tuple(obj.matrix_world @ Vector(c)) for c in obj.bound_box], dtype=float)
+                if len(corners) and np.isfinite(corners).all():
+                    chunks.append(corners)
+                fallbacks.append({"object": obj.name, "reason": str(exc)[:160]})
+            finally:
+                if evaluated is not None:
+                    evaluated.to_mesh_clear()
+    finally:
+        for modifier, attr, value in reversed(restore):
+            setattr(modifier, attr, value)
+        if restore:
+            context.view_layer.update()
+    points = np.concatenate(chunks) if chunks else np.empty((0, 3), dtype=float)
+    basis = "EVALUATED_MESH_CONVEX_HULL" if hull_count else "EVALUATED_MESH_VERTICES"
+    if fallbacks:
+        basis = "MIXED_EVALUATED_MESH_AND_OBJECT_BOUNDS" if mesh_count else "OBJECT_BOUNDS_FALLBACK"
+    return {"points": points, "basis": basis, "mesh_count": mesh_count, "vertex_count": vertex_count,
+            "point_count": len(points), "hull_mesh_count": hull_count, "fallbacks": fallbacks,
+            "modifier_warnings": modifier_warnings, "elapsed_seconds": time.perf_counter() - started}
 
 
 def camera_yaw(cam):
@@ -170,7 +291,7 @@ class _Builder:
         self.coll = coll
         self.fw, self.fh = frame
         self.hw = self.fh / float(self.fw)
-        self.warn = []
+        self.warn = list(self.S.get("_geometry_warnings") or [])
         self.mats = {}
         self.groups = []           # [(label, [objects])]
         self.interior = self.S.get("scene_kind") == "interior"
@@ -185,7 +306,12 @@ class _Builder:
         g = _hexrgb(P.get("ground_hex")) if (self.interior or P.get("snow_cover") or any(
             k in surf for k in ("sand", "dune", "snow", "desert", "paving", "floor", "concrete", "cobble"))) \
             else _hexrgb(P.get("grass_hex"))
-        self.T["terrain"] = _mix(self.T["terrain"], g, 0.5)
+        # A black mirror studio floor is not a mid-gray outdoor clay terrain.
+        # Keep its actual dark color and polished reflections in the blockout.
+        self.studio_reflective = bool(self.interior and self.S.get("light_frames")
+                                      and any(term in surf for term in (
+                                          "mirror", "gloss", "polish", "reflect", "镜面", "抛光", "反光", "倒影")))
+        self.T["terrain"] = g if self.studio_reflective else _mix(self.T["terrain"], g, 0.5)
         f = _hexrgb(P.get("foliage_hex"))
         for k in list(self.T):
             if k.startswith("foliage_") or k in ("tree", "bush", "hedge", "plant", "band_forested"):
@@ -200,7 +326,9 @@ class _Builder:
 
     def mat(self, t):
         if t not in self.mats:
-            name = MAT_PREFIX + t
+            # Material identity belongs to this version, not a global reusable
+            # data block: a later build must not recolor preserved old results.
+            name = f"{MAT_PREFIX}{t}_{self.coll.name}"
             m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
             c = self.T.get(t, (0.55, 0.58, 0.62))
             m.diffuse_color = (*c, 1.0)
@@ -208,9 +336,39 @@ class _Builder:
             bsdf = m.node_tree.nodes.get("Principled BSDF")
             if bsdf:
                 bsdf.inputs["Base Color"].default_value = (*c, 1.0)
-                bsdf.inputs["Roughness"].default_value = 0.85
+                bsdf.inputs["Roughness"].default_value = (0.10 if self.studio_reflective and t == "terrain"
+                                                          else 0.85)
+                if self.studio_reflective and t == "terrain":
+                    bsdf.inputs["Metallic"].default_value = 0.15
             self.mats[t] = m
         return self.mats[t]
+
+    def light_material(self, hex_color, emission, side=False):
+        """One physically emissive camera-facing skin and neutral dark sidewalls."""
+        key = ("light_frame", hex_color, round(emission, 3), side)
+        if key not in self.mats:
+            value = hex_color.lstrip("#")
+            rgb = tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+            if side:
+                rgb = tuple(v * 0.18 for v in rgb)
+            name = f"{MAT_PREFIX}Frame_{value}_{round(emission, 3)}_{'side' if side else 'front'}_{self.coll.name}"
+            mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+            mat.diffuse_color = (*rgb, 1.0)
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            nodes.clear()
+            out = nodes.new("ShaderNodeOutputMaterial")
+            if side:
+                surface = nodes.new("ShaderNodeBsdfPrincipled")
+                surface.inputs["Base Color"].default_value = (*rgb, 1.0)
+                surface.inputs["Roughness"].default_value = 0.55
+            else:
+                surface = nodes.new("ShaderNodeEmission")
+                surface.inputs["Color"].default_value = (*rgb, 1.0)
+                surface.inputs["Strength"].default_value = emission
+            mat.node_tree.links.new(surface.outputs[0], out.inputs["Surface"])
+            self.mats[key] = mat
+        return self.mats[key]
 
     def obj(self, name, me, t, smooth=False):
         o = bpy.data.objects.new(name, me)
@@ -705,6 +863,89 @@ class _Builder:
                 self.warn.append(f"移除了与产品重叠的{label}（{p.get('id', '')}）")
             self.group(label, objs)
 
+    def ribbons(self):
+        """Connected, smooth paired-edge surfaces; never substitute stacked primitives."""
+        for ribbon in self.S.get("ribbons", []):
+            label = SB.element_label("ribbon", ribbon, self.interior)
+            try:
+                vertices, faces, layout = SB.ribbon_mesh(ribbon["sections"], ribbon["thickness_m"], return_layout=True)
+                vertices[:, 2] += self.foot
+                obj = self.mesh(label, vertices, faces, "building", smooth=True)
+                # The thin rim is a sharp geometric boundary. Averaging it into
+                # the broad skins tilts every edge normal by about 45 degrees.
+                # With a single width span that polluted the entire surface.
+                edge_skins = {}
+                for face in obj.data.polygons:
+                    skin = face.index < layout["skin_faces"]
+                    face.use_smooth = skin
+                    for edge in face.edge_keys:
+                        edge_skins.setdefault(tuple(sorted(edge)), set()).add(skin)
+                for edge in obj.data.edges:
+                    edge.use_edge_sharp = len(edge_skins.get(tuple(sorted(edge.vertices)), ())) > 1
+                obj.data.update()
+                obj["wondful_env_type"] = "ribbon"
+                obj["wondful_material"] = ribbon.get("material", "")
+                obj["wondful_sb_connected_surface"] = 1
+                obj["wondful_sb_skin_faces"] = layout["skin_faces"]
+                obj["wondful_sb_width_subdivisions"] = layout["width_subdivisions"]
+                obj["wondful_sb_quad_twist_deg"] = layout["max_quad_twist_deg"]
+                if layout["max_quad_twist_deg"] > 6.0:
+                    self.warn.append(f"{label}局部曲面仍有较大扭曲，请复核截面")
+                self.group(label, [obj])
+            except (ValueError, TypeError, KeyError) as exc:
+                self.warn.append(f"{label}：{exc}，已跳过")
+
+    def light_frames(self):
+        """Camera-matched polygonal LED portals: geometry + emission, not filled triangles."""
+        for entry in self.S.get("light_frames", []):
+            name = str(entry["label_zh"])
+            try:
+                def project(u, v, depth):
+                    ray = self.ray(u, v)
+                    if ray.y <= 0.01:
+                        raise ValueError("框架端点落在相机后方")
+                    return self.CAMPOS + ray * ((depth - self.CAMPOS.y) / ray.y)
+
+                frame = dict(entry)
+                if frame.get("grounded"):
+                    # Solve the screen-to-floor ray for the visible lower endpoint
+                    # instead of trusting an arbitrary 3D depth from the model.
+                    end_points = (frame["points"][0], frame["points"][-1])
+                    candidates = []
+                    for pt in end_points:
+                        if not 0.64 <= pt["y_frac"] <= 1.05:
+                            continue
+                        ray = self.ray(pt["x_frac"], pt["y_frac"])
+                        floor = self.th(0, 0)
+                        if ray.z < -0.005:
+                            depth = self.CAMPOS.y + (floor-self.CAMPOS.z)*ray.y/ray.z
+                            if 2 <= depth <= 200 and math.isfinite(depth):
+                                candidates.append(depth)
+                    if candidates:
+                        estimate = float(np.median(candidates))
+                        if abs(frame["depth_m"]-estimate) > 0.4:
+                            self.warn.append(f"{name}按梁脚与地坪交点校准深度 {frame['depth_m']:.1f}→{estimate:.1f}m")
+                        frame["depth_m"] = estimate
+                    else:
+                        self.warn.append(f"{name}无法确认地坪交点，使用分析深度")
+                verts, faces, layout = SF.beam_mesh(
+                    frame["points"], (self.fw, self.fh), frame["width_frac"],
+                    frame["depth_m"], frame["beam_depth_m"], project)
+                obj = self.mesh(name, verts, faces, "building")
+                obj.data.materials.clear()
+                obj.data.materials.append(self.light_material(entry["color_hex"], entry["emission"], side=True))
+                obj.data.materials.append(self.light_material(entry["color_hex"], entry["emission"], side=False))
+                for polygon in obj.data.polygons[:layout["front_faces"]]:
+                    polygon.material_index = 1
+                obj["wondful_env_type"] = "light_frame"
+                obj["wondful_sb_light_frame"] = 1
+                obj["wondful_sb_frame_spec"] = json.dumps(frame, ensure_ascii=False)
+                obj["wondful_sb_frame_front_faces"] = layout["front_faces"]
+                obj["wondful_material"] = entry.get("material", "")
+                self.group(name, [obj])
+            except (TypeError, KeyError, ValueError) as exc:
+                self.warn.append(f"{name}：{exc}，发光框架未生成")
+
     # ---------------------------------------------------------------- foliage
     def _lumpy(self, name, lump, seed):
         bm = bmesh.new()
@@ -961,6 +1202,8 @@ class _Builder:
         self.bands()
         self.cliffs()
         self.primitives()
+        self.ribbons()
+        self.light_frames()
         self.foliage()
         return self
 
@@ -997,35 +1240,39 @@ def _assemble(b, world):
 
 def build(context, data, *, product_collection=None, parent_collection=None, set_camera=True, frame=None,
           massing_objects=()):
-    """Build (replacing any earlier one) and return an info dict for the panel note / tests."""
+    """Build a new numbered collection, preserving all earlier versions."""
     scene = context.scene
+    # 1.2.6 只做场景相关物体: people / other vehicles / animals never become blocks (unless the 一句话需求 asks)
+    from . import static_scene as SS
+    try:
+        allow = SS.wanted(getattr(getattr(scene, "wondful_ai", None), "scene_brief", "") or "")
+    except Exception:
+        allow = SS.allowed()
+    data, dropped = SS.strip_dynamic(data, allow)
     S = SB.normalize(data)
     frame = frame or SB.frame_of(data)
-    remove_existing()
-    coll = bpy.data.collections.new(SB.COLLECTION_NAME)
+    from . import blockout_versions as BV
+    version = BV.next_number(scene, SB.COLLECTION_NAME)
+    coll = bpy.data.collections.new(BV.version_name(version, SB.COLLECTION_NAME))
+    coll[BV.VERSION] = version
+    coll[BV.ACTIVE] = 0
     coll["wondful_scene_blockout"] = 1
+    coll["wondful_sb_kind"] = "interior" if S.get("scene_kind") == "interior" else "outdoor"   # 1.2.6: 室内/室外 authority
+    if S.get("_reference_image_path"):
+        coll["wondful_sb_reference_image"] = str(S["_reference_image_path"])
+    if S.get("_reference_original_sha256"):
+        coll["wondful_sb_original_sha256"] = str(S["_reference_original_sha256"])
+    if S.get("_reference_image_sha256"):
+        coll["wondful_sb_reference_sha256"] = str(S["_reference_image_sha256"])
     (parent_collection or scene.collection).children.link(coll)
     prod = product_info(product_collection, exclude=massing_objects)
     spot = S["product_spot"]
-    pad = None
-    moved = ""
-    if prod is not None:
-        # the analysed spot can be too tight for this product; nudge it (≤ 2.5 × its radius, still in frame) off standing blocks
-        # before anything is removed
-        free = SB.free_spot(S.get("primitives", []), spot["x"], spot["y"], prod["half_diag"] * 0.85, prod["dims"][2],
-                           hfov_deg=S["camera"]["hfov_deg"])
-        if free is not None and free[2] > 0:
-            spot["x"], spot["y"] = free[0], free[1]
-            moved = f"产品位置挪了 {free[2]:.2f} m，避开周围体块"
-        # (x, y, level-ground radius, remove-obstacle radius, product height), analysis coordinates
-        pad = (spot["x"], spot["y"], prod["half_diag"] + 0.6, prod["half_diag"] * 0.85, prod["dims"][2])
-    b = _Builder(S, coll, frame, pad=pad).run()
-    sx, sy = spot["x"], spot["y"]
-    zs = b.surface_at(sx, sy)
-    # yaw: the user's own camera direction when the camera is not set from the analysis, else the product's long
-    # axis along the analysed spot heading
+    subject = S["reference_subject"]
+    locked = bool(set_camera and prod is not None and subject["present"])
+    if locked and subject["heading_confidence"] >= 0.5:
+        spot["rot_z_deg"] = subject["heading_deg"]
+    own = camera_yaw(scene.camera) if (scene.camera is not None and not scene.camera.get("wondful_sb_camera")) else None
     yaw = 0.0
-    own = camera_yaw(scene.camera) if (scene.camera is not None and scene.camera.name != SB.CAMERA_NAME) else None
     if not set_camera and own is not None:
         yaw = own
     elif prod is not None and prod["axis"] is not None:
@@ -1033,6 +1280,71 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     elif own is not None:
         yaw = own
     Rz = Matrix.Rotation(yaw, 4, "Z")
+    framing_fit = {"enabled": False, "reason": "NO_REFERENCE_SUBJECT" if not subject["present"] else
+                   ("CAMERA_NOT_SELECTED" if not set_camera else "NO_PRODUCT")}
+    target_points = None
+    if locked:
+        # Rotate evaluated surface points into analysis coordinates. Rotated local
+        # box corners can overestimate a curved product's width substantially.
+        geometry = product_projection_geometry(context, product_collection, exclude=massing_objects)
+        inv_rotation = np.array([list(row) for row in Rz.to_3x3()]).T
+        target_points = (geometry["points"] - np.asarray(prod["base"])) @ inv_rotation.T
+        probe = _Builder(S, coll, frame)
+
+        def ground_probe(x, y):
+            return 0.0 if probe.interior else float(probe.height_raw(np.asarray([x]), np.asarray([y]))[0])
+        framing_fit = SB.fit_subject_framing(S["camera"], frame, subject, target_points,
+                                            (spot["x"], spot["y"]), ground_probe)
+        framing_fit["heading_applied"] = bool(subject["heading_confidence"] >= 0.5 and prod["axis"] is not None)
+        framing_fit["geometry_basis"] = geometry["basis"]
+        framing_fit["geometry"] = {k: v for k, v in geometry.items() if k not in {"points", "basis"}}
+        if framing_fit.get("enabled"):
+            spot["x"], spot["y"] = framing_fit["x"], framing_fit["y"]
+    pad = None
+    moved = ""
+    if prod is not None:
+        # the analysed spot can be too tight for this product; nudge it (≤ 2.5 × its radius, still in frame) off standing blocks
+        # before anything is removed
+        free = None if locked else SB.free_spot(S.get("primitives", []), spot["x"], spot["y"],
+                                               prod["half_diag"] * 0.85, prod["dims"][2],
+                                               hfov_deg=S["camera"]["hfov_deg"])
+        if free is not None and free[2] > 0:
+            spot["x"], spot["y"] = free[0], free[1]
+            moved = f"产品位置挪了 {free[2]:.2f} m，避开周围体块"
+        # (x, y, level-ground radius, remove-obstacle radius, product height), analysis coordinates
+        # A locked composition must not silently move the subject OR delete a conflicting
+        # building. Keep both and report the modelling conflict for correction.
+        pad = (spot["x"], spot["y"], prod["half_diag"] + 0.6,
+               0.0 if locked else prod["half_diag"] * 0.85, prod["dims"][2])
+    b = _Builder(S, coll, frame, pad=pad).run()
+    sx, sy = spot["x"], spot["y"]
+    zs = b.surface_at(sx, sy)
+    # yaw: the user's own camera direction when the camera is not set from the analysis, else the product's long
+    # axis along the analysed spot heading
+    if locked:
+        if framing_fit["geometry"]["fallbacks"]:
+            b.warn.append("部分产品网格无法求值，主体投影含包围盒估算；请复核产品轮廓")
+        if framing_fit["geometry"]["modifier_warnings"]:
+            b.warn.append("部分产品修改器无法按渲染设置求值；请复核产品轮廓")
+        obstacles = SB.blocking_footprints(S.get("primitives", []), prod["dims"][2])
+        if SB.clearance(obstacles, sx, sy) < prod["half_diag"] * 0.85:
+            b.warn.append("参考主体位置与环境体块重叠，已保留投影位置及体块；请校正重叠结构")
+        if framing_fit.get("enabled"):
+            # Report the actual built ground/road elevation, not only the flat-ground estimate.
+            actual = SB.framing_metrics(S["camera"], frame, target_points, (sx, sy, zs),
+                                        float(b.CAMPOS.z) - S["camera"]["height_m"])
+            if actual is not None:
+                errors = SB.framing_errors(subject, actual)
+                residual = max(abs(v) for v in errors.values())
+                framing_fit.update(metrics=actual, errors=errors, max_error_frac=residual,
+                                   status="FITTED" if residual <= 0.025 else "RESIDUAL", z=float(zs))
+                if residual > 0.025:
+                    b.warn.append(f"主体投影仍有 {residual * 100:.1f}% 画幅残差；保留真实模型尺寸，需复核参考相机")
+            else:
+                framing_fit.update(status="NOT_VISIBLE", max_error_frac=None)
+                b.warn.append("主体部分落在相机后方，请复核参考相机")
+        else:
+            b.warn.append("参考主体投影拟合未成功，已保留分析位置；请复核相机与主体锚点")
     base = prod["base"] if prod is not None else Vector((0.0, 0.0, 0.0))
     local_spot = Vector((sx, sy, zs))
     world = Matrix.Translation(base - (Rz @ local_spot)) @ Rz
@@ -1040,18 +1352,17 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     roots = _assemble(b, world)
     note = SB.scene_note(S)
     if note and getattr(b, "terrain_obj", None) is not None:
-        b.terrain_obj[SB.SCENE_NOTE_PROP] = note[:400]
+        b.terrain_obj[SB.SCENE_NOTE_PROP] = note[:900]
     cam_world = world @ b.cam_local
     cam_obj = None
     if set_camera:
-        cam_obj = bpy.data.objects.get(SB.CAMERA_NAME)
-        if cam_obj is None or cam_obj.type != "CAMERA":
-            cd = bpy.data.cameras.new(SB.CAMERA_NAME)
-            cam_obj = bpy.data.objects.new(SB.CAMERA_NAME, cd)
-            scene.collection.objects.link(cam_obj)
-        elif cam_obj.name not in scene.objects:
-            scene.collection.objects.link(cam_obj)
-        cd = cam_obj.data
+        # Each generation owns a separate camera. Never move/overwrite a prior
+        # version's camera or a camera deliberately authored by the user.
+        name = f"{SB.CAMERA_NAME} · {version:03d}"
+        cd = bpy.data.cameras.new(name)
+        cam_obj = bpy.data.objects.new(name, cd)
+        coll.objects.link(cam_obj)
+        cam_obj["wondful_sb_version"] = version
         cd.type = "PERSP"
         cd.sensor_fit = "HORIZONTAL"
         cd.sensor_width = 36.0
@@ -1064,33 +1375,43 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
         scene.camera = cam_obj
     stored = dict(S)
     stored["_frame"] = {"w": frame[0], "h": frame[1]}
-    txt = bpy.data.texts.get(SB.TEXT_NAME) or bpy.data.texts.new(SB.TEXT_NAME)
-    txt.clear()
+    # Every version retains its own editable analysis record.
+    txt = bpy.data.texts.new(f"{SB.TEXT_NAME} · {version:03d}")
+    coll["wondful_sb_analysis_text"] = txt.name
     txt.write(json.dumps({k: v for k, v in stored.items() if not str(k).startswith("_graded")}, ensure_ascii=False,
                          indent=1, default=str))
     coll["wondful_sb_yaw_deg"] = round(math.degrees(yaw), 2)
+    # Commit visibility only when this version has actually been built.
+    BV.activate(scene, coll, getattr(scene, "wondful_ai", None))
     context.view_layer.update()
     hw = frame[1] / float(frame[0])
     rx, ry = scene.render.resolution_x, scene.render.resolution_y
-    notes = ([moved] if moved else []) + list(b.warn)
+    notes = ([moved] if moved else []) + list(b.warn) + ([SS.dropped_note(dropped)] if dropped else [])
     if set_camera and rx and ry and abs((ry / float(rx)) / hw - 1.0) > 0.05:
         notes.append(f"渲染画幅 {rx}x{ry} 与参考图 {frame[0]}x{frame[1]} 不同，上下取景会有差异")
     c = S["camera"]
     hz = SB.horizon_from_pitch(c["pitch_deg"], c["hfov_deg"], hw)
-    return {"collection": coll.name, "blocks": len(roots), "objects": len(coll.all_objects), "kind": S["scene_kind"],
+    return {"collection": coll.name, "version": version, "blocks": len(roots), "objects": len(coll.all_objects), "kind": S["scene_kind"],
             "camera": bool(cam_obj), "camera_name": cam_obj.name if cam_obj else "", "lens": round(b.lens, 3),
             "cam_world": [list(r) for r in cam_world], "yaw_deg": round(math.degrees(yaw), 2), "frame": list(frame),
             "labels": [lab for lab, _o in b.groups], "notes": notes, "scene_note": note,
-            "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot)}
+            "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot),
+            "framing_fit": framing_fit, "ribbons": sum(bool(o.get("wondful_sb_connected_surface")) for o in coll.all_objects),
+            "light_frames": sum(bool(o.get("wondful_sb_light_frame")) for o in coll.all_objects),
+            # 1.2.5 细节粗模: analysis → world matrix, camera height in the local frame, product spot + pad
+            "world": [list(r) for r in world], "cam_local_z": float(b.CAMPOS.z), "spot_local": [sx, sy, zs],
+            "pad_radius": float(pad[2]) if pad else 2.5}
 
 
 # ------------------------------------------------------------------------------------------- preview render
 
-def render_preview(context, info, path, width=480):
-    """Render the blockout alone from the analysis camera (own tints, background transparent) → RGBA PNG.
+def render_preview(context, info, path, width=480, product_collection=None):
+    """Render a blockout, optionally including the real product, to a transparent PNG.
 
-    A temporary scene shares only the blockout collection, so the user's scene, product and render settings are
-    untouched.  Background Blender uses Cycles (no GL); the UI uses Workbench (about a second)."""
+    A temporary scene shares the blockout and optional product collection. The
+    user's scene and render settings are untouched. Background Blender uses
+    Cycles (no GL); interactive Blender uses Workbench.
+    """
     coll = bpy.data.collections.get(info["collection"])
     if coll is None:
         raise RuntimeError("场景粗模集合不存在")
@@ -1099,8 +1420,14 @@ def render_preview(context, info, path, width=480):
     made = []
     try:
         tmp.collection.children.link(coll)
+        if product_collection is not None and product_collection != coll and product_collection not in coll.children_recursive:
+            tmp.collection.children.link(product_collection)
         cd = bpy.data.cameras.new("_wondful_sb_preview_cam")
-        cd.sensor_fit, cd.sensor_width, cd.lens = "HORIZONTAL", 36.0, info["lens"]
+        cd.sensor_fit = info.get("sensor_fit", "HORIZONTAL")
+        cd.sensor_width = info.get("sensor_width", 36.0)
+        cd.sensor_height = info.get("sensor_height", 24.0)
+        cd.lens = info["lens"]
+        cd.shift_x, cd.shift_y = info.get("shift_x", 0.0), info.get("shift_y", 0.0)
         cd.clip_start, cd.clip_end = 0.1, 100000.0
         cam = bpy.data.objects.new("_wondful_sb_preview_cam", cd)
         made += [cam, cd]
@@ -1111,9 +1438,10 @@ def render_preview(context, info, path, width=480):
         made.append(world)
         world.use_nodes = True
         bg = world.node_tree.nodes.get("Background")
+        studio = bool(info.get("light_frames"))
         if bg:
-            bg.inputs[0].default_value = (0.80, 0.84, 0.90, 1)
-            bg.inputs[1].default_value = 0.6
+            bg.inputs[0].default_value = (0.018, 0.024, 0.032, 1) if studio else (0.80, 0.84, 0.90, 1)
+            bg.inputs[1].default_value = 0.45 if studio else 0.6
         tmp.world = world
         sd = bpy.data.lights.new("_wondful_sb_preview_sun", "SUN")
         sd.energy = 2.5
@@ -1125,7 +1453,9 @@ def render_preview(context, info, path, width=480):
         r.resolution_x = int(width)
         r.resolution_y = max(8, int(round(width * fh / float(fw))))
         r.resolution_percentage = 100
-        r.film_transparent = True
+        # A white transparent background makes white LED frame geometry
+        # invisible in the thumbnail. Show the actual dark negative space here.
+        r.film_transparent = not studio
         r.image_settings.file_format = "PNG"
         r.image_settings.color_mode = "RGBA"
         tmp.view_settings.view_transform = "Standard"

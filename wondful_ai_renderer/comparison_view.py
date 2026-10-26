@@ -8,6 +8,7 @@ from bpy.types import Operator, Panel
 
 from .compare_core import compose_difference, compose_overlay, compose_split, compose_outline, preview_dimensions, resize_rgba_nearest
 from .composition import assess_canvas
+from . import workflow
 
 
 COMPARE_WORKSPACE_NAME = "Wondful Compare"
@@ -51,17 +52,16 @@ def _image_rgba(image):
 
 
 def _ensure_cached_arrays(props, force=False):
-    ref = props.viewport_image
-    result = props.result_image
+    ref, result = workflow.compare_images(props)
     if not ref or not result:
-        raise RuntimeError("当前 Render Session 没有同时包含 Camera Reference 和 AI Render。")
+        raise RuntimeError("当前对比所需的两张图片尚未就绪。")
 
     ref_w, ref_h = int(ref.size[0]), int(ref.size[1])
     out_w, out_h = int(result.size[0]), int(result.size[1])
     if ref_w <= 0 or ref_h <= 0 or out_w <= 0 or out_h <= 0:
         raise RuntimeError("对比图片尚未加载完成。")
     if not assess_canvas((out_w, out_h), (ref_w, ref_h))["matches"]:
-        raise RuntimeError("AI 结果与 Camera Reference 宽高比不一致，无法精确对比。")
+        raise RuntimeError("两张图片的画幅比例不同，请统一相机输出比例后再精确对比。")
 
     ref_key = _image_key(ref)
     result_key = _image_key(result)
@@ -111,7 +111,7 @@ def refresh_compare_image(context, force_cache=False):
     if context is None or not getattr(context, "scene", None) or not hasattr(context.scene, "wondful_ai"):
         return None
     props = context.scene.wondful_ai
-    if not props.viewport_image or not props.result_image:
+    if not all(workflow.compare_images(props)):
         return None
 
     width, height, ref_arr, out_arr = _ensure_cached_arrays(props, force=force_cache)
@@ -122,6 +122,8 @@ def refresh_compare_image(context, force_cache=False):
     elif mode == "DIFFERENCE":
         composed = compose_difference(ref_arr, out_arr)
     elif mode == "OUTLINE":
+        if workflow.is_reference(props) and getattr(props, "compare_pair", "CAMERA_RESULT") != "CAMERA_RESULT":
+            raise RuntimeError("目标图对比请使用分割、叠加或差异；产品轮廓只用于底图 / 成片对比。")
         mask_image = getattr(props, "structure_mask_image", None)
         if mask_image is None:
             raise RuntimeError("当前结果没有白模产品轮廓，请启用结构图后重新生成。")
@@ -360,12 +362,12 @@ def _display_rect(region, image):
 class WONDFUL_OT_open_compare_workspace(Operator):
     bl_idname = "wondful.open_compare_workspace"
     bl_label = "打开渲染对比"
-    bl_description = "进入 Wondful Compare 工作区，比较 Blender Camera Reference 与 AI Render"
+    bl_description = "进入 Wondful Compare 工作区，比较所选底图、目标图、粗模预览或成片"
 
     def execute(self, context):
         props = context.scene.wondful_ai
-        if not props.viewport_image or not props.result_image:
-            self.report({"ERROR"}, "当前 Render Session 没有同时包含 Camera Reference 和 AI Render。")
+        if not all(workflow.compare_images(props)):
+            self.report({"ERROR"}, "当前对比所需的两张图片尚未就绪。")
             return {"CANCELLED"}
         try:
             window, area, region = _ensure_compare_workspace(context)
@@ -439,7 +441,7 @@ class WONDFUL_OT_compare_modal(Operator):
     def invoke(self, context, event):
         global _ACTIVE_COMPARE_OPERATOR
         props = context.scene.wondful_ai
-        if not props.viewport_image or not props.result_image:
+        if not all(workflow.compare_images(props)):
             self.report({"ERROR"}, "没有可对比的 Camera Reference 和 AI Render。")
             return {"CANCELLED"}
         if context.area.type != "IMAGE_EDITOR":
@@ -557,55 +559,70 @@ class WONDFUL_PT_compare_workspace(Panel):
     bl_category = "Wondful Compare"
 
     def draw(self, context):
+        from . import ui_components as UIC
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         props = context.scene.wondful_ai
-
+        ref, result = workflow.compare_images(props)
+        target_pair = workflow.is_reference(props) and props.compare_pair != "CAMERA_RESULT"
         hero = layout.box()
-        row = hero.row(align=True)
-        row.label(text="Camera Reference", icon="CAMERA_DATA")
-        row.label(text="⇄")
-        row.label(text="AI Render", icon="IMAGE_DATA")
-
+        hero.label(text="图像对比", icon="ARROW_LEFTRIGHT")
+        if workflow.is_reference(props):
+            UIC.field(hero, props, "compare_pair", "对比对象")
+        for image in (ref, result):
+            row = hero.row(align=True)
+            row.label(text=UIC.short_text(image.name if image else "未选择", 36), icon="IMAGE_DATA")
+            if image:
+                UIC.help_icon(row, image.name)
         mode = hero.row(align=True)
-        mode.prop(props, "compare_mode", expand=True)
-
+        mode.scale_y = UIC.INPUT_HEIGHT
+        if target_pair:
+            for key in ("SPLIT", "OVERLAY", "DIFFERENCE"):
+                mode.prop_enum(props, "compare_mode", key)
+        else:
+            mode.prop(props, "compare_mode", text="", expand=getattr(context.region, "width", 380) >= 330)
         if props.compare_mode == "SPLIT":
-            hero.prop(props, "compare_factor", text="分割位置", slider=True)
+            UIC.field(hero, props, "compare_factor", "分割位置", slider=True)
             presets = hero.row(align=True)
-            op = presets.operator("wondful.compare_set_factor", text="原图")
-            op.value = 1.0
-            op = presets.operator("wondful.compare_set_factor", text="50 / 50")
-            op.value = 0.5
-            op = presets.operator("wondful.compare_set_factor", text="AI")
-            op.value = 0.0
+            presets.scale_y = UIC.ACTION_HEIGHT
+            for text, value in (("原图", 1.0), ("50 / 50", .5), ("对照图", 0.0)):
+                presets.operator("wondful.compare_set_factor", text=text).value = value
             if props.compare_drag_active:
-                hero.label(text="鼠标拖动已开启 · 在图片内按住左键拖动", icon="CHECKMARK")
+                row = hero.row(align=True)
+                row.label(text="拖动已开启", icon="CHECKMARK")
+                UIC.help_icon(row, "在图片内按住左键拖动，Esc 退出；也可使用分割滑块")
             else:
-                hero.operator("wondful.compare_modal", text="启用鼠标拖动", icon="ARROW_LEFTRIGHT")
-                hero.label(text="若拖动模式不可用，分割位置滑块始终可以直接对比。", icon="INFO")
+                row = hero.row(align=True)
+                row.scale_y = UIC.ACTION_HEIGHT
+                row.operator("wondful.compare_modal", text="启用鼠标拖动", icon="ARROW_LEFTRIGHT")
         elif props.compare_mode == "OVERLAY":
-            hero.prop(props, "compare_factor", text="AI 透明度", slider=True)
-            hero.label(text="建议 50% 检查轮心、车身边界、地平线是否重合。", icon="INFO")
+            UIC.field(hero, props, "compare_factor", "对照图透明度", slider=True)
+            UIC.help_icon(hero, "可使用 50% 检查主体边界、地平线和遮挡关系")
         elif props.compare_mode == "OUTLINE":
-            hero.label(text="青线是白模产品轮廓；检查结果边缘是否与青线重合。", icon="INFO")
-            if not getattr(props, "structure_mask_image", None):
-                hero.label(text="当前结果缺少轮廓，请启用结构图后重新生成。", icon="ERROR")
+            UIC.help_icon(hero, "青线是底图产品轮廓，仅用于底图与成片对比")
+            if not props.structure_mask_image:
+                hero.label(text="缺少产品轮廓", icon="ERROR")
         else:
-            hero.label(text="亮区包含灯光、材质差异；构图请结合轮廓模式检查。", icon="INFO")
-
-        hero.operator("wondful.compare_refresh", text="重新载入当前 Session", icon="FILE_REFRESH")
-
-        align = layout.box()
-        align.label(text="构图校验")
-        if props.alignment_score >= 0:
+            UIC.help_icon(hero, "差异亮区同时包含光照和材质变化，不等同于构图误差")
+        refresh = hero.row(align=True)
+        refresh.scale_y = UIC.ACTION_HEIGHT
+        refresh.enabled = bool(ref and result)
+        refresh.operator("wondful.compare_refresh", text="刷新对比", icon="FILE_REFRESH")
+        score = layout.box()
+        score.label(text="构图校验", icon="VIEWZOOM")
+        if target_pair:
+            score.label(text="未自动评分", icon="INFO")
+            UIC.help_icon(score, "目标图对比不复用车辆构图评分；请检查场景结构、相机与遮挡")
+        elif props.alignment_score >= 0:
             threshold = context.preferences.addons[__package__].preferences.alignment_threshold
-            icon = "CHECKMARK" if props.alignment_score >= threshold else "ERROR"
-            align.label(text=f"构图评分  {props.alignment_score:.0f} / 100", icon=icon)
+            score.label(text=f"构图评分  {props.alignment_score:.0f} / 100",
+                        icon="CHECKMARK" if props.alignment_score >= threshold else "ERROR")
             if props.alignment_attempts:
-                align.label(text=f"生成尝试  {props.alignment_attempts} 次")
+                score.label(text=f"生成尝试  {props.alignment_attempts} 次")
+            UIC.help_icon(score, props.alignment_message)
         else:
-            align.label(text="尚未获得对齐评分", icon="INFO")
-        if props.alignment_message:
-            align.label(text=props.alignment_message[:100])
-
-        layout.operator("wondful.leave_compare_workspace", text="返回原工作区", icon="TRIA_LEFT")
+            score.label(text="未自动评分", icon="INFO")
+        back = layout.row(align=True)
+        back.scale_y = UIC.ACTION_HEIGHT
+        back.operator("wondful.leave_compare_workspace", text="返回原工作区", icon="TRIA_LEFT")

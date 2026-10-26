@@ -66,7 +66,8 @@ class SimplePromptWordingTests(unittest.TestCase):
 
     def test_generic_texture_paragraph(self):
         text = CD.build_simple_prompt("", env_text="草地。\n表面质感：柔和漫反射。", vehicle=False)
-        self.assertIn("「表面质感」只用来决定我们这件产品", text)
+        self.assertIn("「表面质感」只用于理解环境受光条件", text)
+        self.assertIn("目标产品的高光和反射按自身表面重新计算", text)
         self.assertNotIn("车", text)
 
 

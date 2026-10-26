@@ -1,6 +1,7 @@
 # RNA Property declarations must evaluate at class creation (Blender 4.3+).
 
 import hashlib
+import math
 import shutil
 import threading
 import uuid
@@ -46,10 +47,12 @@ from .image_manager import compute_target_size, enforce_aspect_ratio, image_file
 from .prompt_engine import BASE_SYSTEM_PROMPT, STYLE_ANALYSIS_SYSTEM_PROMPT, PRODUCT_ANALYSIS_SYSTEM_PROMPT, product_analysis_user_text, parse_product_analysis, build_polish_user_text, build_render_prompt, sanitize_appearance_prompt, sanitize_appearance_prompt_report, needs_reference_policy_refresh, REFERENCE_POLICY_VERSION, select_polish_source
 from .render_session import cleanup_old_sessions, copy_references, create_session, save_metadata
 from .output_manager import export_result, resolve_output_directory, preflight_output_directory, internal_dir, sidecar_path
+from .photo_finish import CLEAN_SUFFIX
 from .viewport_capture import capture_camera_reference, camera_output_dimensions
 from .structure_packet import build_structure_packet
 from .properties import MAX_REFERENCES_PER_KIND, MAX_PRODUCT_REFERENCES, reference_limit
 from . import prompt_profiles
+from . import workflow
 from .reference_bundle import MAX_ANTIGRAVITY_IMAGE_PATHS, MAX_IMAGE_PATHS, prepare_bundle
 from .model_catalog import discover_models
 from .antigravity_auth import AuthSession
@@ -97,6 +100,37 @@ def cancel_auth_session(*, detach=False, context=None):
     if detach and _AGY_AUTH_OWNER is not None and context is not None:
         _AGY_AUTH_OWNER._cleanup(context)
 
+
+
+def _mv_analysis(massing_coll, coll) -> dict:
+    """The ④ analysis the blockout was built from ({} for a hand-made massing collection)."""
+    try:
+        from . import massing as _MS
+        if massing_coll is None or not _MS.blockout_kind(_MS.massing_objects(massing_coll, coll)):
+            return {}
+        txt = bpy.data.texts.get(_MS.SB_TEXT)
+        return json.loads(txt.as_string()) if txt is not None else {}
+    except Exception:
+        return {}
+
+
+def _sb_ground_band_line(context, props) -> str:
+    """1.2.8 地面分带 line of the ④ analysis for the 主视角 request ("" when off / no blockout / no bands)."""
+    if not bool(getattr(props, "sb_ground_bands", True)):
+        return ""
+    if not workflow.is_reference(props):
+        return ""
+    try:
+        from .massing import SB_TEXT as _SB_TEXT
+        from .multiview import scene_blockout_exists as _sb_exists
+        from .ground_bands import analysis_bands_text
+        txt = bpy.data.texts.get(_SB_TEXT)
+        if txt is None or not _sb_exists(context.scene):
+            return ""
+        return analysis_bands_text(json.loads(txt.as_string()))
+    except Exception as exc:
+        print(f"[Wondful] 地面分带（分析）读取失败：{exc}")
+        return ""
 
 
 def _addon_prefs(context):
@@ -326,7 +360,8 @@ def _reference_paths(props):
     return {
         "product": paths(props.product_images)[:MAX_PRODUCT_REFERENCES],
         "person": paths(props.person_images),
-        "style": paths(props.style_images),
+        "style": ([_sb_reference(props)[0]] if _sb_reference(props)[0] else [])
+                 if workflow.is_reference(props) else paths(props.style_images),
     }
 
 
@@ -345,7 +380,8 @@ def _reference_instructions(props):
     return {
         "product": notes(props.product_images)[:MAX_PRODUCT_REFERENCES],
         "person": notes(props.person_images),
-        "style": notes(props.style_images),
+        "style": (["复刻目标：材质和光照参考；结构以当前底图为准。" + getattr(props, "sb_target_note", "")]
+                  if _sb_reference(props)[0] else []) if workflow.is_reference(props) else notes(props.style_images),
     }
 
 
@@ -435,19 +471,21 @@ def _resolve_reference_index(props, ref_kind, requested_index=-1):
     if requested_index is None or int(requested_index) < 0:
         idx = min(getattr(props, index_attr), len(collection) - 1)
     else:
-        idx = max(0, min(int(requested_index), len(collection) - 1))
+        idx = int(requested_index)
+        if idx >= len(collection):
+            return collection, index_attr, -1
         setattr(props, index_attr, idx)
     return collection, index_attr, idx
 
 
 def _load_reference_image(filepath):
-    image = bpy.data.images.load(str(filepath), check_existing=True)
-    # If the same path was overwritten externally, Blender may return an existing
-    # datablock with stale pixels. Reload it before using it as the current ref.
-    try:
-        image.reload()
-    except Exception:
-        pass
+    path = Path(bpy.path.abspath(str(filepath))).expanduser()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("图片文件不可用")
+    image = bpy.data.images.load(str(path), check_existing=True)
+    image.reload()
+    if min(image.size) <= 0:
+        raise RuntimeError("图片无法解码")
     return image
 
 
@@ -509,7 +547,7 @@ def _gate_summary(attempts, exhausted) -> dict:
     best = max(tries, key=gate_rank) if tries else None
     passed = bool(best and best.get("passed"))
     return {"tries": [{k: t.get(k) for k in ("iou", "iou_lo", "iou_hi", "verdict", "weak_frac", "out_of_band",
-                                             "candidate", "seconds", "error")} for t in tries],
+                                             "candidate", "seconds", "error", "image_quality")} for t in tries],
             "best": best, "passed": passed, "exhausted": bool(exhausted and not passed),
             "candidates": [str(a.get("path")) for a in attempts]}
 
@@ -550,6 +588,35 @@ def _watch_layers(scene_name):
         bpy.app.timers.register(_poll_layers, first_interval=0.5)
 
 
+HEARTBEAT_AFTER = 20.0      # s in one step before the panel shows 「已等 X 秒」
+
+
+def heartbeat(elapsed, estimate, floor=0.10, ceiling=0.88, phase="", phase_elapsed=None):
+    """1.2.7 心跳进度 (PC test: ⑤ 适配提示词 sat at 88 % for 13 minutes with no sign of life).
+
+    → (progress, eta_seconds, phase_text). Up to the estimate the bar moves linearly to ``ceiling``; past it the
+    bar keeps creeping toward 0.97 (never reaching it) and the phase says how long this step has been waiting."""
+    elapsed = max(0.0, float(elapsed))
+    est = max(1.0, float(estimate))
+    frac = elapsed / est
+    if frac <= 0.98:
+        progress = floor + (ceiling - floor) * frac
+    else:
+        top = max(ceiling, 0.96)
+        over = (elapsed - 0.98 * est) / est
+        base = floor + (ceiling - floor) * 0.98
+        progress = base + (top - base) * (1.0 - math.exp(-over))
+    eta = max(0, int(est - elapsed))
+    pe = elapsed if phase_elapsed is None else max(0.0, float(phase_elapsed))
+    text = str(phase or "")
+    if pe >= HEARTBEAT_AFTER or frac > 1.0:
+        wait = f"已等 {int(pe)} 秒" if pe < 120 else f"已等 {int(pe // 60)} 分 {int(pe % 60)} 秒"
+        if frac > 1.0:
+            wait += "，比平时慢，仍在进行"
+        text = f"{text} · {wait}" if text else wait
+    return round(min(progress, 0.965 if frac > 0.98 else 1.0), 4), eta, text
+
+
 class _BaseAsyncOperator(Operator):
     _timer = None
     _thread = None
@@ -575,6 +642,11 @@ class _BaseAsyncOperator(Operator):
             return False
         global _ACTIVE_OPERATOR
         _ACTIVE_OPERATOR = self
+        try:   # 1.2.6 只做场景相关物体: what this task's 一句话需求 allows (people / vehicles / animals)
+            from . import static_scene as _SS
+            _SS.set_brief(getattr(getattr(context.scene, "wondful_ai", None), "scene_brief", "") or "")
+        except Exception:
+            pass
         from .cli_transport import reset_cancellation
         reset_cancellation()
         self._owns_lock = True
@@ -651,10 +723,20 @@ class _BaseAsyncOperator(Operator):
 
     def _progress_update(self, props, floor=0.10, ceiling=0.88):
         elapsed = max(0.0, time.time() - self._started_at)
-        frac = min(1.0, elapsed / max(1.0, self._estimated_total))
-        props.progress = floor + (ceiling - floor) * min(0.98, frac)
-        props.eta_seconds = max(0, int(self._estimated_total - elapsed))
-        props.task_phase = getattr(self, "_phase", "")
+        est = max(1.0, float(self._estimated_total))
+        progress, eta, phase = heartbeat(elapsed, est, floor, ceiling, getattr(self, "_phase", ""),
+                                         self._phase_elapsed(elapsed))
+        props.progress = progress
+        props.eta_seconds = eta
+        props.task_phase = phase
+
+    def _phase_elapsed(self, elapsed):
+        """Seconds the current ``_phase`` text has been shown (heartbeat: 「已等 X 秒」)."""
+        phase = getattr(self, "_phase", "")
+        if getattr(self, "_hb_phase", None) != phase:
+            self._hb_phase = phase
+            self._hb_t0 = elapsed
+        return max(0.0, elapsed - float(getattr(self, "_hb_t0", 0.0) or 0.0))
 
     def _release_lock(self):
         with self._ownership_guard:
@@ -797,7 +879,7 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
     1.2.2: robust chain (see op_chain): tries every 3D View / window context, retries
     transient context errors, and when the operator cannot start shows the reason in
     the panel instead of stopping silently.  Returns the ChainRunner (for tests)."""
-    from . import op_chain
+    from . import op_chain, layered_output
     from .op_chain import ChainRunner, OperatorRefused
     module, name = idname.split(".")
     scene_name = getattr(scene, "name", "") if scene is not None else ""
@@ -834,7 +916,10 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
             _status(props, "ERROR", text)
         _redraw_all()
 
-    runner = ChainRunner(invoke=invoke, contexts=contexts, locked=_ACTIVE_LOCK.locked, on_fail=on_fail,
+    # Keep background NumPy layer processing away from the next Blender render.
+    # Blender's Python runtime can crash when that render overlaps the layer worker.
+    runner = ChainRunner(invoke=invoke, contexts=contexts,
+                         locked=lambda: _ACTIVE_LOCK.locked() or layered_output.RUNNER.pending > 0, on_fail=on_fail,
                          on_started=lambda ctx, result: _redraw_all(),
                          last_report=lambda: _LAST_REPORT.get(idname, ""))
     bpy.app.timers.register(runner.step, first_interval=0.3)
@@ -842,7 +927,9 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
 
 
 def generate_needs_polish(props, prefs):
-    """3.1.9: decide whether 「生成」 must (re)write the prompt before rendering."""
+    """Only opt-in automatic polish may rewrite before generation."""
+    if not bool(getattr(props, "auto_polish_on_generate", False)):
+        return False
     brief = (getattr(props, "scene_brief", "") or "").strip()
     if not (props.prompt or "").strip():
         return True
@@ -851,18 +938,56 @@ def generate_needs_polish(props, prefs):
     if needs_reference_policy_refresh(props) or prompt_profiles.needs_target_refresh(props, prefs):
         return True
     if (props.style_prompt_dirty
-            or int(props.prompt_style_revision) != int(props.style_reference_revision)
-            or (len(props.style_images) > 0 and not bool(props.style_sync_initialized))):
+            or int(props.prompt_style_revision) != workflow.reference_revision(props)
+            or (bool(_reference_paths(props)["style"]) and not bool(props.style_sync_initialized))):
         return True
     key = _product_autofill_key(props, _analysis_provider(props, prefs))
     return bool(key) and _product_autofill_needed(props, key)
 
 
+def identity_preflight(props):
+    if not workflow.identity_available(props):
+        return "请先添加有效的产品身份参考图"
+    path = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath)
+    if not path:
+        return "产品身份参考文件不可用，请重新选择"
+    try:
+        _load_reference_image(path)
+    except Exception:
+        return "产品身份参考无法解码，请替换图片"
+    # Packed references are materialized once at the action boundary, never in draw.
+    props.product_images[0].source_path = path
+    return ""
+
+
+def workflow_preflight(context, props):
+    identity_error = identity_preflight(props)
+    if identity_error:
+        return identity_error
+    from .multiview import scene_blockout_exists
+    target, _source = _sb_reference(props)
+    source_ok = True
+    if workflow.is_reference(props):
+        source, _note = _sb_generation_reference(context, props)
+        from . import massing as MS
+        root = MS.find_collection(context.scene, props)
+        owners = ([root] + list(root.children_recursive)) if root is not None else []
+        rendered = set(MS.massing_objects(root, getattr(props, "product_collection", None))) if root else set()
+        original_hashes = {str(c.get("wondful_sb_original_sha256", "") or "") for c in owners
+                           if c.get("wondful_scene_blockout") and any(o in rendered for o in c.all_objects)}
+        built_hash = str(getattr(props, "sb_built_target_hash", "") or "")
+        source_ok = bool(source and built_hash and original_hashes == {built_hash})
+    return workflow.preflight(props, has_camera=context.scene.camera is not None,
+                              has_product=getattr(props, "product_collection", None) is not None,
+                              has_blockout=scene_blockout_exists(context.scene),
+                              target_path=target, source_ok=source_ok, identity_ok=True)
+
+
 class WONDFUL_OT_generate(Operator):
-    """3.1.9 single entry point: polish when needed, then render."""
+    """Shared render entry: validate mode, optionally polish, then render."""
     bl_idname = "wondful.generate"
     bl_label = "生成"
-    bl_description = "自动完成：读产品图 → 分析环境 → 写提示词 → 渲染与验收"
+    bl_description = "按当前工作模式渲染与检查；AI 润色可选，不会自动执行粗模重建"
 
     @classmethod
     def poll(cls, context):
@@ -873,6 +998,12 @@ class WONDFUL_OT_generate(Operator):
 
     def execute(self, context):
         props = context.scene.wondful_ai
+        error = workflow_preflight(context, props)
+        if error:
+            _status(props, "ERROR", error)
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
         props.model_notice = ""
         brief = (props.scene_brief or "").strip()
@@ -928,11 +1059,7 @@ class WONDFUL_OT_generate(Operator):
                 _status(props, "ERROR", msg)
                 self.report({"ERROR"}, msg)
                 return False
-            if getattr(props, "product_collection", None) is None:
-                msg = "渲染多个视角需要先在 ② 选择产品集合。"
-                _status(props, "ERROR", msg)
-                self.report({"ERROR"}, msg)
-                return False
+            # 1.2.7 纯场景多角度: no product collection → the views render as a pure scene (no product gate)
         context.scene.camera = views[0]
         if len(views) > 1:
             props.views_plan = json.dumps({"cameras": [o.name for o in views], "total": len(views)}, ensure_ascii=False)
@@ -941,6 +1068,8 @@ class WONDFUL_OT_generate(Operator):
 
 def generate_views(context, props):
     """Cameras 「生成」 renders from the ⑥ 渲染视角 list: [] when there is no 场景粗模 or nothing is checked."""
+    if not workflow.is_reference(props) or not getattr(props, "workflow_multiview", False):
+        return []
     from . import multiview as MV
     scene = context.scene
     if not MV.scene_blockout_exists(scene):
@@ -1246,12 +1375,65 @@ class WONDFUL_OT_massing_hull_build(Operator):
 
 
 def _sb_reference(props):
-    """从参考图生成场景粗模: the photo to analyse (the file field, else ③'s first environment reference)."""
-    custom = bpy.path.abspath((getattr(props, "sb_image_path", "") or "").strip())
-    if custom:
-        return custom, "file"
-    style = [p for p in _reference_paths(props)["style"] if p]
-    return (bpy.path.abspath(style[0]), "step3") if style else ("", "")
+    """The explicitly selected reconstruction target (never the environment list)."""
+    if not workflow.is_reference(props):
+        return "", ""
+    raw = (getattr(props, "sb_image_path", "") or "").strip()
+    return (bpy.path.abspath(raw), "replica_target") if raw else ("", "")
+
+
+def _sb_generation_reference(context, props):
+    """Return the verified source of the blockout actually used by this scene.
+
+    A newly selected environment image is not proof that an existing blockout
+    was reconstructed from it. Use the recorded snapshot and content hash on
+    that blockout, never the global text datablock or the current UI selection.
+    """
+    if not workflow.is_reference(props):
+        return "", ""
+    from . import massing as MS
+    if not bool(getattr(props, "massing_enabled", True)):
+        return "", ""
+    root = MS.find_collection(context.scene, props)
+    if root is None:
+        return "", ""
+    if root not in list(context.scene.collection.children_recursive) and root != context.scene.collection:
+        return "", "所选环境体块不在当前场景中，未使用其参考图"
+    rendered = set(MS.massing_objects(root, getattr(props, "product_collection", None)))
+    if not rendered:
+        return "", ""
+    sources, warnings, seen = set(), [], set()
+    pending = [root]
+    while pending:
+        coll = pending.pop()
+        ident = coll.as_pointer() if hasattr(coll, "as_pointer") else id(coll)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if bool(getattr(coll, "hide_render", False)):
+            continue
+        pending.extend(getattr(coll, "children", ()))
+        if not coll.get("wondful_scene_blockout"):
+            continue
+        if not any(obj in rendered for obj in coll.all_objects):
+            continue
+        raw = str(coll.get("wondful_sb_reference_image", "") or "")
+        expected = str(coll.get("wondful_sb_reference_sha256", "") or "")
+        if not raw or not expected:
+            warnings.append("旧场景粗模未记录参考来源，重新生成粗模后可带入原图")
+            continue
+        path = Path(bpy.path.abspath(raw)).expanduser()
+        try:
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                warnings.append("粗模参考副本已丢失或改变，请重新从参考图生成粗模")
+                continue
+        except OSError:
+            warnings.append("无法读取粗模参考副本，请重新从参考图生成粗模")
+            continue
+        sources.add(str(path.resolve()))
+    if len(sources) > 1:
+        return "", "当前环境含多个不同来源的粗模，未自动选择单张结构参考"
+    return (next(iter(sources)) if sources else ""), "；".join(dict.fromkeys(warnings))
 
 
 def _sb_prepare_png(src, dst, long_edge):
@@ -1276,17 +1458,234 @@ def _sb_prepare_png(src, dst, long_edge):
     return str(dst), (w, h)
 
 
+PRECISE_CORRECTION = ("PRECISE MODE: the camera above was MEASURED by a depth model; keep camera height_m, pitch_deg, roll_deg, "
+                      "hfov_deg and horizon_y_frac exactly. After your answer the add-on re-pins every block's distance and "
+                      "size to the measured depth, so spend the correction on shapes, extents, missing elements and the skyline.")
+
+
+def _sb_precise_prepare(sb, rgb, frame, geo_path, need_install, cancelled):
+    """Worker thread, 精确模式: install on first use, then measure the photo. Sets ``sb['geo']`` (or
+    ``sb['precise_error']`` → normal mode). ``sb['stage_req']`` asks the modal timer to show a stage.
+    A cancel during the download raises (the operator's cancel path ends the run)."""
+    from . import precise_setup as PS
+    from . import precise_depth as PD
+    from . import sb_progress as SP
+    try:
+        if geo_path:
+            sb["stage_req"] = SP.DEPTH
+            sb["geo"] = PD.load_geo(bpy.path.abspath(geo_path) if bpy else geo_path, frame)
+            return
+        if need_install:
+            sb["stage_req"] = SP.INSTALL
+
+            def prog(frac, text):
+                sb["install_frac"] = frac
+                sb["install_text"] = text
+            PS.ensure_installed(progress=prog, cancel=cancelled)
+        sb["stage_req"] = SP.DEPTH
+        ort = PS.import_onnxruntime()
+        sb["geo"] = PD.infer(rgb, PS.model_path(), ort=ort, cancel=cancelled)
+    except PS.PreciseInstallError as exc:
+        if exc.cancelled or cancelled():
+            raise RuntimeError("已取消") from exc
+        sb["precise_error"] = str(exc)
+        print("[Wondful] 精确模式不可用，改用普通模式：", exc, *getattr(exc, "details", []))
+    except Exception as exc:
+        if cancelled():
+            raise
+        sb["precise_error"] = f"深度测量失败：{str(exc)[:100]}"
+        print("[Wondful] 精确模式深度测量失败，改用普通模式：\n" + traceback.format_exc())
+
+
+def _render_replica_preview(context, props, directory):
+    from . import scene_blockout_build as SBB
+    from .massing import find_collection
+    scene = context.scene
+    cam = scene.camera
+    if cam is None or cam.data.type != "PERSP":
+        raise RuntimeError("请先选择透视相机，再刷新粗模预览")
+    from . import blockout_versions as BV
+    root = BV.active(scene, props) or find_collection(scene, props)
+    if root is None:
+        raise RuntimeError("请先生成相机与粗模")
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    path = Path(directory) / "review_blockout.png"
+    info = {"collection": root.name, "frame": list(camera_output_dimensions(context)),
+            "lens": cam.data.lens, "sensor_width": cam.data.sensor_width, "sensor_height": cam.data.sensor_height,
+            "sensor_fit": cam.data.sensor_fit, "shift_x": cam.data.shift_x, "shift_y": cam.data.shift_y,
+            "cam_world": [list(row) for row in cam.matrix_world], "kind": root.get("wondful_sb_kind", "outdoor")}
+    if not SBB.render_preview(context, info, str(path), width=960, product_collection=props.product_collection):
+        raise RuntimeError("预览渲染未输出有效图片")
+    image = load_image(str(path), "Wondful_Blockout_Preview")
+    image.pack()
+    props.sb_preview_image = image
+    props.compare_pair = "TARGET_BLOCKOUT"
+    return str(path)
+
+
+class WONDFUL_OT_replica_preview(Operator):
+    bl_idname = "wondful.replica_preview"
+    bl_label = "刷新粗模预览"
+    bl_description = "用当前相机渲染已有粗模；不重新分析、不改模型、不调用在线 AI"
+
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and workflow.is_reference(context.scene.wondful_ai)
+
+    def execute(self, context):
+        props = context.scene.wondful_ai
+        props.replica_reviewed = False
+        try:
+            session = create_session()
+            _render_replica_preview(context, props, session.directory)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+
+class WONDFUL_OT_replica_refine(_BaseAsyncOperator):
+    bl_idname = "wondful.replica_refine"
+    bl_label = "按意见修改"
+    bl_description = ("根据当前预览和修改意见调整已有粗模及相机；会调用在线分析。"
+                      "不改车身网格与材质；无法执行的要求会列出，不假装已完成")
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.wondful_ai
+        return not _ACTIVE_LOCK.locked() and workflow.is_reference(p) and p.status not in workflow.BUSY
+
+    def execute(self, context):
+        from . import replica_revision as RR
+        from . import replica_revision_blender as RB
+        from . import scene_blockout as SB
+        from . import codex_direct as CD
+        props = context.scene.wondful_ai
+        if not self.poll(context):
+            return {"CANCELLED"}
+        error = workflow_preflight(context, props)
+        feedback = (props.replica_feedback or "").strip()
+        if error or not feedback:
+            self.report({"ERROR"}, error or "请先填写修改意见")
+            return {"CANCELLED"}
+        prefs = _addon_prefs(context)
+        if _analysis_provider(props, prefs)["id"] != "codex":
+            self.report({"ERROR"}, "按意见修改目前需要 Codex 登录")
+            return {"CANCELLED"}
+        session = create_session()
+        try:
+            preview = _render_replica_preview(context, props, session.directory)
+            snapshot, _map, _owner = RB.snapshot(context, props)
+            target, _ = _sb_reference(props)
+            identity = workflow.identity_path(props, resolve=bpy.path.abspath)
+            content = RR.content(CD.data_url(target)[0], CD.data_url(preview)[0],
+                                 CD.data_url(identity)[0], snapshot, feedback)
+            save = {"feedback": feedback, "snapshot": snapshot}
+            (session.directory / "revision_request.json").write_text(json.dumps(save, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc)); return {"CANCELLED"}
+        self._revision_session = session.directory
+        self._revision_signature = snapshot["signature"]
+        self._revision_feedback = feedback
+        model = str(getattr(prefs, "codex_model", "") or "")
+        client_version = str(getattr(props, "codex_cli_version", "") or "")
+        self._phase = "根据意见调整粗模"
+        self._estimated_total = 120.0
+        _status(props, "BLOCKOUT")
+        props.sb_stage = ""
+        props.replica_revision_status = "正在分析修改意见"
+        def job():
+            from .cli_transport import is_cancellation_requested as cancelled
+            return SB.call_analysis(content, effort=SB.EFFORT_CORRECT, model=model,
+                                    client_version=client_version, cancel_check=cancelled, schema=RR.SCHEMA)
+        if not self._start_thread(context, job):
+            _status(props, "IDLE"); props.replica_revision_status = "未启动修改"
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def _modal(self, context, event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        props = self._origin_scene.wondful_ai
+        if self._thread and self._thread.is_alive():
+            self._progress_update(props); return {"RUNNING_MODAL"}
+        try:
+            if self._error:
+                raise self._error[0]
+            from . import replica_revision_blender as RB
+            (self._revision_session / "revision_response.json").write_text(
+                json.dumps(self._result, ensure_ascii=False, indent=2), encoding="utf-8")
+            plan = RB.apply_plan(context, props, self._result, self._revision_signature,
+                lambda: _render_replica_preview(context, props, self._revision_session / "revised"))
+            if plan.get("no_change"):
+                message = "未应用修改"
+            else:
+                message = "已更新粗模与预览"
+            if plan["unresolved"]:
+                message += "；未处理：" + "；".join(plan["unresolved"])
+            if plan["summary"]:
+                message += "\n" + plan["summary"]
+            props.replica_revision_status = message
+            props.last_sb_note = message
+            _status(props, "IDLE")
+            self.report({"WARNING"} if plan["unresolved"] else {"INFO"}, message[:200])
+            return {"FINISHED"}
+        except Exception as exc:
+            message = "修改未应用：" + str(exc)
+            props.replica_revision_status = message
+            _status(props, "ERROR", message)
+            self.report({"ERROR"}, message[:200]); return {"CANCELLED"}
+        finally:
+            props.progress = 0.0
+            self._cleanup(context)
+            _redraw_all()
+
+    def _on_cancelled(self, props):
+        props.replica_revision_status = "已取消，保留原场景与修改意见"
+
+
+class WONDFUL_OT_replica_undo(Operator):
+    bl_idname = "wondful.replica_undo"
+    bl_label = "撤销上次调整"
+    bl_description = "撤销本次会话最后一次按意见修改；已有后续手动编辑时不覆盖。重开文件后不保留该记录"
+    @classmethod
+    def poll(cls, context):
+        p = context.scene.wondful_ai
+        return not _ACTIVE_LOCK.locked() and p.status not in workflow.BUSY and workflow.is_reference(p) and bool(p.replica_can_undo)
+    def execute(self, context):
+        if not self.poll(context):
+            return {"CANCELLED"}
+        from . import replica_revision_blender as RB
+        p = context.scene.wondful_ai
+        try:
+            RB.undo(context,p)
+            p.replica_revision_status = "已撤销上次调整"
+            p.last_sb_note = p.replica_revision_status
+        except Exception as exc:
+            self.report({"ERROR"},str(exc));return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
     """1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模: one photo → analysis JSON → blocks (+ optional camera)."""
     bl_idname = "wondful.scene_blockout_build"
     bl_label = "从参考图生成场景粗模"
-    bl_description = ("让 AI 分析环境参考图（③ 第一张，或 ④ 里选的图），搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
+    bl_description = ("让 AI 分析独立的复刻目标图，搭出地形 / 道路 / 建筑 / 树 / 远山等灰蓝体块，"
                       "放进环境体块里的「Wondful 场景粗模」集合（重新生成会替换它），每个体块都按照片命名；产品位置不变。"
-                      "参考图只用于分析，不会发给生图模型")
+                      "记录原图来源，生成时辅助保留连续结构、材质与环境光照；产品以当前模型为准")
     bl_options = {"REGISTER", "UNDO"}
 
     analysis_json: StringProperty(name="分析结果", description="（测试 / 离线）直接用这个 JSON 文件，不调用 AI",
                                   default="", options={"HIDDEN", "SKIP_SAVE"})
+    precise_geo: StringProperty(name="深度测量结果", description="（测试 / 离线）精确模式直接用这个已记录的深度测量（.npz），不运行深度模型",
+                                default="", options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        from .multiview import scene_blockout_exists
+        # Versioned generation never deletes older collections.
+        return self.execute(context)
 
     def execute(self, context):
         from . import scene_blockout as SB
@@ -1294,13 +1693,24 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import sb_progress as SP
         scene = context.scene
         props = scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
+        if not workflow.is_reference(props):
+            self.report({"ERROR"}, "请先切换到「参考图复刻」")
+            return {"CANCELLED"}
+        if getattr(props, "product_collection", None) is None:
+            self.report({"ERROR"}, "请先选择车模所在的产品集合")
+            return {"CANCELLED"}
+        props.replica_reviewed = False
         prefs = _addon_prefs(context)
         props.sb_failed_stage = ""
         props.sb_stage = ""
         props.sb_elapsed = 0
         ref, source = _sb_reference(props)
         if not ref or not Path(ref).is_file():
-            msg = "请先在 ③ 放一张环境参考图，或在 ④ 选择一张参考图。" if not ref else f"参考图不存在：{ref}"
+            msg = "请先选择独立的复刻目标图。" if not ref else f"参考图不存在：{ref}"
             props.last_sb_note = msg
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
@@ -1308,20 +1718,29 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         if not cached:
             provider = _analysis_provider(props, prefs)
             if provider["id"] != "codex":
-                msg = "从参考图生成场景粗模需要 Codex 登录（① 连接 Codex）。"
+                msg = "参考图分析需要 Codex 登录，请在顶部连接或设置中切换服务。"
                 props.last_sb_note = msg
                 self.report({"ERROR"}, msg)
                 return {"CANCELLED"}
         correct = bool(props.sb_correct) and not cached
-        ids = SP.stages(correct, bool(props.sb_set_camera))
+        precise = bool(getattr(props, "sb_precise", False))
+        geo_path = (self.precise_geo or "").strip()
+        need_install = False
+        if precise and not geo_path:
+            from . import precise_setup as PS
+            need_install = not PS.status()["ready"]
+        ids = SP.stages(correct, bool(props.sb_set_camera), precise=precise, install=need_install)
         t0 = time.time()
         self._sb = {"t0": t0, "ids": ids, "stage_id": SP.READ, "stage_t0": t0, "cached": bool(cached),
-                    "pending": None, "drawn": -1}
+                    "pending": None, "drawn": -1, "precise": precise, "geo": None, "precise_rounds": []}
         props.sb_stage_ids = SP.encode(ids)
         props.sb_stage = SP.READ
         session = create_session()
+        target_sha256 = workflow.file_hash(ref)
         try:
             upload, frame = _sb_prepare_png(ref, session.directory / "scene_ref.png", SB.WORK_LONG)
+            if not target_sha256 or workflow.file_hash(ref) != target_sha256:
+                raise RuntimeError("读取过程中目标图发生变化，请重新选择目标图")
         except Exception as exc:
             props.sb_failed_stage = SP.READ
             props.sb_stage = ""
@@ -1341,19 +1760,51 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         self._sb.update({"session": session.directory, "upload": upload, "frame": frame,
+                         "target_sha256": target_sha256,
                          "set_camera": bool(props.sb_set_camera), "correct": correct, "stage": 1, "scores": [],
                          "rounds": [], "model": model, "client_version": client_version, "source": source})
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
+        # Pure-numpy structural hints: helps the model locate bright, long
+        # architectural edges even in a dark studio. They are only candidates;
+        # no car highlight or reflection is treated as geometry automatically.
+        try:
+            from .studio_edge_guides import bright_bar_hints, guide_text
+            from .png_io import read_png
+            import numpy as np
+            sampled = read_png(upload)
+            hints = bright_bar_hints(sampled)
+            if hints:
+                content.append({"type": "input_text", "text": guide_text(hints)})
+            self._sb["light_edge_candidates"] = len(hints)
+            self._sb["light_edge_hints"] = hints
+            self._sb["dark_reference"] = bool(float(np.median(sampled[..., :3].mean(axis=2))) < 58.)
+        except (ValueError, OSError, TypeError) as exc:
+            print(f"[Wondful] 建筑直线辅助分析不可用：{exc}")
+        if (props.sb_target_note or "").strip():
+            content.append({"type": "input_text", "text": "Reference priorities: " + props.sb_target_note.strip()})
         self._sb["content"] = content
         self._estimated_total = 8.0 if cached else 240.0
+        rgb = None
+        if precise and not geo_path:
+            from .png_io import read_png
+            rgb = read_png(upload)[..., :3]
         _status(props, "BLOCKOUT")
-        self._set_stage(props, SP.ANALYZE)
+        self._set_stage(props, (SP.INSTALL if need_install else SP.DEPTH) if precise else SP.ANALYZE)
+        sb = self._sb
 
         def job():
             from .cli_transport import is_cancellation_requested as cancelled
+            full = content
+            if precise:
+                _sb_precise_prepare(sb, rgb, frame, geo_path, need_install, cancelled)
+                if sb.get("geo") is not None:
+                    from . import precise_depth as PD
+                    full = list(content) + [{"type": "input_text", "text": PD.depth_block(sb["geo"], frame)}]
+                    sb["content"] = full
+                sb["stage_req"] = SP.ANALYZE
             if cached:
                 return json.loads(Path(bpy.path.abspath(cached)).read_text(encoding="utf-8"))
-            return SB.call_analysis(content, effort=SB.EFFORT_FIRST, model=model, client_version=client_version,
+            return SB.call_analysis(full, effort=SB.EFFORT_FIRST, model=model, client_version=client_version,
                                     cancel_check=cancelled)
 
         if not self._start_thread(context, job):
@@ -1376,11 +1827,19 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import sb_progress as SP
         sb = self._sb
         now = time.time()
+        req = sb.pop("stage_req", None)
+        if req and req != sb["stage_id"] and req in sb["ids"]:   # the 精确模式 worker moved on (安装 → 测量 → 分析)
+            sb["stage_id"], sb["stage_t0"] = req, now
+            props.sb_stage = req
+            force = True
         elapsed = int(now - sb["t0"])
         props.sb_elapsed = elapsed
-        props.progress = SP.fraction(sb["ids"], sb["stage_id"], now - sb["stage_t0"], cached=sb["cached"])
+        inner = sb.get("install_frac") if sb["stage_id"] == SP.INSTALL else None
+        props.progress = SP.fraction(sb["ids"], sb["stage_id"], now - sb["stage_t0"], cached=sb["cached"], inner=inner)
         props.eta_seconds = 0
         props.task_phase = "场景粗模：" + SP.status_text(sb["stage_id"], elapsed)
+        if sb["stage_id"] == SP.INSTALL and sb.get("install_text"):
+            props.task_phase += " · " + sb["install_text"]
         if force or elapsed != sb.get("drawn"):
             sb["drawn"] = elapsed
             _redraw_all()
@@ -1446,9 +1905,37 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         coll = getattr(props, "product_collection", None)
         data = dict(data)
         data.setdefault("_frame", {"w": self._sb["frame"][0], "h": self._sb["frame"][1]})
+        reference_snapshot = Path(self._sb["upload"])
+        data["_reference_image_path"] = str(reference_snapshot.resolve())
+        data["_reference_image_sha256"] = hashlib.sha256(reference_snapshot.read_bytes()).hexdigest()
+        data["_reference_original_sha256"] = self._sb.get("target_sha256", "")
+        try:   # 1.2.6 只做场景相关物体: the completion stats never see people / other vehicles either
+            from . import static_scene as _SS
+            self._sb["analysis"] = _SS.strip_dynamic(data, _SS.wanted(getattr(props, "scene_brief", "") or ""))[0]
+        except Exception:
+            self._sb["analysis"] = data      # 1.2.5 场景补全: road direction / lot widths / poles
         own = [o for o in MS.massing_objects(parent, coll) if not any(c.get("wondful_scene_blockout") for c in o.users_collection)]
-        info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
-                         set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
+        from . import blockout_versions as BV
+        before = set(BV.all_versions(scene))
+        previous_active = BV.active(scene, props)
+        previous_camera = scene.camera
+        try:
+            info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
+                             set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
+        except Exception:
+            # Preserve previous results, and leave a failed partial build hidden
+            # for diagnosis rather than deleting any existing collection.
+            for created in set(BV.all_versions(scene)) - before:
+                created["wondful_sb_failed"] = 1
+                created.hide_render = True
+                created.hide_viewport = True
+            if scene.camera is not previous_camera:
+                scene.camera = previous_camera
+            if previous_active is not None:
+                # If a late build stage failed after committing visibility,
+                # re-show the previous usable version and restore its objects.
+                BV.activate(scene, previous_active, props)
+            raise
         if props.massing_collection is None and parent is scene.collection:
             props.massing_collection = bpy.data.collections.get(info["collection"])
         return info
@@ -1457,14 +1944,46 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import scene_blockout as SB
         from . import scene_blockout_build as SBB
         from .png_io import read_png, write_png
+        import numpy as np
         d = Path(self._sb["session"])
         path = d / f"scene_preview_{tag}.png"
         if rendered is None or not Path(rendered).is_file():
             SBB.render_preview(context, info, str(path))
         photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
         render = read_png(str(path)).astype("float32")
-        sc = SB.fit_score(photo, render)
-        import numpy as np
+        subject = (self._sb.get("analysis") or {}).get("reference_subject") or {}
+        exclude = subject.get("bbox") if subject.get("present") else None
+        sc = SB.fit_score(photo, render, exclude_bbox=exclude)
+        analysis = self._sb.get("data") or self._sb.get("analysis") or {}
+        frames = SB.normalize(analysis).get("light_frames") or []
+        prior = self._sb.get("rounds") or []
+        prior_frames = bool(prior and SB.normalize(prior[0]).get("light_frames"))
+        # If round 2 deletes a correctly found frame, the metric must not
+        # silently revert to (irrelevant) black-studio sky IoU. Likewise, a
+        # first round that entirely missed obvious bright architecture should
+        # not win merely because its empty background resembles sky.
+        dark_studio = (analysis.get("scene_kind") == "interior"
+                       and self._sb.get("light_edge_candidates", 0) >= 2
+                       and float(np.median(photo[..., :3].mean(axis=2))) < 58.0)
+        if frames or prior_frames or dark_studio:
+            from .studio_frames import frame_alignment_score
+            metric = frame_alignment_score(photo, frames, exclude_bbox=exclude) if frames else {
+                "frame_f": 0.0, "frame_precision": 0.0, "frame_recall": 0.0,
+                "frame_hints": ["高对比影棚未重建发光框架，检查多层开口式LED梁体"]}
+            sc.update(metric)
+            # Dark studio backgrounds are not photographic 'sky'. The exact
+            # bright-beam match matters more than the old sky-IoU heuristic.
+            sc["score"] = round(.8 * metric["frame_f"] + .2 * sc["edge_f"], 3)
+            sc["hints"] = list(metric.get("frame_hints", []))
+            sc["metric"] = "LUMINOUS_FRAME_ALIGNMENT"
+        if info.get("framing_fit"):
+            sc["product_framing"] = info["framing_fit"]
+        pr = self._sb.get("precise_rounds") or []
+        k = 1 if tag == "r2" else 0
+        if len(pr) > k and pr[k].get("err_after_pct") is not None:
+            sc["dist3d_err_pct"] = pr[k]["err_after_pct"]      # 3D: median distance error vs the measured depth
+        print(f"[Wondful] 场景粗模 {tag}：2D 吻合度 {sc['score']:.3f}（skyIoU {sc.get('sky_iou', '-')} · edgeF "
+              f"{sc.get('edge_f')}）" + (f" · 3D 距离误差 {sc['dist3d_err_pct']}%" if "dist3d_err_pct" in sc else ""))
         flat = render[..., :3] * (render[..., 3:4] / 255.0) + 255.0 * (1.0 - render[..., 3:4] / 255.0)
         write_png(str(d / f"scene_preview_{tag}_flat.png"), flat.clip(0, 255).astype(np.uint8))
         write_png(str(d / f"scene_overlay_{tag}.png"), SB.overlay(photo, flat))
@@ -1477,11 +1996,65 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         info["scores"] = self._sb["scores"]
         info["round"] = round_no
         info["cached"] = self._sb["cached"]
-        props.last_sb_note = SB.summary(info)
+        pr = self._sb.get("precise_rounds") or []
+        if pr:
+            info["precise"] = dict(pr[min(len(pr), max(1, round_no)) - 1])
+            info["precise"].pop("items", None)
+            if info["precise"].get("warning"):
+                info.setdefault("notes", []).append(info["precise"]["warning"])
+        elif self._sb.get("precise"):
+            info["precise_fallback"] = self._sb.get("precise_error") or "深度测量没有完成"
+        detail_line = ""
+        from . import detail_blockout as DB
+        # Historical inferred geometry belongs to the archived blockout version.
+        # Do not erase it while finishing a new version.
+        complete = bool(getattr(props, "sb_complete", False))    # Out-of-frame completion is opt-in.
+        detail_done = False
+        if self._sb.get("geo") is not None and info.get("world") and bool(getattr(props, "sb_detail_carrier", True)):
+            # 1.2.5 细节粗模: measured near / mid-ground carrier for 多角度场景一致 (hidden; far field stays LLM)
+            from . import detail_blockout as DB
+            try:
+                try:
+                    from . import precise_depth as PD
+                    PD.save_geo(str(Path(self._sb["session"], "precise_geo.npz")), self._sb["geo"])
+                except Exception:
+                    pass
+                info["detail"] = DB.build_in_blender(context, info, self._sb["geo"], scene_kind=info.get("kind", "outdoor"),
+                                                     analysis=self._sb.get("analysis"), complete=complete,
+                                                     free_space=bool(getattr(props, "sb_free_space", False)),
+                                                     bands=bool(getattr(props, "sb_lod_bands", True)),
+                                                     seam=bool(getattr(props, "sb_seam_blend", True)))
+            except Exception as exc:
+                print("[Wondful] 细节粗模失败：\n" + traceback.format_exc())
+                info["detail"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
+            detail_line = DB.summary_text(info["detail"])
+            detail_done = bool((info["detail"] or {}).get("ok"))
+        if complete and not detail_done and info.get("world") and info.get("kind", "outdoor") != "interior":
+            # 场景补全 without a measurement: rows / curbs / greenery inferred from the LLM blocks
+            try:
+                info["complete"] = DB.complete_llm_in_blender(context, info, self._sb.get("analysis"),
+                                                              bands=bool(getattr(props, "sb_lod_bands", True)),
+                                                              seam=bool(getattr(props, "sb_seam_blend", True)))
+            except Exception as exc:
+                print("[Wondful] 场景补全失败：\n" + traceback.format_exc())
+                info["complete"] = {"ok": False, "reason": f"出错：{str(exc)[:80]}"}
+            line = DB.completion_text(info["complete"])
+            detail_line = (detail_line + " · " + line) if detail_line else line
+        props.last_sb_note = SB.summary(info) + (f" · {detail_line}" if detail_line else "")
+        print("[Wondful] " + props.last_sb_note)
+        props.sb_built_target_hash = self._sb.get("target_sha256", "")
+        props.replica_reviewed = False
+        props.sb_preview_image = None
+        try:
+            preview_path = _render_replica_preview(context, props, self._sb["session"])
+            info["review_preview"] = {"ok": True, "path": preview_path}
+        except Exception as exc:
+            info["review_preview"] = {"ok": False, "reason": str(exc)[:140]}
+            props.last_sb_note += " · 预览未完成，请刷新当前预览：" + str(exc)[:140]
         try:
             Path(self._sb["session"], "scene_blockout_info.json").write_text(
                 json.dumps(info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-        except Exception:
+        except OSError:
             pass
         props.progress = 0.0
         props.eta_seconds = 0
@@ -1518,11 +2091,33 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                         return self._finish(context, info, 1)
                     return self._fail(context, props, exc)
                 data = SB.normalize(self._result)
+                if not sb["cached"] and sb["stage"] == 1 and sb.get("light_edge_hints"):
+                    # The assistant may omit bright cropped V portals even when
+                    # both photo limbs are unambiguous. Recover only a strictly
+                    # supported outer portal and mark it for manual review.
+                    from .studio_edge_guides import rescue_outer_portal
+                    data, recovered = rescue_outer_portal(data, sb["light_edge_hints"],
+                                                           dark_studio=bool(sb.get("dark_reference")))
+                    if recovered:
+                        print("[Wondful] 从图像直线候选补建外层V灯架；前后层级需人工复核")
                 try:
                     Path(sb["session"], f"scene_analysis_r{sb['stage']}.json").write_text(
                         json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception:
                     pass
+                if sb.get("geo") is not None:
+                    # 精确模式: measured camera replaces the LLM camera; blocks pinned to the measured depth
+                    from . import precise_depth as PD
+                    data, pinfo = PD.precise_pass(data, sb["geo"], sb["frame"])
+                    sb["precise_rounds"].append(pinfo)
+                    print(f"[Wondful] 精确模式 r{sb['stage']}：相机 {pinfo['camera']} · 对齐 {pinfo['snapped']} 个体块 · "
+                          f"3D 距离误差 {pinfo['err_before_pct']}% → {pinfo['err_after_pct']}%")
+                    try:
+                        Path(sb["session"], f"scene_precise_r{sb['stage']}.json").write_text(
+                            json.dumps({"info": pinfo, "geo_camera": sb["geo"]["cam"]}, ensure_ascii=False, indent=1,
+                                       default=str), encoding="utf-8")
+                    except Exception:
+                        pass
                 sb["data"] = data
                 self._then(props, SP.BUILD if sb["stage"] == 1 else SP.REBUILD, self._step_build)
                 return {"RUNNING_MODAL"}
@@ -1599,6 +2194,8 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         data = sb["rounds"][0]
         content = SB.correction_content(sb["content"], data, {k: v for k, v in sc.items() if k != "hints"},
                                         sc.get("hints", []), CD.data_url(flat)[0], CD.data_url(ov)[0])
+        if sb.get("geo") is not None:
+            content.append({"type": "input_text", "text": PRECISE_CORRECTION})
         model, cv = sb["model"], sb["client_version"]
 
         def job():
@@ -2125,6 +2722,10 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
 
     def execute(self, context):
         props = context.scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
         prefs = _addon_prefs(context)
 
         provider = _analysis_provider(props, prefs)
@@ -2159,16 +2760,16 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         self._camera_name_at_start = context.scene.camera.name if context.scene.camera else ""
         self._reference_sources_at_start = {kind: _reference_manifest(paths) for kind, paths in refs.items()}
         self._reference_instructions_at_start = ref_instructions
-        self._style_revision_at_start = int(getattr(props, "style_reference_revision", 0))
+        self._style_revision_at_start = workflow.reference_revision(props)
         self._style_fingerprint_at_start = _reference_fingerprint(refs["style"])
-        fingerprint_relevant = bool(len(props.style_images) > 0 or getattr(props, "style_sync_initialized", False))
+        fingerprint_relevant = bool(bool(_reference_paths(props)["style"]) or getattr(props, "style_sync_initialized", False))
         self._style_refresh_requested = bool(
             needs_reference_policy_refresh(props)
             or prompt_profiles.needs_target_refresh(props, prefs)
             or getattr(props, "style_prompt_dirty", False)
             or int(getattr(props, "prompt_style_revision", 0)) != self._style_revision_at_start
             or (fingerprint_relevant and str(getattr(props, "prompt_style_fingerprint", "")) != self._style_fingerprint_at_start)
-            or (len(props.style_images) > 0 and not bool(getattr(props, "style_sync_initialized", False)))
+            or (bool(_reference_paths(props)["style"]) and not bool(getattr(props, "style_sync_initialized", False)))
         )
 
         visible_prompt = _get_prompt_text(props)
@@ -2390,7 +2991,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             final_prompt_now = _get_prompt_text(props)
             props.last_ai_prompt = final_prompt_now
             props.prompt_target_key = self._prompt_profile["target_key"]
-            current_style_revision = int(getattr(props, "style_reference_revision", 0))
+            current_style_revision = workflow.reference_revision(props)
             current_style_fingerprint = _reference_fingerprint(_reference_paths(props)["style"])
             same_style_set = (
                 current_style_revision == int(getattr(self, "_style_revision_at_start", current_style_revision))
@@ -2497,7 +3098,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             if not bool(getattr(props, "layered_output", False)):
                 return None
             if getattr(props, "product_collection", None) is None:
-                props.last_layers_note = "分层输出需要先在 ② 选择产品集合，本次已跳过"
+                props.last_layers_note = "分层输出需要先在首步选择车模集合，本次已跳过"
                 return None
             from .product_kind import is_vehicle
             try:
@@ -2530,7 +3131,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 return None
             coll = getattr(props, "product_collection", None)
             if coll is None:
-                props.last_detail_note = "细节修复需要先在 ② 选择产品集合，本次已跳过"
+                props.last_detail_note = "细节修复需要先在首步选择车模集合，本次已跳过"
                 return None
             work = Path(self._session.viewport_reference).parent
             from .viewport_capture import keep_exact_slots, keep_exact_texts, mirrored_keep_parts
@@ -2576,6 +3177,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         (Codex 直连 edit_image / Antigravity generate_image); None → Blender paste fallback."""
         spec = getattr(self, "_detail", None)
         if not spec:
+            return
+        from .result_worker import crop_regen_allowed
+        if not crop_regen_allowed(getattr(prefs, "alignment_max_attempts", 3)):
+            spec["edit_fn"] = None      # 1.2.5: 最多生成次数 = 1 → no extra image calls, Blender paste only
             return
         try:
             from .cli_transport import is_cancellation_requested
@@ -2743,6 +3348,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             restored_path,
                         ))
                     variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
+                    from .result_worker import photo_finish_step
+                    processed = photo_finish_step(
+                        str(variant_final), self._session.directory / f"output_variant_{variant_index:02d}_finish.png",
+                        getattr(self, "_finish", None)) or None
+                    if processed and processed.get("final"):
+                        variant_final = Path(processed["final"])
+                finish_rep = (processed or {}).get("finish_report") or {}
+                if finish_rep:
+                    from .photo_finish import note as _finish_note
+                    props.last_finish_note = _finish_note(finish_rep)
                 exported = export_result(
                     variant_final,
                     self._output_dir_at_start,
@@ -2759,6 +3374,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         shutil.copy2(variant_raw, raw_path(exported))
                     except Exception as exc:
                         print(f"[Wondful] 原始结果另存失败：{exc}")
+                if (processed or {}).get("clean"):
+                    # 1.2.4: the image before 照片质感 (hidden sidecar): 多角度 projects this one, not the grain
+                    try:
+                        shutil.copy2(processed["clean"], sidecar_path(exported, CLEAN_SUFFIX))
+                    except Exception as exc:
+                        print(f"[Wondful] 成片前图像另存失败：{exc}")
                 self._exported_by_variant[variant_index] = Path(exported)
                 self._exported_variant_records[variant_index] = variant
                 self._submit_layers(props, Path(exported))
@@ -2782,12 +3403,19 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         props.last_export_paths = json.dumps(exported_paths, ensure_ascii=False)
         try:
             props.result_image = load_image(str(best_exported), "Wondful_Result")
+            props.result_workflow = getattr(self, "_workflow_mode_at_start", "")
         except Exception:
             pass
 
     def execute(self, context):
         self._request_started_at = time.perf_counter()
         props = context.scene.wondful_ai
+        error = workflow_preflight(context, props)
+        if error:
+            _status(props, "ERROR", error)
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         planned_variant_count = render_variant_count(provider["id"], props)
@@ -2805,33 +3433,24 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             self.report({"ERROR"}, f"未检测到 {provider['label']} CLI。")
             return {"CANCELLED"}
 
-        if prompt_profiles.needs_target_refresh(props, prefs):
-            self.report({"WARNING"}, "生图引擎或提示词规则已变化，请先点‘适配当前引擎’重新生成提示词。")
-            return {"CANCELLED"}
         self._prompt_profile = prompt_profiles.metadata(provider["id"], provider["model"])
-        current_prompt = _get_prompt_text(props)
-        if not current_prompt:
-            self.report({"ERROR"}, "提示词为空。可以先输入简短需求，或点击重新生成提示词。")
-            return {"CANCELLED"}
-
-        current_style_revision = int(getattr(props, "style_reference_revision", 0))
+        current_style_revision = workflow.reference_revision(props)
         prompt_style_revision = int(getattr(props, "prompt_style_revision", 0))
         current_style_fingerprint = _reference_fingerprint(_reference_paths(props)["style"])
         self._style_fingerprint_at_render = current_style_fingerprint
-        fingerprint_relevant = bool(len(props.style_images) > 0 or getattr(props, "style_sync_initialized", False))
+        fingerprint_relevant = bool(bool(_reference_paths(props)["style"]) or getattr(props, "style_sync_initialized", False))
         policy_needs_refresh = needs_reference_policy_refresh(props)
         style_needs_refresh = bool(
             policy_needs_refresh
             or getattr(props, "style_prompt_dirty", False)
             or prompt_style_revision != current_style_revision
             or (fingerprint_relevant and str(getattr(props, "prompt_style_fingerprint", "")) != current_style_fingerprint)
-            or (len(props.style_images) > 0 and not bool(getattr(props, "style_sync_initialized", False)))
+            or (bool(_reference_paths(props)["style"]) and not bool(getattr(props, "style_sync_initialized", False)))
         )
+        current_prompt = workflow.render_text(props, references_changed=style_needs_refresh)
+        current_prompt += "\n\n" + workflow.contract(props)
         if style_needs_refresh:
-            message = ("参考职责已更新为产品造型、环境打光，请先重新生成提示词。" if policy_needs_refresh
-                       else "环境／风格参考图尚未与当前提示词同步，请先重新生成提示词。")
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
+            props.prompt_notice = "使用当前参考图；旧 AI 风格文案不会沿用，手写提示词保留。AI 润色可选。"
 
         # 2.19: Structure Lock no longer infers product meshes from the whole scene
         # or from red materials. When structure guides are enabled, one explicit
@@ -2909,6 +3528,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         color_source, appearance_lock_text, identity_items = _appearance_context(props)
         if structure.get("enabled") and identity_items:
             structure["identity_checklist"] = list(identity_items)
+        from .appearance_lock import identity_block
+        direct_identity_text = "\n".join(x for x in (appearance_lock_text, identity_block(identity_items)) if x)
         render_prompt = build_render_prompt(
             current_prompt,
             camera_w,
@@ -2928,6 +3549,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             identity_items=identity_items,
         )
         render_prompt = prompt_profiles.render_brief(render_prompt, provider["id"])
+        # 1.2.8 地面分带: the ④ analysis' ground bands go into the request itself, so every image of a 张数 > 1
+        # request (direct or codex exec) is told the same road / curb / shoulder banding
+        sb_band_line = _sb_ground_band_line(context, props)
+        if sb_band_line and sb_band_line not in render_prompt:
+            render_prompt = render_prompt.rstrip() + "\n" + sb_band_line + "\n"
         structure_refs = list(structure.get("generation_reference_paths", [])) if structure.get("enabled") else []
         camera_base = str(structure.get("camera_base_path") or self._session.viewport_reference)
         # Two free slots are needed if a later strict repair adds a candidate and
@@ -2994,6 +3620,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         # 3.2.1: Codex 图像编辑（直连）— edit the camera base with the hosted
         # image_generation tool; any failure falls back to the codex exec agent.
         self._direct_state = None
+        self._collage_merged = 0
         props.last_engine_note = ""
         self._layers = self._layers_spec(context, props, prefs, provider)
         self._detail = self._detail_spec(context, props)
@@ -3014,6 +3641,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_terrain_text = ""
             direct_massing_text = ""
             direct_building_refs = []
+            direct_scene_reference = ""
+            scene_reference_note = ""
             from .product_kind import is_vehicle as _is_vehicle
             try:
                 direct_vehicle = _is_vehicle(props)
@@ -3025,6 +3654,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 direct_keep_text = keep_prompt(direct_vehicle, self._detail.get("keep_texts") or ())
             direct_state["vehicle"] = direct_vehicle
             if bool(getattr(prefs, "codex_direct_simple", True)):
+                source_reference, scene_reference_note = _sb_generation_reference(context, props)
+                if source_reference:
+                    try:
+                        copied_reference = copy_references(
+                            [source_reference], self._session, "scene_layout_reference")
+                        if not copied_reference:
+                            raise OSError("已记录的参考副本不可用")
+                        direct_scene_reference = str(copied_reference[0])
+                    except OSError as exc:
+                        scene_reference_note = f"场景参考复制失败：{exc}"
                 clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
                 try:
                     from .viewport_capture import render_clay_base, LAST_CLAY_INFO
@@ -3049,15 +3688,36 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面"
                                                    + (f" · 建筑参考 {len(direct_building_refs)} 张" if direct_building_refs else "")
                                                    if massing_coll else "")
-                        direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
+                        direct_simple_brief = current_prompt
                 except Exception as exc:
                     print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
                 if direct_simple_brief is None and Path(self._session.viewport_reference).is_file():
                     direct_simple_base = str(self._session.viewport_reference)
-                    direct_simple_brief = (getattr(props, "scene_brief", "") or "").strip()
+                    direct_simple_brief = current_prompt
+            # 1.2.6 风格与光线锁定: the ④ analysis' 画风 (voxel, cartoon…) / night lighting also locks the 主视角
+            direct_style_text = ""
+            if direct_simple_brief is not None:
+                try:
+                    from .scene_style import master_lock as _master_lock
+                    from .multiview import scene_blockout_exists as _sb_exists
+                    from .massing import SB_TEXT as _SB_TEXT
+                    _txt = bpy.data.texts.get(_SB_TEXT)
+                    if workflow.is_reference(props) and _txt is not None and _sb_exists(context.scene):
+                        direct_style_text = _master_lock(json.loads(_txt.as_string()), direct_simple_brief or "")
+                except Exception as exc:
+                    print(f"[Wondful] 风格锁定读取失败：{exc}")
+            if sb_band_line and sb_band_line not in direct_style_text:     # 1.2.8 地面分带 (simple path prompt)
+                direct_style_text = (direct_style_text + "\n" + sb_band_line).strip()
+            direct_state["style_lock"] = direct_style_text[:200]
+            direct_state["ground_bands"] = bool(sb_band_line)
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
             direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
                                              for r in direct_building_refs]
+            direct_state["scene_reference"] = Path(direct_scene_reference).name if direct_scene_reference else ""
+            direct_state["scene_reference_note"] = scene_reference_note
+            if scene_reference_note:
+                props.last_massing_note = (str(getattr(props, "last_massing_note", "") or "")
+                                           + " · " + scene_reference_note).strip(" ·")
 
             def _direct_status(text):
                 self._phase = text
@@ -3072,6 +3732,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     massing_text=direct_massing_text,
                     building_refs=direct_building_refs or None,
                     keep_text=direct_keep_text,
+                    style_text=direct_style_text,
+                    identity_text=direct_identity_text,
+                    scene_reference_path=direct_scene_reference,
                 )
         if self._detail and not Path(self._detail["detail"]).is_file():
             # no clay base this run (other canvas / provider): render the detail pass on its own
@@ -3124,10 +3787,13 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 except Exception as exc:
                     print(f"[Wondful] 轮廓验收：产品遮罩渲染失败：{exc}")
             if not gate_mask:
-                props.last_iou_note = "轮廓验收需要先在 ② 选择产品集合，本次未验收、未自动重生成"
+                props.last_iou_note = "轮廓验收需要先在首步选择车模集合，本次未验收、未自动重生成"
         else:
             gate_max = 1
         self._gate_mask = gate_mask
+        # 1.2.4 照片质感 (高级 › 成片): last step on the final canvas; the product mask protects saturation
+        self._finish = {"level": str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE"),
+                        "mask": gate_mask or (self._detail or {}).get("mask", "") or (self._layers or {}).get("mask", "")}
         # numpy result processing runs on the worker; the old main-thread path stays for the
         # opt-in identity hard restore (it needs Blender's image loader)
         worker_post = not (identity_hard_restore and identity_possible)
@@ -3138,14 +3804,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         provider_label = provider["label"]
         render_timeout = int(provider["render_timeout"])
         audit_timeout = int(provider["audit_timeout"])
-        planned_attempts = max(1, int(prefs.alignment_max_attempts if auto_alignment_retry else 1))
-        if gate_mask:
-            planned_attempts = gate_max     # regenerations are decided by the IoU gate only
+        # 1.2.5: 「最多生成次数」 (preferences) caps every regeneration path, the IoU gate included
+        planned_attempts = result_worker.generation_budget(
+            getattr(prefs, "alignment_max_attempts", result_worker.GATE_MAX), gate_on=bool(gate_mask),
+            gate_max=gate_max, strict_retry=auto_alignment_retry)
         self._provider_id = provider_id
         self._provider_label = provider_label
         timing_suffix = "strict" if auto_alignment_retry else ("fast" if render_mode == "FAST" else "standard")
         variant_count = render_variant_count(provider_id, props)
         self._variant_count = variant_count
+        print("[Wondful] " + result_worker.call_budget_note(
+            variant_count, planned_attempts,
+            crop_regen=result_worker.crop_regen_allowed(getattr(prefs, "alignment_max_attempts", 3))))
         self._completed_variants = Queue()
         self._exported_by_variant = {}
         self._exported_variant_records = {}
@@ -3243,6 +3913,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 variant_best_canvas = None
                 variant_best_rank = (False, -1)
                 correction = ""
+                low_retry_used = False      # 1.2.4: one retry when the backend reports quality "low"
                 for attempt_index in range(1, planned_attempts + 1):
                     candidate = self._session.directory / f"output_candidate_v{variant_index:02d}_a{attempt_index:02d}.png"
                     attempt_prompt = effective_render_prompt + (
@@ -3326,12 +3997,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                 try:
                                     partial["processed"] = result_worker.finish_variant(
                                         str(variant_best_path), variant_index, self._detail, camera_w, camera_h,
-                                        session_dir)
+                                        session_dir, finish=self._finish)
                                 except Exception as exc:
                                     print(f"[Wondful] 结果处理失败（改在主线程处理）：{exc}")
                             self._completed_variants.put(partial)
                         raise
                     generation_seconds = time.time() - generation_started
+                    if self._direct_state is None and isinstance(generation, dict):
+                        # 1.2.7 参考图拼图 on the proxy / AGY path (the direct path counts it in its state)
+                        self._collage_merged = int(getattr(self, "_collage_merged", 0)) + int(
+                            ((generation.get("collage") or {}).get("merged")) or 0)
                     total_generation_seconds += generation_seconds
                     canvas = assess_canvas(image_dimensions(candidate), (camera_w, camera_h))
 
@@ -3373,6 +4048,11 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             detail_path=(self._detail or {}).get("detail", ""))
                         print(f"[Wondful] 轮廓验收 v{variant_index} a{attempt_index}: IoU {gate_rep.get('iou')} "
                               f"{gate_rep.get('verdict')}")
+                    tier = str((generation or {}).get("image_quality", "") or "") if isinstance(generation, dict) else ""
+                    if tier:
+                        print(f"[Wondful] 画质档 v{variant_index} a{attempt_index}: {tier}")
+                    if gate_rep is not None:
+                        gate_rep["image_quality"] = tier
 
                     record = {
                         "iou_gate": gate_rep,
@@ -3388,6 +4068,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         "generation": generation,
                         "generation_seconds": generation_seconds,
                         "audit_seconds": (audit_seconds if auto_alignment_retry and audit is not None else 0.0),
+                        "image_quality": tier,
                     }
                     attempts.append(record)
                     variant_attempts.append(record)
@@ -3408,6 +4089,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         if gate_rep is None or gate_rep.get("iou") is None:
                             break       # cannot judge this file: never burn quota blindly
                         if gate_rep.get("passed"):
+                            if result_worker.low_tier_retry(tier, attempt_index, planned_attempts, low_retry_used):
+                                # 1.2.4: passed but the backend gave the "low" tier (smeared / worm texture):
+                                # one fresh generation inside the same budget; the better tier wins if it passes too
+                                low_retry_used = True
+                                print(f"[Wondful] 画质档 low：第 {variant_index} 张重新生成 1 次（不超过最多生成次数）")
+                                continue
                             break       # the first generation that passes stops
                         continue        # fresh regeneration from the original base, never a repair
                     if not auto_alignment_retry:
@@ -3433,6 +4120,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 }
                 if gate_mask:
                     variant["iou_gate"] = _gate_summary(variant_attempts, len(variant_attempts) >= planned_attempts)
+                    variant["iou_gate"]["low_tier_retry"] = low_retry_used
                 if worker_post:
                     self._phase = f"处理第 {variant_index}/{variant_count} 张（细节检查 / 还原度）"
 
@@ -3441,7 +4129,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     try:
                         variant["processed"] = result_worker.finish_variant(
                             str(variant_best_path), variant_index, self._detail, camera_w, camera_h, session_dir,
-                            cancel_check=is_cancellation_requested, on_status=_detail_status)
+                            cancel_check=is_cancellation_requested, on_status=_detail_status, finish=self._finish)
                     except result_worker.Cancelled:
                         raise RuntimeError("任务已取消")
                     except Exception as exc:
@@ -3547,6 +4235,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             if getattr(self, "_direct_state", None) is not None:
                 from .codex_direct import engine_note
                 props.last_engine_note = engine_note(self._direct_state)
+            elif int(getattr(self, "_collage_merged", 0) or 0):
+                props.last_engine_note = f"已拼合 {int(self._collage_merged)} 张参考图"
             if self._error:
                 exc, _tb = self._error
                 if isinstance(exc, AntigravityNotLoggedInError):
@@ -3799,7 +4489,16 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
         ]
     )
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
+    append_to_set: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
         selected = []
@@ -3815,7 +4514,7 @@ class WONDFUL_OT_load_reference(Operator, ImportHelper):
         # STYLE upload means "replace the current style set". In 2.17 this
         # button appended new images behind the first upload, while the first
         # image remained the hard-coded primary style forever.
-        if self.ref_kind == "STYLE":
+        if self.ref_kind == "STYLE" and not self.append_to_set:
             added, failures = _replace_style_set(props, selected)
             if len(selected) > MAX_REFERENCES_PER_KIND:
                 self.report({"WARNING"}, f"风格参考最多 {MAX_REFERENCES_PER_KIND} 张，多余图片未添加。")
@@ -3869,10 +4568,20 @@ class WONDFUL_OT_paste_reference(Operator):
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
+    item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
+    append_to_set: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
-        if self.ref_kind not in {"STYLE", "PRODUCT"} and len(collection) >= MAX_REFERENCES_PER_KIND:
+        if self.ref_kind not in {"STYLE", "PRODUCT"} and self.item_index < 0 and len(collection) >= MAX_REFERENCES_PER_KIND:
             self.report({"WARNING"}, f"每类参考图最多 {MAX_REFERENCES_PER_KIND} 张。")
             return {"CANCELLED"}
         clipboard_dir = CONFIG_DIR / "clipboard"
@@ -3880,7 +4589,17 @@ class WONDFUL_OT_paste_reference(Operator):
         destination = clipboard_dir / f"clipboard_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
         try:
             path = save_clipboard_image(destination)
-            if self.ref_kind == "STYLE":
+            if self.ref_kind != "PRODUCT" and self.item_index >= 0:
+                if self.item_index >= len(collection):
+                    raise RuntimeError("该参考图已被移除")
+                image = _load_reference_image(path)
+                collection[self.item_index].image = image
+                collection[self.item_index].source_path = str(path)
+                _mark_reference_changed(props, self.ref_kind)
+            elif self.ref_kind == "STYLE" and self.append_to_set:
+                _append_reference_from_path(props, "STYLE", path)
+                _mark_reference_changed(props, "STYLE")
+            elif self.ref_kind == "STYLE":
                 added, failures = _replace_style_set(props, [path])
                 if not added:
                     raise RuntimeError(failures[0] if failures else "无法读取剪贴板风格图")
@@ -3895,20 +4614,28 @@ class WONDFUL_OT_paste_reference(Operator):
         except Exception as exc:
             self.report({"ERROR"}, f"粘贴参考图失败：{exc}")
             return {"CANCELLED"}
-        self.report({"INFO"}, "已从剪贴板添加参考图。")
+        self.report({"INFO"}, "参考图已更新")
         return {"FINISHED"}
 
 
 class WONDFUL_OT_replace_reference(Operator, ImportHelper):
     bl_idname = "wondful.replace_reference"
     bl_label = "替换参考图"
+    bl_description = '只替换当前卡片的图片，保留其他参考图'
 
     filename_ext = ""
     filter_glob: StringProperty(default="*.png;*.jpg;*.jpeg;*.webp", options={"HIDDEN"})
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if idx < 0:
@@ -3927,11 +4654,19 @@ class WONDFUL_OT_replace_reference(Operator, ImportHelper):
 class WONDFUL_OT_clear_reference(Operator):
     bl_idname = "wondful.clear_reference"
     bl_label = "删除参考图"
+    bl_description = '只移除当前参考卡片，不删除原始图片文件'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if idx >= 0:
@@ -3944,10 +4679,18 @@ class WONDFUL_OT_clear_reference(Operator):
 class WONDFUL_OT_clear_all_references(Operator):
     bl_idname = "wondful.clear_all_references"
     bl_label = "清空本类参考图"
+    bl_description = '清空本类参考图，不删除原始文件'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr = _collection_and_index(props, self.ref_kind)
         had_items = bool(collection)
@@ -3961,12 +4704,20 @@ class WONDFUL_OT_clear_all_references(Operator):
 class WONDFUL_OT_move_reference(Operator):
     bl_idname = "wondful.move_reference"
     bl_label = "调整参考图顺序"
+    bl_description = '调整当前参考顺序，第一张为主参考'
 
     ref_kind: EnumProperty(items=[("PRODUCT", "产品", ""), ("PERSON", "人物", ""), ("STYLE", "风格", "")])
     direction: EnumProperty(items=[("UP", "前移", ""), ("DOWN", "后移", "")])
     item_index: IntProperty(default=-1, options={"HIDDEN", "SKIP_SAVE"})
 
+    @classmethod
+    def poll(cls, context):
+        return not _ACTIVE_LOCK.locked() and context.scene.wondful_ai.status not in workflow.BUSY
+
     def execute(self, context):
+        if _ACTIVE_LOCK.locked() or context.scene.wondful_ai.status in workflow.BUSY:
+            self.report({"WARNING"}, "任务进行中，暂不能修改参考图")
+            return {"CANCELLED"}
         props = context.scene.wondful_ai
         collection, index_attr, idx = _resolve_reference_index(props, self.ref_kind, self.item_index)
         if len(collection) < 2 or idx < 0:
@@ -4202,6 +4953,13 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         from .layered_output import resize
         scene = context.scene
         props = scene.wondful_ai
+        identity_error = identity_preflight(props)
+        if identity_error:
+            self.report({"ERROR"}, identity_error)
+            return {"CANCELLED"}
+        if not workflow.is_reference(props):
+            self.report({"ERROR"}, "多角度扩展属于「参考图复刻」，请先切换模式")
+            return {"CANCELLED"}
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
         if provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True)):
@@ -4216,9 +4974,9 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             self.report({"ERROR"}, "主视角图不存在：请先渲染主视角，或选择一张已满意的主视角图。")
             return {"CANCELLED"}
         coll = getattr(props, "product_collection", None)
-        if coll is None:
-            self.report({"ERROR"}, "多角度场景一致需要先在 ② 选择产品集合。")
-            return {"CANCELLED"}
+        # 1.2.7 纯场景多角度 (PC test: a street / night scene without a product could not use 多角度): no product
+        # collection → empty product mask, no occlusion move, no product gate / 细节修复 / 轮廓验收
+        no_product = coll is None
         plan = views_plan(props) if self.from_plan else {}
         if self.from_plan and (not plan or plan["cameras"][0] != master.name):
             props.views_plan = ""
@@ -4253,26 +5011,72 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         # 1.2.3: the pool (passes, prompts, pool.json, accepted views reused next time) is internal → hidden folder
         pool = internal_dir(out_dir, "多角度场景一致", f"{MV.safe_name(scene.name)}_{MV.safe_name(master.name)}")
         massing_coll = _find_massing(scene, props)
+        # 1.2.5 细节粗模: project onto the measured detail blockout (when ④ 精确模式 built one)
+        detail_mode = ""
+        if bool(getattr(props, "sb_detail_carrier", True)):
+            from .detail_blockout import find_carrier as _find_carrier
+            if _find_carrier(scene) is not None:
+                detail_mode = "clay" if bool(getattr(props, "sb_detail_clay", False)) else "carrier"
+                if bool(getattr(props, "sb_detail_skyline", False)):
+                    detail_mode += "+sky"   # 远山剪影: measured far silhouette instead of the LLM 远景带
         made, wlog = [], {}
         old_cam = scene.camera
         views = {}
+        cam_snaps = []          # 1.2.6 被遮挡就调视角: cameras moved for the passes, restored in ``finally``
+        occlusion = {}
         t_prep = time.time()
+        # 1.2.5 场景补全: the ④ blockout already continues the street → no filler buildings, style fill per pixel
+        completion = None
+        has_inferred = False
+        try:
+            from . import detail_blockout as _DBc
+            has_inferred = _DBc.find_inferred(scene) is not None
+            completion = _DBc.completion_layout(scene)
+        except Exception as exc:
+            print(f"[Wondful] 多角度场景一致：读取场景补全失败：{exc}")
+        # 1.2.8 地面分带: measured from the 主视角 image + its position pass right after the master pass, built into the
+        # 场景粗模 (temporary, removed with the other 多角度补充 geometry) before the other cameras' passes
+        bands_on = bool(getattr(props, "sb_ground_bands", True))
+        bands_info = {}
+        bands_note = ""
         try:
             if bool(getattr(props, "mv_widen", True)) and massing_coll is not None:
                 try:
-                    made, wlog = MV.widen_blockout(context, massing_coll, coll, master)
+                    made, wlog = MV.widen_blockout(context, massing_coll, coll, master, fillers=not has_inferred)
                 except Exception as exc:
                     print(f"[Wondful] 多角度场景一致：加宽体块失败：{exc}")
+            avoid = bool(getattr(props, "mv_avoid_occlusion", True))
             for cam in [master] + others:
                 scene.camera = cam
                 context.view_layer.update()
                 pre = pool / MV.safe_name(cam.name)
+                if cam != master and avoid and not no_product:
+                    # 1.2.6: ray-check the product through the blockout BEFORE any image call; move the camera
+                    # (temporarily — restored below, the pose used is recorded) or skip it
+                    try:
+                        snap = MV.snapshot_camera(cam)
+                        occ = MV.adjust_camera_for_occlusion(context, cam, coll)
+                        if occ.get("status") == "adjusted":
+                            cam_snaps.append(snap)
+                        occlusion[cam.name] = occ
+                        if occ.get("message"):
+                            print(f"[Wondful] 多角度场景一致：{occ['message']}")
+                        if occ.get("status") == "blocked":
+                            views[cam.name] = {"name": cam.name, "cam": MV.scene_camera_record(scene, cam),
+                                               "occluded": occ, "obstacle": 1.0, "hidden": 1.0,
+                                               "files": {}, "prefix": str(pre), "geometry": "llm", "massing_text": ""}
+                            continue
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：遮挡调机位失败：{exc}")
                 files = {k: f"{pre}_{k}.png" for k in ("clay", "mask", "detail", "keep", "matid")}
                 ok = render_clay_base(context, files["clay"], coll, ground=getattr(props, "clay_ground", "AUTO"),
                                       crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
                                       terrain=settings_from_props(props), mask_path=files["mask"], massing=massing_coll,
                                       detail_path=files["detail"], keep_path=files["keep"], matid_path=files["matid"],
-                                      geometry_prefix=str(pre), geometry_size=(ww, wh))
+                                      geometry_prefix=str(pre), geometry_size=(ww, wh), detail=detail_mode)
+                if ok and no_product:      # pure scene: an empty product mask (nothing protected, nothing gated)
+                    from .png_io import write_png as _wp
+                    _wp(files["mask"], np.zeros((H, W, 4), np.uint8))
                 if not ok or not LAST_CLAY_INFO.get("geometry") or not Path(files["mask"]).is_file():
                     raise RuntimeError(f"相机 {cam.name} 的白模 / 几何通道渲染失败")
                 m = read_png(files["mask"]).astype(np.float32)
@@ -4280,29 +5084,75 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 np.save(f"{pre}_maskw.npy", np.clip(resize(m, ww, wh), 0, 1).astype(np.float32))
                 rec = MV.scene_camera_record(scene, cam)
                 blocked = hidden = 0.0
-                if cam != master:
+                if cam != master and not no_product:
                     try:
                         blocked, hidden = MV.obstacle(context, cam, coll)
                     except Exception as exc:
                         print(f"[Wondful] 多角度场景一致：遮挡检查失败：{exc}")
+                if detail_mode and LAST_CLAY_INFO.get("detail_blockout") != "carrier":
+                    print(f"[Wondful] 多角度场景一致：{cam.name} 没用上细节粗模（{LAST_CLAY_INFO.get('detail_blockout') or '无'}）")
                 views[cam.name] = {"name": cam.name, "cam": rec, "files": files, "prefix": str(pre),
+                                   "geometry": "detail" if LAST_CLAY_INFO.get("detail_blockout") == "carrier" else "llm",
                                    "massing_text": str(LAST_CLAY_INFO.get("massing_text", "") or ""),
                                    "obstacle": round(blocked, 3), "hidden": round(hidden, 3)}
+                if cam.name in occlusion:
+                    views[cam.name]["occlusion"] = occlusion[cam.name]
+                if cam == master and bands_on and others:
+                    try:
+                        from . import ground_bands as GB
+                        bands_info = GB.measure_master(master_img, pool, pre, rec, W, H, ww, wh,
+                                                       product_box=MV.product_bounds(coll) if coll is not None else None,
+                                                       completion=completion, analysis=_mv_analysis(massing_coll, coll))
+                        if bands_info:
+                            cam_xy = [tuple(o.matrix_world.translation)[:2] for o in [master] + others]
+                            got = GB.build_geometry(context, massing_coll, bands_info, cam_xy)
+                            made.extend(got)
+                            context.view_layer.update()
+                            bands_info["geometry"] = sum(1 for b in got if isinstance(b, bpy.types.Object))
+                            bands_note = GB.summary(bands_info)
+                            print(f"[Wondful] 多角度场景一致：{bands_note}")
+                        else:
+                            print("[Wondful] 多角度场景一致：主视角地面没有明显分带（沿用整体地面锁定）")
+                    except Exception as exc:
+                        bands_info = {}
+                        print(f"[Wondful] 多角度场景一致：地面分带测量失败：{exc}")
         except Exception as exc:
             self.report({"ERROR"}, f"多角度场景一致准备失败：{exc}")
             props.last_mv_note = f"多角度场景一致准备失败：{exc}"
             return {"CANCELLED"}
         finally:
             scene.camera = old_cam
+            for snap in reversed(cam_snaps):
+                MV.restore_camera(snap)
             MV.remove_aux(made)
             try:
                 context.view_layer.update()
             except Exception:
                 pass
+        # 1.2.6: the ④ analysis (scene kind, style words) — outdoor never gets 室内 wording / 房间 light
+        sb_kind, sb_analysis = "", {}
+        try:
+            from . import massing as _MSk
+            if massing_coll is not None:
+                sb_kind = _MSk.blockout_kind(_MSk.massing_objects(massing_coll, coll))
+            _txt = bpy.data.texts.get(_MSk.SB_TEXT)
+            if _txt is not None and sb_kind:
+                sb_analysis = json.loads(_txt.as_string())
+        except Exception as exc:
+            print(f"[Wondful] 多角度场景一致：读取场景分析失败：{exc}")
+        outdoor = True if sb_kind == "outdoor" else (False if sb_kind == "interior" else None)
+        geo_kind = views[master.name].get("geometry", "llm")      # 1.2.5: "detail" = projected onto the 细节粗模
+        if geo_kind == "detail":
+            print("[Wondful] 多角度场景一致：投影承载面 = 细节粗模"
+                  + ("（白模也用细节粗模）" if detail_mode.startswith("clay") else "")
+                  + (" + 远山剪影" if LAST_CLAY_INFO.get("detail_skyline") else
+                     ("（远山剪影不可用，沿用 AI 远景带）" if detail_mode.endswith("+sky") else "")))
         centre = None
-        b = MV.product_bounds(coll)
+        b = MV.product_bounds(coll) if coll is not None else None
         if b is not None:
             centre = [(b[0].x + b[1].x) / 2, (b[0].y + b[1].y) / 2, (b[0].z + b[1].z) / 2]
+        elif no_product:      # pure scene: views are ordered around the point the 主视角 looks at (12 m ahead)
+            centre = MV.scene_pivot(master)
         if plan:      # ⑥ 渲染视角: the user's list order (each view still reuses every view accepted before it)
             order = [views[o.name]["cam"] for o in others]
         else:
@@ -4315,7 +5165,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             vehicle = False
         keep_text = ""
         try:
-            slots, texts = keep_exact_slots(coll), keep_exact_texts(coll)
+            slots, texts = (keep_exact_slots(coll), keep_exact_texts(coll)) if coll is not None else ({}, ())
             if slots or texts:
                 from .detail_paste import keep_prompt
                 keep_text = keep_prompt(vehicle, texts or ())
@@ -4327,13 +5177,20 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         model = str(getattr(prefs, "codex_model", "") or "")
         client_version = str(getattr(props, "codex_cli_version", "") or "")
         size = CD.choose_edit_size(W, H, int(getattr(prefs, "long_edge", 2048) or 2048))
-        paste = bool(getattr(props, "detail_paste", True))
+        paste = bool(getattr(props, "detail_paste", True)) and not no_product
         colour_fix = bool(getattr(props, "detail_colour_fix", True))
         strength = float(getattr(props, "detail_paste_strength", 0.8))
         colour_strength = float(getattr(props, "detail_colour_strength", 0.7)) if colour_fix else 0.0
         env_check = bool(getattr(props, "mv_env_check", True))
+        grade_on = bool(getattr(props, "mv_colour_match", True))      # 1.2.4 统一调色
+        seam_on = bool(getattr(props, "sb_seam_blend", True))         # 1.2.5 重叠衔接 (补全填色与投影的接缝)
+        finish_level = str(getattr(props, "photo_finish", "SUBTLE") or "SUBTLE")   # 1.2.4 照片质感
         detail_edit = None
-        if paste:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
+        from .result_worker import crop_regen_allowed as _crop_ok
+        paste_regen = _crop_ok(getattr(prefs, "alignment_max_attempts", 3))   # 1.2.5: 最多生成次数 = 1 → paste only
+        from .multiview import camera_calls as _camera_calls
+        mv_calls = _camera_calls(getattr(prefs, "alignment_max_attempts", 2))  # per camera, ≤ 最多生成次数
+        if paste and paste_regen:   # 1.2.3 细节修复: failed parts regenerated through the same Codex direct edit
             try:
                 from .cli_transport import is_cancellation_requested as _mv_cancel
                 from .detail_refine import make_edit_fn
@@ -4344,13 +5201,15 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
         self._mv = {"out_dir": out_dir, "pool": pool, "scene": scene.name, "views": views, "skipped": skipped,
                     "widen": wlog, "prep_seconds": round(time.time() - t_prep, 1), "master": master.name,
-                    "plan": plan}
+                    "ground_bands": bands_note,
+                    "plan": plan, "no_product": no_product}
         self._phase = f"多角度场景一致 · 视角 2/{len(others) + 1}：准备完成" if plan else "多角度场景一致：准备完成"
         self._estimated_total = 15.0 + 80.0 * len(others)
         _status(props, "RENDERING")
         props.progress = 0.05
         props.last_mv_note = "多角度场景一致：生成中…"
         master_name = master.name
+        scene_geometry_key = MV.scene_geometry_key(context)
 
         def job():
             import numpy as np
@@ -4360,17 +5219,25 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             t0 = time.time()
             mv = views[master_name]
             master_png = pool / "master.png"
-            if not RW.fit_to_canvas(master_img, master_png, W, H):
+            from .photo_finish import clean_source
+            # 1.2.4: the 主视角 before 照片质感 (its grain must not be projected / stretched into other views)
+            if not RW.fit_to_canvas(clean_source(master_img), master_png, W, H):
                 raise RuntimeError("主视角图无法读取（请用 PNG）")
             entry_m = {"name": master_name, "cam": mv["cam"], "pos": Path(mv["prefix"] + "_pos.npy").name,
                        "nrm": Path(mv["prefix"] + "_nrm.npy").name, "mask": Path(mv["prefix"] + "_maskw.npy").name,
-                       "image": master_png.name, "master": True}
+                       "image": master_png.name, "master": True, "geometry": geo_kind}
             data = MV.read_pool(pool)
-            reused = [e for e in data.get("views", []) if not e.get("master") and e["name"] not in views
-                      and (pool / e.get("image", "")).is_file() and (pool / e.get("pos", "")).is_file()]
+            context_key = MV.cache_key(
+                "pool-v2", scene_geometry_key, MV.file_md5(master_png), mv["cam"], geo_kind,
+                [MV.file_md5(pool / entry_m[k]) for k in ("pos", "nrm", "mask")],
+                sb_analysis, bands_info, brief, size, paste, strength, colour_strength,
+                grade_on, seam_on, detail_mode, model)
+            reused = MV.reusable_views(data, context_key, pool, views, geo_kind)
+            # 1.2.5: AI-from-AI views (hop ≥ 2) stay in the pool but are not projected again
+            reused_src = [e for e in reused if MV.usable_source(e)]
             light, light_note = None, ""
             lp = pool / MV.LIGHT_FILE
-            key = MV.file_md5(master_png)
+            key = MV.cache_key("light-v2", MV.file_md5(master_png), mv["cam"], model)
             try:
                 cached = json.loads(lp.read_text(encoding="utf-8")) if lp.is_file() else {}
             except (OSError, ValueError):
@@ -4390,16 +5257,66 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 except Exception as exc:
                     light_note = f"光照估计失败（未锁定光照）：{str(exc)[:60]}"
             master_view = MV.load_view(pool, entry_m)
-            sources = [master_view] + [MV.load_view(pool, e) for e in reused]
+            sources = [master_view] + [MV.load_view(pool, e) for e in reused_src]
+            # 1.2.6 风格与光线锁定: the 主视角's measured look (night, light sources, their colours) + the analysis words
+            style, style_line = {}, ""
+            try:
+                style = MV.master_style(master_view["img"], master_view.get("sky"), master_view["mask"])
+                style_line = MV.style_lock_text(style, sb_analysis, light, brief=brief)
+                print(f"[Wondful] 多角度场景一致：主视角风格 {style}")
+            except Exception as exc:
+                print(f"[Wondful] 多角度场景一致：主视角风格读取失败：{exc}")
+            night = bool(style.get("night"))
+            ground_line = ""
+            mground = {}
+            try:     # 1.2.7 地面锁定: the 主视角's ground material / colour goes into every view's prompt
+                mground = MV.master_ground(master_view)
+                ground_line = MV.ground_lock_text(sb_analysis, mground)
+            except Exception as exc:
+                print(f"[Wondful] 多角度场景一致：地面锁定读取失败：{exc}")
+            band_sy = None
+            band_dry = True
+            if bands_info:      # 1.2.8 地面分带: one texture per band, rectified from the 主视角
+                try:
+                    from . import ground_bands as GB
+                    band_sy = GB.band_synths(GB.band_patches(master_view, bands_info))
+                    band_dry = not MV._WET.search(json.dumps(sb_analysis, ensure_ascii=False) if sb_analysis else "")
+                    (pool / "ground_bands.json").write_text(json.dumps(bands_info, ensure_ascii=False, indent=1,
+                                                                       default=float), encoding="utf-8")
+                except Exception as exc:
+                    print(f"[Wondful] 多角度场景一致：地面分带取样失败：{exc}")
+                    band_sy = None
+            patches = None
+            fill_words = ""
+            if completion:
+                try:
+                    patches = MV.master_patches(master_view, completion)
+                    for k, pimg in enumerate(patches.get("facade") or []):
+                        write_png(str(pool / f"_fill_facade_{k}.png"), np.clip(pimg, 0, 255).astype(np.uint8))
+                    for key in ("road", "side", "veg"):
+                        if patches.get(key) is not None:
+                            write_png(str(pool / f"_fill_{key}.png"), np.clip(patches[key], 0, 255).astype(np.uint8))
+                    from .scene_complete import describe as _describe
+                    fill_words = _describe(completion.get("stats") or {})
+                except Exception as exc:
+                    print(f"[Wondful] 多角度场景一致：主视角材质取样失败：{exc}")
+                    patches = None
             results = []
             accepted = [entry_m] + reused
             stop = None
             for i, rec in enumerate(order, start=1):
                 v = views[rec["name"]]
                 res = {"name": rec["name"], "ok": False, "calls": 0, "obstacle": v["obstacle"], "hidden": v["hidden"]}
+                if v.get("occlusion"):
+                    res["occlusion"] = v["occlusion"]
                 results.append(res)
                 if stop:
                     res["error"] = stop
+                    continue
+                if v.get("occluded"):      # 1.2.6: no clear pose → no image call
+                    res["occlusion"] = v["occluded"]
+                    res["error"] = "产品被遮挡，已跳过/请调整相机"
+                    res["skipped_occluded"] = True
                     continue
                 if cancelled():
                     raise RuntimeError("任务已取消")
@@ -4412,10 +5329,58 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 mfull = read_png(v["files"]["mask"]).astype(np.float32)
                 mfull = (mfull[..., 3] if mfull.shape[-1] == 4 else mfull[..., 0]) / 255.0
                 env, cover, _srcmap, st = MV.build_base(vk, sources, resize(clay_full, ww, wh))
+                fill_line = ""
+                fimg = have = cmap = band_bi = None
+                if patches is not None:      # 1.2.5 场景补全: uncovered pixels take a master style patch
+                    try:
+                        cmap, sty = MV.class_map(vk, completion)
+                        fimg, have = MV.style_fill(vk, cmap, sty, patches, completion)
+                    except Exception as exc:
+                        fimg = have = cmap = None
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 补全填色失败：{exc}")
+                if band_sy:                  # 1.2.8 地面分带: uncovered ground takes its own band's texture
+                    try:
+                        from . import ground_bands as GB
+                        fimg, have, cmap, band_bi = GB.band_fill(vk, bands_info, band_sy, fimg, have, cmap)
+                    except Exception as exc:
+                        band_bi = None
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 地面分带填色失败：{exc}")
+                if have is not None:
+                    try:
+                        env, cover, filled = MV.apply_fill(env, cover, fimg, have, cls=cmap, seam=seam_on)
+                        envm = np.asarray(vk["mask"]) < 0.5
+                        st["fill"] = round(float((filled & envm).sum()) / max(1, int(envm.sum())), 3)
+                        if patches is not None:
+                            fill_line = MV.fill_note(cmap, filled & envm, fill_words)
+                        if band_bi is not None:
+                            from . import ground_bands as GB
+                            bshare = float((filled & envm & (band_bi >= 0)).sum()) / max(1, int(envm.sum()))
+                            st["band_fill"] = round(bshare, 3)
+                            bnote = GB.fill_note(bshare)
+                            if bnote:
+                                fill_line = (fill_line + "\n" + bnote) if fill_line else bnote
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 补全填色失败：{exc}")
+                view_ground = ground_line
+                if bands_info:
+                    try:
+                        from . import ground_bands as GB
+                        bstats = GB.view_stats(vk, bands_info, band_bi)
+                        view_ground = MV.ground_lock_text(sb_analysis, mground,
+                                                          bands=GB.lock_addition(bands_info, bstats, dry=band_dry))
+                        res["ground_bands"] = {"bands": [b.get("zh") for b in bands_info.get("bands", [])],
+                                               "stats": bstats, "fill": st.get("band_fill", 0.0)}
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 地面分带描述失败：{exc}")
+                st["hop"] = MV.view_hop(st, sources)
                 base = pre + "_base.png"
                 write_png(base, np.rint(MV.compose_canvas(env, cover, clay_full, mfull)).astype(np.uint8))
                 res["projection"] = st
-                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec), [s["name"] for s in sources])
+                text = MV.view_text(v["massing_text"], MV.light_sentence(light, rec, outdoor=outdoor),
+                                    [s["name"] for s in sources], fill_line=fill_line, style_line=style_line,
+                                    ground_line=view_ground)
+                res["prompt_interior"] = "室内物体" in text
+                res["style"] = {"night": night, "colours": style.get("colours", []), "emissive": style.get("emissive")}
                 Path(pre + "_prompt.txt").write_text(text, encoding="utf-8")
                 work = Path(pre + "_work")
                 work.mkdir(exist_ok=True)
@@ -4425,14 +5390,14 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                         "edit_fn": detail_edit, "vehicle": vehicle}
                 matid = spec["matid"] if spec["matid"] and Path(spec["matid"]).is_file() else ""
                 tries = []
-                for n in range(1, MV.MAX_CALLS + 1):
+                for n in range(1, mv_calls + 1):
                     raw = pre + f"_try{n}_raw.png"
                     try:
                         r = CD.edit_image(prompt="", edit_base_path=base, reference_paths=env_refs, manifest=manifest,
                                           output_path=raw, size=size, model=model, client_version=client_version,
                                           log_dir=str(pool), tag=f"mv_{MV.safe_name(rec['name'])}_try{n}",
                                           cancel_check=cancelled, simple_brief=brief, vehicle=vehicle,
-                                          massing_text=text, keep_text=keep_text)
+                                          massing_text=text, keep_text=keep_text, style_text=style_line)
                     except CD.DirectEditError as exc:
                         res["calls"] += 1
                         if exc.kind == "cancelled":
@@ -4446,25 +5411,35 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                     if not RW.fit_to_canvas(raw, canvas, W, H):
                         res["error"] = "结果图无法读取"
                         break
-                    rep, _note = RW.identity_scores(canvas, spec, matid)
-                    gate = {}
-                    try:      # fixed-coordinate silhouette (轮廓验收, ~1 s): did the product really move?
-                        gate = RW.gate_score(raw, v["files"]["mask"], W, H, str(work), f"try{n}", cancelled,
-                                             detail_path=v["files"]["detail"])
-                    except RW.Cancelled:
-                        raise
-                    except Exception as exc:
-                        print(f"[Wondful] 多角度场景一致：轮廓验收失败：{exc}")
+                    rep, gate = {}, {}
+                    if not no_product:      # 1.2.7 纯场景: no product → no product acceptance
+                        rep, _note = RW.identity_scores(canvas, spec, matid)
+                        try:      # fixed-coordinate silhouette (轮廓验收, ~1 s): did the product really move?
+                            gate = RW.gate_score(raw, v["files"]["mask"], W, H, str(work), f"try{n}", cancelled,
+                                                 detail_path=v["files"]["detail"])
+                        except RW.Cancelled:
+                            raise
+                        except Exception as exc:
+                            print(f"[Wondful] 多角度场景一致：轮廓验收失败：{exc}")
                     img_w = resize(read_png(canvas).astype(np.float32)[..., :3], ww, wh)
                     rp = MV.reproj_de(master_view, vk, img_w)
                     t = {"file": canvas, "identity": {k: rep.get(k) for k in ("shift_px", "scale_pct", "outline_px", "edge_px",
                                                                           "edge_px_detail", "colour_dE", "error")},
                          "iou": gate.get("iou"), "iou_verdict": gate.get("verdict"),
-                         "reproj": rp, "product_violations": MV.product_violations(rep, gate.get("verdict")),
+                         "reproj": rp,
+                         "product_violations": [] if no_product else MV.product_violations(rep, gate.get("verdict")),
                          "env_violations": MV.env_violations(rp, env_check), "seconds": r.get("seconds"),
-                         "image_model": r.get("image_model", "")}
+                         "image_model": r.get("image_model", ""), "image_quality": r.get("image_quality", "")}
                     tries.append(t)
+                    if t["image_quality"]:
+                        print(f"[Wondful] 多角度场景一致：{rec['name']} 第 {n} 次 画质档 {t['image_quality']}")
                     if not t["product_violations"] and not t["env_violations"]:
+                        # 1.2.6: not for night scenes — the low tier there came with large dark walls and the
+                        # retry never improved them (real cyber orbit test)
+                        if n < mv_calls and not night and RW.low_tier_retry(t["image_quality"], n, mv_calls, False):
+                            continue        # 1.2.4: passed but "low" tier → the one retry this camera has
+                        if n < mv_calls and night and RW.is_low_tier(t["image_quality"]):
+                            res["low_tier_kept"] = "夜景暗部，画质档 low 不重试"
                         break
                 if not tries:
                     continue
@@ -4472,23 +5447,50 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
                 res.update({"tries": tries, "chosen": Path(best["file"]).name, "identity": best["identity"],
                             "reproj": best["reproj"], "product_violations": best["product_violations"],
                             "env_violations": best["env_violations"],
-                            "retry_reason": (tries[0]["product_violations"] + tries[0]["env_violations"]) if len(tries) > 1 else []})
+                            "image_quality": best.get("image_quality", ""),
+                            "retry_reason": ((tries[0]["product_violations"] + tries[0]["env_violations"])
+                                             or (["画质档 low"] if RW.is_low_tier(tries[0].get("image_quality")) else []))
+                            if len(tries) > 1 else []})
                 final = best["file"]
                 if paste:
                     out = RW.paste_and_score(best["file"], 1, spec, cancelled)
                     final = out.get("final") or final
                     res["detail_note"] = out.get("detail_note", "")
                     res["score_note"] = out.get("score_note", "")
+                res["grade"] = {"applied": False}
+                if grade_on:     # 1.2.4 统一调色: co-visible environment pixels vs the 主视角, environment only
+                    try:
+                        img_full = read_png(final).astype(np.float32)[..., :3]
+                        g = MV.fit_grade(master_view, vk, resize(img_full, ww, wh), night=night)
+                        if g:
+                            graded = MV.apply_grade(img_full, g, mfull)
+                            gp = pre + "_graded.png"
+                            write_png(gp, np.rint(graded).astype(np.uint8))
+                            final = gp
+                            res["grade"] = dict(g, applied=True,
+                                                reproj=MV.reproj_de(master_view, vk, resize(graded, ww, wh)))
+                        else:
+                            res["grade"] = {"applied": False, "reason": "共视区太少或拟合无改善"}
+                    except Exception as exc:
+                        print(f"[Wondful] 多角度场景一致：统一调色失败：{exc}")
+                        res["grade"] = {"applied": False, "reason": str(exc)[:80]}
                 img_name = MV.safe_name(rec["name"]) + "_accepted.png"
-                shutil.copy2(final, pool / img_name)
+                shutil.copy2(final, pool / img_name)     # the pool keeps the clean (pre-照片质感) image
                 res["final"] = str(pool / img_name)
+                fin = RW.photo_finish_step(final, pre + "_finish.png", {"level": finish_level, "mask": v["files"]["mask"]})
+                if fin.get("final"):
+                    res["export"] = fin["final"]
+                    res["clean"] = res["final"]
+                res["finish"] = fin.get("finish_report") or {}
                 res["raw"] = best["file"]
                 res["ok"] = True
                 entry = {"name": rec["name"], "cam": rec, "pos": Path(pre + "_pos.npy").name, "nrm": Path(pre + "_nrm.npy").name,
-                         "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False}
+                         "mask": Path(pre + "_maskw.npy").name, "image": img_name, "master": False,
+                         "geometry": geo_kind, "hop": int(st.get("hop", 1))}
                 accepted.append(entry)
-                sources.append(MV.load_view(pool, entry))
-                MV.write_pool(pool, {"master": master_name, "views": accepted})
+                if MV.usable_source(entry):
+                    sources.append(MV.load_view(pool, entry))
+                MV.write_pool(pool, {"master": master_name, "context_key": context_key, "views": accepted})
                 (pool / f"{MV.safe_name(rec['name'])}_meta.json").write_text(
                     json.dumps(res, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
             summary = {"results": results, "light": light, "light_note": light_note, "seconds": round(time.time() - t0, 1),
@@ -4525,24 +5527,31 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
             if not r.get("ok"):
                 continue
             try:
-                p = export_result(r["final"], info["out_dir"], info["scene"], r["name"], "多角度场景一致")
+                p = export_result(r.get("export") or r["final"], info["out_dir"], info["scene"], r["name"], "多角度场景一致")
                 r["exported"] = str(p)
                 exported.append(str(p))
                 if r.get("raw"):
                     from .detail_paste import raw_path
                     shutil.copy2(r["raw"], raw_path(p))
+                if r.get("clean"):
+                    shutil.copy2(r["clean"], sidecar_path(p, CLEAN_SUFFIX))
             except Exception as exc:
                 r["export_error"] = str(exc)
         notes = [MV.summary_line(summary.get("results", []))]
         warn = [f"{r['name']} 遮挡 {r['obstacle'] * 100:.0f}%" for r in summary.get("results", [])
-                if (r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25]
+                if ((r.get("obstacle") or 0) > 0.25 or (r.get("hidden") or 0) > 0.25) and not r.get("skipped_occluded")]
         if warn:
             notes.append("注意：产品前方有遮挡物（" + "、".join(warn) + "），可移动相机")
+        if info.get("ground_bands"):
+            notes.append(info["ground_bands"])
+        if info.get("no_product"):
+            notes.append("纯场景（未选产品集合）：已跳过产品验收")
         if info.get("skipped"):
             notes.append("已跳过正交相机：" + "、".join(info["skipped"]))
         if summary.get("light_note"):
             notes.append(summary["light_note"])
-        failed = [f"{r['name']}：{r.get('error')}" for r in summary.get("results", []) if not r.get("ok") and r.get("error")]
+        failed = [f"{r['name']}：{r.get('error')}" for r in summary.get("results", [])
+                  if not r.get("ok") and r.get("error") and not r.get("skipped_occluded")]
         if failed:
             notes.append("未完成：" + "；".join(failed)[:160])
         props.last_mv_note = " · ".join(n for n in notes if n)

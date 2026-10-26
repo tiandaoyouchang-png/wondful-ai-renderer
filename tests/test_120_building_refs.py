@@ -4,6 +4,7 @@ import base64
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -151,6 +152,13 @@ class MappingTextTests(unittest.TestCase):
 
 
 class BuildingPayloadTests(DirectEditTestBase):
+    def setUp(self):
+        super().setUp()
+        # This backend captures image payloads; environment text has its own tests.
+        patcher = patch.object(CD, "describe_environment", side_effect=lambda _paths, **kw: ("晴天混凝土街道", kw["auth"]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def sel(self, n):
         return [{"block": i + 1, "path": rgb_png(self.tmp / f"b{i}.png", 500, 400, (30 * i, 80, 140)),
                  "hint": f"楼{i + 1}", "place": "画面左侧，在产品左边"} for i in range(n)]
@@ -159,7 +167,7 @@ class BuildingPayloadTests(DirectEditTestBase):
         refs = self.sel(5)
         result = self.edit(simple_brief="老上海街道", massing_text="灰蓝色体块：……", building_refs=refs, vehicle=True)
         self.assertEqual(result["building_refs"], [1, 2, 3, 4])               # capped at 4 extra images
-        self.assertEqual(result["image_roles"], ["camera", "building", "building", "building", "building"])
+        self.assertEqual(result["image_roles"], ["camera", "building", "building", "product", "sheet"])
         body = self.state.raw_bodies[-1]
         self.assertEqual(body["instructions"], CD.BUILDING_INSTRUCTIONS)
         content = body["input"][0]["content"]
@@ -167,9 +175,13 @@ class BuildingPayloadTests(DirectEditTestBase):
         self.assertEqual(len(images), 5)                                      # the env image is NOT attached
         self.assertEqual(base64.b64decode(images[0]["image_url"].split(",", 1)[1]), Path(self.camera).read_bytes())
         self.assertEqual(base64.b64decode(images[2]["image_url"].split(",", 1)[1]), Path(refs[1]["path"]).read_bytes())
+        self.assertEqual(base64.b64decode(images[3]["image_url"].split(",", 1)[1]), Path(self.product).read_bytes())
+        cells = [c for sheet in result["collage"]["sheets"] for c in sheet["cells"]]
+        self.assertEqual({c["file"] for c in cells}, {Path(refs[2]["path"]).name, Path(refs[3]["path"]).name})
         text = content[0]["text"]
         self.assertIn("图2 是画面左侧，在产品左边的体块 1「楼1」", text)
-        self.assertIn("图5 是", text)
+        self.assertIn("图5 的 A 格 是", text)
+        self.assertIn("图5 的 B 格 是", text)
         self.assertNotIn("图6", text)
         self.assertIn("图 1 里不是灰蓝色的主体就是我们的车", text)
 
@@ -178,13 +190,14 @@ class BuildingPayloadTests(DirectEditTestBase):
         self.assertEqual(result["building_refs"], [])
         body = self.state.raw_bodies[-1]
         self.assertEqual(body["instructions"], CD.INSTRUCTIONS)
-        self.assertEqual(len([c for c in body["input"][0]["content"] if c["type"] == "input_image"]), 1)
+        self.assertEqual(len([c for c in body["input"][0]["content"] if c["type"] == "input_image"]), 2)
+        self.assertEqual(result["image_roles"], ["camera", "product"])
 
     def test_simple_path_without_refs_unchanged(self):
         self.edit(simple_brief="海边黄昏", massing_text="灰蓝色体块：……")
         body = self.state.raw_bodies[-1]
         self.assertEqual(body["instructions"], CD.INSTRUCTIONS)
-        self.assertEqual(len([c for c in body["input"][0]["content"] if c["type"] == "input_image"]), 1)
+        self.assertEqual(len([c for c in body["input"][0]["content"] if c["type"] == "input_image"]), 2)
         self.assertNotIn("建筑参考图", body["input"][0]["content"][0]["text"])
 
     def test_non_simple_ignores_building_refs(self):

@@ -242,7 +242,7 @@ class Wiring(unittest.TestCase):
         i = ops.index("class WONDFUL_OT_multiview_render")
         body = ops[i:]
         self.assertIn("reference_paths=env_refs", body)          # refs only as text (simple path)
-        self.assertIn("MV.MAX_CALLS", body)
+        self.assertIn("mv_calls", body)   # 1.2.5: MV.camera_calls(最多生成次数)
         self.assertFalse(any(p.suffix == ".onnx" for p in PKG.rglob("*")))
 
 

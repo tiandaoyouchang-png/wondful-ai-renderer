@@ -216,7 +216,7 @@ class OperatorWiring(unittest.TestCase):
         self.ops = (PKG / "operators.py").read_text(encoding="utf-8")
 
     def test_gate_loop(self):
-        self.assertIn("planned_attempts = gate_max", self.ops)
+        self.assertIn("result_worker.generation_budget(", self.ops)   # 1.2.5: gate capped by 最多生成次数
         self.assertIn('if gate_rep.get("passed"):', self.ops)
         self.assertIn("continue        # fresh regeneration from the original base", self.ops)
         self.assertIn("result_worker.gate_score(", self.ops)

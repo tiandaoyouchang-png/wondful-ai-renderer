@@ -76,6 +76,15 @@ class ClassifierTests(unittest.TestCase):
 
 
 class _StopBase(DirectEditTestBase):
+    def setUp(self):
+        super().setUp()
+        self._backoff = direct.NET_BACKOFF
+        direct.NET_BACKOFF = (0.0, 0.0)      # 1.2.7 back-off retries, no waiting in tests
+
+    def tearDown(self):
+        direct.NET_BACKOFF = self._backoff
+        super().tearDown()
+
     def run_gen(self):
         self.fb_calls = []
 
@@ -185,7 +194,7 @@ class RateLongStops(_StopBase):
 class StreamCutRetried(_StopBase):
     mode = "stream_cut_then_ok"
 
-    def test_cut_stream_retried_once(self):
+    def test_cut_stream_retried(self):
         r = self.run_gen()
         self.assertEqual(r["engine"], "codex_direct_edit")
         self.assertEqual(self.state.response_calls, 2)
@@ -197,7 +206,7 @@ class StreamCutFallsBack(_StopBase):
     def test_persistent_cut_falls_back_not_disabled(self):
         r = self.run_gen()
         self.assertEqual(r["engine"], "codex_oauth_imagegen")    # transient: proxy still allowed
-        self.assertEqual(self.state.response_calls, 2)
+        self.assertEqual(self.state.response_calls, 3)            # 1.2.7: 2 back-off retries, then the proxy
         self.assertFalse(self.gstate.get("stopped"))
         self.assertFalse(self.gstate.get("disabled"))
 

@@ -4,6 +4,7 @@
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import AddonPreferences, PropertyGroup
+from . import workflow
 
 
 MAX_REFERENCES_PER_KIND = 8
@@ -122,6 +123,9 @@ def _reference_instruction_update(self, context):
         pass
 
 def _refresh_compare_update(self, context):
+    if workflow.is_reference(self) and self.compare_pair != "CAMERA_RESULT" and self.compare_mode == "OUTLINE":
+        self.compare_mode = "SPLIT"
+        return
     try:
         if context and getattr(context, "scene", None) and getattr(context.scene, "wondful_ai", None):
             from .comparison_view import refresh_compare_image
@@ -292,78 +296,65 @@ class WONDFUL_AddonPreferences(AddonPreferences):
     )
     alignment_max_attempts: IntProperty(
         name="最多生成次数",
-        description="包含第一次生成。建议 2，避免无意中过多消耗当前 Provider 的生图额度",
-        default=2,
+        description="每张图最多调用几次生图（含第一次）。轮廓验收重生成、严格对齐重试、画质档重试和多角度每个相机都不超过它；"
+                    "设为 1 = 每张只调用 1 次，细节修复也只用 Blender 回贴。张数在 ⑥ 另选",
+        default=3,
         min=1,
         max=3,
     )
 
     def draw(self, context):
-        layout = self.layout
-        info = layout.box()
-        info.label(text="无需 OpenAI / Google / DeepSeek / Seedream API Key。", icon="INFO")
-        info.label(text="Codex 复用 ChatGPT OAuth；Antigravity 复用 Google Keychain / OAuth。插件不保存、不记录 Token。")
-        info.label(text="图像编辑直连会读取 Codex 的 auth.json 登录信息，令牌过期时按 Codex 方式刷新并写回。")
-
-        codex = layout.box()
-        codex.label(text="Codex", icon="CONSOLE")
-        codex.prop(self, "codex_cli_path")
-        codex.prop(self, "codex_model")
-
-        antigravity = layout.box()
-        antigravity.label(text="Antigravity", icon="WORLD")
-        antigravity.prop(self, "antigravity_cli_path")
-        antigravity.prop(self, "antigravity_model")
-
+        from . import ui_components as UIC
         from .ui import draw_github_footer
-        draw_github_footer(layout)
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        update = layout.box()
-        update.label(text="更新", icon="FILE_REFRESH")
+        def section(title, icon, help_text=""):
+            box = layout.box()
+            row = box.row(align=True)
+            row.label(text=title, icon=icon)
+            UIC.help_icon(row, help_text)
+            return box
+
+        codex = section("Codex", "CONSOLE", "Codex 复用本地登录；直连会读取 auth.json，并可能刷新该登录文件")
+        UIC.field(codex, self, "codex_cli_path", "CLI 路径")
+        UIC.field(codex, self, "codex_model", "推理模型")
+        antigravity = section("Antigravity", "WORLD", "Antigravity 使用 Google Keychain / OAuth 登录")
+        UIC.field(antigravity, self, "antigravity_cli_path", "CLI 路径")
+        UIC.field(antigravity, self, "antigravity_model", "推理模型")
+        update = section("更新", "FILE_REFRESH")
+        UIC.field(update, self, "auto_check_updates", "自动检查")
         row = update.row(align=True)
-        row.prop(self, "auto_check_updates")
+        row.scale_y = UIC.ACTION_HEIGHT
         row.operator("wondful.update_check", text="检查更新", icon="FILE_REFRESH")
         try:
             from . import update_ops
-            if update_ops.STATE.get("message"):
-                update.label(text=update_ops.STATE["message"][:90])
+            message = update_ops.STATE.get("message", "")
+            if message:
+                update.label(text=UIC.short_text(message, 60))
+                UIC.help_icon(update, message)
         except Exception:
             pass
-
-        output = layout.box()
-        output.label(text="输出", icon="FILE_FOLDER")
-        output.prop(self, "output_directory")
-
-        col = layout.column(align=True)
-        col.prop(self, "long_edge")
-        col.prop(self, "codex_imagegen_enabled")
-        col.prop(self, "codex_direct_edit")
-        col.prop(self, "codex_direct_simple")
-        col.prop(self, "antigravity_imagegen_enabled")
-        col.prop(self, "codex_polish_timeout")
-        col.prop(self, "codex_audit_timeout")
-        col.prop(self, "codex_render_timeout")
-        col.prop(self, "antigravity_polish_timeout")
-        col.prop(self, "antigravity_audit_timeout")
-        col.prop(self, "antigravity_render_timeout")
-        col.separator()
-        col.prop(self, "strict_composition_lock")
-        col.prop(self, "structure_guides_enabled")
-        col.prop(self, "masked_alignment_repair")
-        col.prop(self, "identity_preserve_enabled")
+        output = section("输出", "FILE_FOLDER")
+        UIC.field(output, self, "output_directory", "默认目录")
+        UIC.field(output, self, "long_edge", "默认长边")
+        engine = section("生成设置", "RENDER_STILL")
+        for name in ("codex_imagegen_enabled", "codex_direct_edit", "codex_direct_simple", "antigravity_imagegen_enabled",
+                     "codex_polish_timeout", "codex_audit_timeout", "codex_render_timeout", "antigravity_polish_timeout",
+                     "antigravity_audit_timeout", "antigravity_render_timeout"):
+            UIC.field(engine, self, name, None)
+        quality = section("保真与校验", "MODIFIER")
+        for name in ("strict_composition_lock", "structure_guides_enabled", "masked_alignment_repair", "identity_preserve_enabled"):
+            UIC.field(quality, self, name, None)
         if self.identity_preserve_enabled:
-            col.prop(self, "identity_preserve_padding")
-            col.prop(self, "identity_hard_restore")
-        col.prop(self, "auto_alignment_retry")
+            UIC.field(quality, self, "identity_preserve_padding", None)
+            UIC.field(quality, self, "identity_hard_restore", None)
+        UIC.field(quality, self, "auto_alignment_retry", None)
         if self.auto_alignment_retry:
-            col.prop(self, "alignment_threshold")
-            col.prop(self, "alignment_max_attempts")
-
-        box = layout.box()
-        box.label(text="运行依赖")
-        box.label(text="Codex：官方 Codex CLI + ChatGPT OAuth；Antigravity：官方 Antigravity CLI + Google OAuth。")
-        box.label(text="统一 Provider：选择 Codex 时润色/验收/生图都走 Codex；选择 Antigravity 时全部走 Antigravity。")
-        box.label(text=f"参考图：产品造型 1 张（建议三视图）；人物 / 环境风格每类最多 {MAX_REFERENCES_PER_KIND} 张。")
+            UIC.field(quality, self, "alignment_threshold", None)
+        UIC.field(quality, self, "alignment_max_attempts", None)
+        draw_github_footer(layout)
 
 
 class WONDFUL_PromptLine(PropertyGroup):
@@ -564,6 +555,37 @@ class WONDFUL_AISettings(PropertyGroup):
                ("3", "3", "每次生成 3 张"), ("4", "4", "每次生成 4 张")],
         default="4",
     )
+    workflow_mode: EnumProperty(
+        name="工作模式", items=[("ENVIRONMENT", "环境参考渲染", "当前相机 + 车模 + 环境参考"),
+                                  ("REFERENCE", "参考图复刻", "目标图 → 相机与粗模 → 检查 → 渲染")],
+        default="ENVIRONMENT", update=workflow.switch_mode)
+    workflow_last_mode: StringProperty(default="ENVIRONMENT", options={"HIDDEN"})
+    workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
+    auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=False,
+        description="可选；关闭时直接使用手写提示词或一句话需求，不强制调用 AI 润色")
+    replica_reviewed: BoolProperty(default=False, options={"HIDDEN"})  # legacy only
+    ui_empty_note: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})
+    sb_target_note: StringProperty(name="参考重点", default="",
+        description="指定目标图中需保留的构图、建筑或光照特征")
+    replica_feedback: StringProperty(name="修改意见", default="", maxlen=4000,
+        description="填写对当前粗模和相机的修改要求，例如降低机位、加宽左侧建筑。点击按意见修改才发起在线请求")
+    replica_revision_status: StringProperty(default="", options={"SKIP_SAVE"})
+    replica_preview_signature: StringProperty(default="", options={"HIDDEN"})
+    replica_revision_count: IntProperty(default=0, min=0, options={"HIDDEN"})
+    replica_can_undo: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
+    sb_built_target_hash: StringProperty(default="", options={"HIDDEN"})
+    sb_reference_image: PointerProperty(name="复刻目标图", type=bpy.types.Image)
+    sb_preview_image: PointerProperty(name="粗模预览", type=bpy.types.Image)
+    workflow_multiview: BoolProperty(name="使用多视角列表", default=False,
+        description="仅参考图复刻：第一个勾选的视角作为主视角；关闭时只渲染当前相机")
+    result_workflow: StringProperty(default="", options={"HIDDEN"})
+    compare_pair: EnumProperty(name="对比对象", items=[
+        ("CAMERA_RESULT", "底图 / 成片", "检查车辆和相机构图"),
+        ("TARGET_BLOCKOUT", "目标 / 粗模", "渲染前检查场景复刻"),
+        ("TARGET_RESULT", "目标 / 成片", "检查最终复刻效果")],
+        default="CAMERA_RESULT", update=_refresh_compare_update)
+    ui_show_replica_advanced: BoolProperty(name="复刻进阶", default=False)
+
     two_step: BoolProperty(
         name="分两步",
         description="打开后「生成」只写提示词，确认后再点「渲染」",
@@ -595,10 +617,10 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_expanded: BoolProperty(name="展开提示词", description="展开自动换行全文或收起为 6 行；完整编辑按钮支持多行输入", default=False)
     render_mode: EnumProperty(
         name="渲染模式",
-        description="控制单次渲染的远程调用数量。张数在 ⑥ 选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
+        description="控制单次渲染的远程调用数量。张数在输出区选择（1–4 张，Antigravity 最多 2 张）；严格对齐才执行远程构图验收和自动修复",
         items=[
-            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按 ⑥ 的选择；用于快速看方向"),
-            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按 ⑥ 的选择；推荐默认"),
+            ("FAST", "快速预览", "Camera Base + Product Mask/Silhouette，最多 1280px 长边；张数按输出区的选择；用于快速看方向"),
+            ("STANDARD", "标准", "自动生成 Structure Packet（Mask/Depth/Normal/Silhouette），使用目标分辨率；张数按输出区的选择；推荐默认"),
             ("STRICT", "严格对齐", "使用完整 Structure Packet（含 Part ID），生成后远程验收；未达阈值时按设置自动修复重试"),
         ],
         default="STANDARD",
@@ -613,14 +635,14 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_line_index: IntProperty(default=0, min=0)
 
     # 2.14: changing style references invalidates any prompt that was generated
-    # from the previous style set. Rendering stays blocked until prompt polish
-    # succeeds against the new references. The revision guard also prevents a
+    # from the previous style set. Manual copy can still render; stale AI prose
+    # is discarded or explicitly polished. The revision guard also prevents a
     # polish started on one style set from accidentally validating a newer set.
     style_reference_revision: IntProperty(default=0, min=0)
     prompt_style_revision: IntProperty(default=0, min=0)
     style_prompt_dirty: BoolProperty(
         name="风格提示词待刷新",
-        description="风格参考图已变化；必须先重新生成提示词，再允许最终生图",
+        description="风格参考图已变化；旧 AI 文案不会沿用，手写提示词仍可直接生成",
         default=False,
     )
     style_sync_initialized: BoolProperty(
@@ -806,6 +828,23 @@ class WONDFUL_AISettings(PropertyGroup):
         default="",
         options={"SKIP_SAVE"},
     )
+    # 1.2.4 照片质感 (高级 › 成片): deterministic camera-like finish, last step on the final image
+    photo_finish: EnumProperty(
+        name="照片质感",
+        description="成片最后一步（在最终尺寸上，按材质校色之后）：高光柔和滚降、只压环境的过高饱和度、轻微暗角、"
+                    "轻微色差和随亮度变化的传感器颗粒，去掉 AI 图「零噪点」的塑料感。产品轮廓和颜色不变，_raw 原图不加",
+        items=[
+            ("OFF", "关", "不加后期，输出与以前相同"),
+            ("SUBTLE", "细微", "接近真实全画幅相机缩到 2560 宽的颗粒（推荐）"),
+            ("STANDARD", "标准", "颗粒和暗角更明显一些，偏胶片感"),
+        ],
+        default="SUBTLE",
+    )
+    last_finish_note: StringProperty(
+        name="照片质感状态",
+        default="",
+        options={"SKIP_SAVE"},
+    )
     # 1.2.0 细节回贴 → 1.2.3 细节修复 (property id kept): check plates / badges / lamps / rims
     # against the Blender model, regenerate only the parts that came out wrong
     detail_paste: BoolProperty(
@@ -919,10 +958,23 @@ class WONDFUL_AISettings(PropertyGroup):
         description="临时补齐主视角以外的环境：室内补上看不到的墙，建筑场景在外圈补朴素的普通楼；渲染完自动删除",
         default=True,
     )
+    mv_avoid_occlusion: BoolProperty(
+        name="被遮挡就调视角",
+        description="生图前先用射线检查产品是否被环境体块挡住（超过 20% 轮廓）：挡住时临时把相机沿原方向移近、"
+                    "再微调方位 / 高度（必要时放宽焦距）直到看得见，原相机不改；找不到不被挡的机位就跳过，不花生图次数",
+        default=True,
+    )
     mv_env_check: BoolProperty(
         name="环境一致性检查",
         description="只看建筑 / 地面 / 室内墙地（不看天空）：与主视角色差超过 15 且两个视角共同可见超过一半时，重试 1 次。"
                     "产品超标（细节边缘 > 6px、颜色 ΔE > 15、偏移 > 4px、缩放 > 1.5%）总是重试 1 次",
+        default=True,
+    )
+    # 1.2.4 统一调色: colour transform fitted on co-visible environment pixels vs the 主视角 (environment only)
+    mv_colour_match: BoolProperty(
+        name="统一调色",
+        description="每个视角生成后，用和主视角共同可见的环境像素（按场景几何对应，不是整图统计）拟合一个颜色变换，"
+                    "只作用于环境，让各视角的色调和主视角一致；产品颜色不动",
         default=True,
     )
     last_mv_note: StringProperty(
@@ -933,19 +985,60 @@ class WONDFUL_AISettings(PropertyGroup):
     # 1.2.3 ④ 场景粗模（可选）· 从参考图生成场景粗模 (analysis of one environment photo → blockout collection)
     # ui_show_scene_blockout: the old 高级 disclosure; unused since ④, kept so saved .blend files load unchanged
     ui_show_scene_blockout: BoolProperty(name="从参考图生成场景粗模", default=False)
-    sb_image_path: StringProperty(name="参考图", description="留空 = 用 ③ 的第一张环境参考图；这张图只用于分析，不会发给生图模型",
-                                  subtype="FILE_PATH", default="")
+    sb_image_path: StringProperty(name="参考图", description="独立的复刻目标图；不自动沿用环境参考渲染的图片",
+                                  subtype="FILE_PATH", default="", update=workflow.target_changed)
     sb_set_camera: BoolProperty(name="同时设置相机", default=True,
                                 description="按照片估计的机位高度、俯仰、视角新建 / 更新「Wondful 参考相机」并设为场景相机；"
                                             "不勾选时不动任何相机，体块朝向跟随当前场景相机")
     sb_correct: BoolProperty(name="自动校正一轮", default=False,
                              description="搭好后从参考机位渲染粗模、和照片比对吻合度，再让 AI 修正一轮；吻合度变高才采用（多 1–2 分钟）")
+    # 1.2.5 精确模式: measure camera + depth locally (MoGe-2, CPU) and pin the blocks to it; off = unchanged flow
+    sb_precise: BoolProperty(name="精确模式", default=False,
+                             description="在本机用深度模型测量参考图：相机（高度、俯仰、视角）用实测值，每个体块的距离和"
+                                         "宽高按实测深度对齐。第一次使用会下载约 155 MB（深度模型 + 运行库），参考图不上传；"
+                                         "装不上时自动改用普通模式")
+    # 1.2.5 场景补全 (④ 场景粗模, default on): infer what the reference photo does not show
+    sb_complete: BoolProperty(name="场景补全", default=False,
+                              description="搭场景粗模时按参考图里看到的街道推测看不到的部分并补上体块：道路按实测方向和宽度继续、"
+                                          "路沿，两侧房屋按实测的退线、高度、进深和间距延续（只有一侧时按对侧推测），树篱 / 树 / 电杆"
+                                          "按看到的节奏延续；只放在参考相机看不到、也不挡产品周围的位置。换角度渲染时背面不再是空地 / 白墙")
+    # 1.2.5 场景补全 · Building Rome ideas (arXiv 2610.08790, idea only): default on, each can be switched back off
+    # 空间三态 default OFF (2026-10-21 orbit test: free-space area −48 %, 216° geometry 5 %→17 %, but the 216°
+    # 错位 ΔE vs the master 8.3 → 25.6 — the carved hedge exposes ground only an AI view has seen)
+    sb_free_space: BoolProperty(name="空间三态", default=False,
+                                description="（试验，默认关）精确模式下按实测深度把空间分成「空 / 可见 / 被挡住」：相机视线穿过的空地上"
+                                            "不放任何推测体块，实测建筑 / 车辆 / 墙按规则补的进深伸进空地时截短（少长出乱墙、树篱）；"
+                                            "街景环绕测试里部分角度与主视角色差变大，所以默认关")
+    sb_lod_bands: BoolProperty(name="近密远疏", default=True,
+                               description="细节粗模和场景补全按到产品的距离分带：近处实测表皮更细、窗户优先给近处；"
+                                           "远处房屋合并成大块、不加窗和门前树篱、路沿分段更长（远山不变）")
+    # 1.2.8 地面分带 (PC feedback 2026-10-21: the 216° ground lost the 主视角's curb / bands)
+    sb_ground_bands: BoolProperty(name="地面分带", default=True,
+                                  description="多角度场景一致：从主视角图和实测深度量出地面分带（路面、路沿、路肩 / 砂石，宽度、走向、"
+                                              "高差），在场景粗模里临时搭成分带几何并沿道路延伸；主视角没拍到的地面按各自分带铺主视角取样的"
+                                              "纹理；每个视角的提示词按分带描述地面。主视角一次出多张时每张都拿到同样的分带说明")
+    sb_seam_blend: BoolProperty(name="接缝过渡", default=True,
+                                description="多角度投影时，补全填色和主视角投影之间留重叠带：填色按相邻照片调色并交叉过渡；"
+                                            "紧挨实测房屋的推测房屋沿用它的檐口高度和退线再渐变到街道节奏")
+    # 1.2.5 细节粗模 (V3 phase 1, 高级 › 多角度): measured near / mid-ground geometry, built only with 精确模式
+    sb_detail_carrier: BoolProperty(name="细节粗模投影", default=True,
+                                    description="精确模式下，④ 额外按实测深度搭一份近中景细节粗模（地面高度场、建筑表皮 + 体积、"
+                                                "车辆、树冠；远山仍用 AI 远景带），隐藏不显示。多角度场景一致把主视角图投影到它上面，"
+                                                "换角度时照片贴得更准；没有精确模式时不起作用")
+    sb_detail_clay: BoolProperty(name="白模也用细节粗模", default=False,
+                                 description="多角度场景一致发给生图模型的白模也换成细节粗模（默认只用于投影，白模保持普通粗模）")
+    sb_detail_skyline: BoolProperty(name="远山剪影", default=False,
+                                    description="多角度投影时，远山用实测天际线的形状（只取天空边界的高度，强平滑、低面数，"
+                                                "不带实测表面细节）代替 AI 远景带；天际线被近景挡住太多或跳变大时自动沿用 AI 远景带")
     last_sb_note: StringProperty(name="场景粗模状态", default="", options={"SKIP_SAVE"})
     # live stage progress of one run (see sb_progress); elapsed seconds are written by the modal timer
     sb_stage: StringProperty(name="场景粗模阶段", default="", options={"SKIP_SAVE"})
     sb_stage_ids: StringProperty(name="场景粗模阶段列表", default="", options={"SKIP_SAVE"})
     sb_elapsed: IntProperty(name="场景粗模已用秒", default=0, min=0, options={"SKIP_SAVE"})
     sb_failed_stage: StringProperty(name="场景粗模失败阶段", default="", options={"SKIP_SAVE"})
+    sb_active_collection: PointerProperty(
+        name="当前粗模版本", type=bpy.types.Collection,
+        description="最新成功生成的独立粗模版本；旧版本仍保留在大纲视图中")
     # 1.2.0 环境体块 › 从三视图生成建筑体块 (visual hull of a building, into the massing collection)
     ui_show_massing_hull: BoolProperty(name="从三视图生成建筑体块", default=False)
     hull_input: EnumProperty(
@@ -1021,7 +1114,7 @@ class WONDFUL_AISettings(PropertyGroup):
     compare_drag_active: BoolProperty(name="鼠标拖动已启用", default=False)
     ui_show_account: BoolProperty(name="账户详情", default=False)
     ui_show_references: BoolProperty(name="参考图", default=True)
-    ui_show_product_refs: BoolProperty(name="产品参考图", default=True)
+    ui_show_product_refs: BoolProperty(name="产品身份参考", default=True)
     ui_show_person_refs: BoolProperty(name="人物参考图", default=False)
     ui_show_style_refs: BoolProperty(name="环境／风格参考图", default=True)
     ui_show_advanced: BoolProperty(name="高级设置", default=False)
@@ -1032,6 +1125,7 @@ class WONDFUL_AISettings(PropertyGroup):
         items=[
             ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
             ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
+            ("FINISH", "成片", "照片质感：成片最后一步的相机感后期"),
             ("PRODUCT", "产品", "轮廓验收、细节修复与产品外观锁定"),
             ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在主流程 ④）"),
             ("MULTIVIEW", "多角度", "多角度场景一致"),
@@ -1041,7 +1135,7 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     ui_show_terrain: BoolProperty(name="自定义地形", default=True)
     ui_show_block_refs: BoolProperty(name="建筑参考", default=True)
-    ui_show_prompt: BoolProperty(name="提示词", default=False)
+    ui_show_prompt: BoolProperty(name="提示词", default=True)
     alignment_score: FloatProperty(name="构图对齐分数", default=-1.0, min=-1.0, max=100.0)
     alignment_message: StringProperty(name="构图对齐说明", default="")
     alignment_attempts: IntProperty(name="生成尝试次数", default=0, min=0, max=40)

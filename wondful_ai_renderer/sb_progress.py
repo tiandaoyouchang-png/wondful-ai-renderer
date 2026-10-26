@@ -10,10 +10,13 @@ stage's start; every other stage sits at its slice start until it completes.
 from __future__ import annotations
 
 READ, ANALYZE, BUILD, CAMERA = "READ", "ANALYZE", "BUILD", "CAMERA"
+INSTALL, DEPTH = "INSTALL", "DEPTH"          # 1.2.5 精确模式: first-use download, local depth measurement
 PREVIEW, SCORE, CORRECT, REBUILD, DONE = "PREVIEW", "SCORE", "CORRECT", "REBUILD", "DONE"
 
 LABELS = {
     READ: "读取参考图",
+    INSTALL: "安装精确模式",
+    DEPTH: "测量深度",
     ANALYZE: "分析参考图",
     BUILD: "搭建粗模",
     CAMERA: "设置相机",
@@ -24,16 +27,23 @@ LABELS = {
     DONE: "完成",
 }
 # relative share of the bar per stage (DONE has none: it is the end point)
-WEIGHTS = {READ: 2, ANALYZE: 60, BUILD: 8, CAMERA: 2, PREVIEW: 5, SCORE: 2, CORRECT: 30, REBUILD: 6, DONE: 0}
+WEIGHTS = {READ: 2, INSTALL: 12, DEPTH: 4, ANALYZE: 60, BUILD: 8, CAMERA: 2, PREVIEW: 5, SCORE: 2, CORRECT: 30, REBUILD: 6, DONE: 0}
 # AI stages: typical seconds (bar creep) and the hint shown while they run
 AI_TYPICAL = {ANALYZE: 240.0, CORRECT: 120.0}
-AI_HINT = {ANALYZE: "通常约 3–5 分钟", CORRECT: "通常约 1–3 分钟"}
+AI_HINT = {ANALYZE: "通常约 3–5 分钟", CORRECT: "通常约 1–3 分钟", INSTALL: "只在第一次：下载约 155 MB",
+           DEPTH: "在本机测量，通常 5–20 秒"}
 CREEP_CAP = 0.9  # an AI stage never fills more than 90 % of its own slice
 
 
-def stages(correct: bool, set_camera: bool = True) -> list:
-    """Stage ids for one run, in order. 设置相机 only when 同时设置相机 is on; the 校正 stages only with 自动校正一轮."""
-    out = [READ, ANALYZE, BUILD]
+def stages(correct: bool, set_camera: bool = True, precise: bool = False, install: bool = False) -> list:
+    """Stage ids for one run, in order. 设置相机 only when 同时设置相机 is on; the 校正 stages only with 自动校正一轮;
+    测量深度 (and, the first time, 安装精确模式) only with 精确模式."""
+    out = [READ]
+    if precise:
+        if install:
+            out.append(INSTALL)
+        out.append(DEPTH)
+    out += [ANALYZE, BUILD]
     if set_camera:
         out.append(CAMERA)
     if correct:
@@ -62,8 +72,9 @@ def index(ids, stage) -> int:
         return -1
 
 
-def fraction(ids, stage, stage_elapsed: float = 0.0, *, cached: bool = False) -> float:
-    """Bar factor 0..1 for ``stage`` of ``ids`` after ``stage_elapsed`` seconds in that stage."""
+def fraction(ids, stage, stage_elapsed: float = 0.0, *, cached: bool = False, inner=None) -> float:
+    """Bar factor 0..1 for ``stage`` of ``ids`` after ``stage_elapsed`` seconds in that stage
+    (``inner`` = a measured 0..1 progress inside the stage, e.g. the 精确模式 download)."""
     ids = list(ids)
     if stage == DONE:
         return 1.0
@@ -76,6 +87,8 @@ def fraction(ids, stage, stage_elapsed: float = 0.0, *, cached: bool = False) ->
     creep = 0.0
     if stage in AI_TYPICAL and not cached:
         creep = min(CREEP_CAP, max(0.0, float(stage_elapsed)) / AI_TYPICAL[stage])
+    if inner is not None:
+        creep = min(CREEP_CAP, max(0.0, float(inner)))
     return round(min(1.0, start + span * creep), 4)
 
 

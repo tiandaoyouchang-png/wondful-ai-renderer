@@ -238,7 +238,7 @@ class CountTests(unittest.TestCase):
         self.assertIn("render_count: EnumProperty(", props)
         self.assertIn('default="4"', props[props.index("render_count: EnumProperty("):])
         ui = (PKG / "ui.py").read_text()
-        i_count = ui.index('count_row.prop(props, "render_count", expand=True)')
+        i_count = ui.index('UIC.field(output,props,"render_count","张数")')
         i_go = ui.index('go.operator("wondful.generate"')
         self.assertLess(i_count, i_go)
         self.assertIn('render_variant_count("antigravity" if active_is_antigravity else "codex", props)', ui)

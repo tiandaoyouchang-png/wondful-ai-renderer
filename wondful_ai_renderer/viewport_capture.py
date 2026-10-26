@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Tuple
 
+from .workflow import isolated_capture
+
 import bpy
 
 from .composition import image_dimensions
@@ -174,6 +176,7 @@ def _capture_camera_opengl(context, filepath: str) -> bool:
                 pass
 
 
+@isolated_capture
 def capture_camera_reference(context, filepath: str) -> tuple[int, int, str]:
     """Capture the current Scene Camera frame as the sole composition reference.
 
@@ -1464,6 +1467,7 @@ def _render_matid(scene, product, matid_path, orig_mats, created, slot_undo) -> 
     return Path(matid_path).exists()
 
 
+@isolated_capture
 def render_detail_pass(context, filepath: str, collection, keep_path: str = "", massing=None,
                        matid_path: str = "") -> dict:
     """Standalone 细节回贴 detail pass (when no clay base was rendered): scene camera, output size."""
@@ -1490,6 +1494,7 @@ def render_detail_pass(context, filepath: str, collection, keep_path: str = "", 
             setattr(render, k, v)
 
 
+@isolated_capture
 def render_product_mask(context, filepath: str, collection, massing=None) -> bool:
     """Product silhouette from the scene camera at the camera output size (no clay base)."""
     scene = context.scene
@@ -1513,11 +1518,12 @@ def render_product_mask(context, filepath: str, collection, massing=None) -> boo
             setattr(render, k, v)
 
 
+@isolated_capture
 def render_clay_base(context, filepath: str, collection=None, ground="AUTO", crest_angle=10.0,
                      terrain=None, mask_path: str = "", massing=None, detail_path: str = "",
                      keep_path: str = "", matid_path: str = "", geometry_prefix: str = "",
-                     geometry_size=None) -> bool:
-    """Render the Scene Camera with a temporary floor, sun and light-gray world.
+                     geometry_size=None, detail: str = "") -> bool:
+    """Render the Scene Camera with a temporary floor and soft neutral illumination.
 
     This is the edit canvas for the simple direct-edit path: a lit clay render
     with ground contact gives the image model a photographic starting point, so
@@ -1528,6 +1534,10 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     matte grey-blue material (their own materials come back afterwards), cast shadows, rest on a
     sculpted floor, and never count as product; ``LAST_CLAY_INFO["massing_text"]`` describes
     where each one sits in the frame for the prompt.
+
+    ``detail`` (1.2.5 细节粗模, needs a carrier built by ④ 精确模式): ``"carrier"`` renders the geometry passes
+    (多角度 projection) with the measured detail blockout instead of the near / mid LLM blocks and the clay floor;
+    ``"clay"`` also renders the clay still with it. Ignored without a carrier or with a crest / custom ground.
     """
     scene = context.scene
     require_scene_camera(context)
@@ -1536,8 +1546,12 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
     snap = {
         "engine": render.engine, "filepath": render.filepath, "x": render.resolution_x, "y": render.resolution_y,
         "pct": render.resolution_percentage, "fmt": _snapshot_image_format(render.image_settings),
+        "color_mode": render.image_settings.color_mode,
         "world": scene.world, "film": getattr(render, "film_transparent", False),
     }
+    cycles = getattr(scene, "cycles", None)
+    if cycles is not None:
+        snap["cycles"] = (cycles.samples, cycles.use_denoising)
     frame_options = {k: getattr(render, k) for k in ("use_border", "use_crop_to_border", "use_compositing", "use_sequencer") if hasattr(render, k)}
     created = []
     restore = []  # undo steps for the temporary product pose (自定义地形), run before cleanup
@@ -1555,6 +1569,14 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         slope = math.degrees(math.acos(max(-1.0, min(1.0, up.z))))
         LAST_CLAY_INFO.clear()
         LAST_CLAY_INFO.update({"user_ground": ground.name if ground else "", "slope_deg": round(slope, 1)})
+        # The edit canvas describes shape and material identity, not the final lighting.
+        # Existing scene lamps must not combine with our temporary illumination (or
+        # leave studio reflections baked into a later outdoor / reference-lit edit).
+        for obj in list(scene.objects):
+            if obj.type == "LIGHT" and not obj.hide_render:
+                obj.hide_render = True
+                restore.append(lambda obj=obj: setattr(obj, "hide_render", False))
+        LAST_CLAY_INFO["lighting"] = "neutral"
         mesh = bpy.data.meshes.new("_wondful_clay_floor")
         s = 500.0
         mesh.from_pydata([(-s, -s, 0), (s, -s, 0), (s, s, 0), (-s, s, 0)], [], [(0, 1, 2, 3)])
@@ -1629,36 +1651,21 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             if note and LAST_CLAY_INFO["massing_text"]:
                 LAST_CLAY_INFO["massing_text"] += "\n" + note
         sun_data = bpy.data.lights.new("_wondful_clay_sun", type="SUN")
-        sun_data.energy = 4.0
+        sun_data.energy = 1.0
         try:
-            sun_data.angle = 0.12
+            sun_data.angle = 0.8
         except Exception:
             pass
         sun = bpy.data.objects.new("_wondful_clay_sun", sun_data)
         sun.rotation_euler = (0.85, 0.0, 0.75)
         scene.collection.objects.link(sun)
         created += [("obj", sun), ("light", sun_data)]
-        if pts:  # two long softbox strips: crisp highlight bands across the clear coat
-            from mathutils import Vector as _V
-            c = sum(pts, _V()) / len(pts)
-            span = max((p - c).length for p in pts)
-            for i, (off, rot, energy) in enumerate((((0.0, 0.0, 2.2), (0.0, 0.0, 0.6), 900.0),
-                                                     ((-1.6, 1.4, 0.9), (1.2, 0.0, -0.9), 500.0))):
-                ld = bpy.data.lights.new(f"_wondful_clay_strip{i}", type="AREA")
-                ld.shape = "RECTANGLE"
-                ld.size, ld.size_y = span * 2.2, span * 0.18
-                ld.energy = energy * (span / 2.5) ** 2
-                lo = bpy.data.objects.new(f"_wondful_clay_strip{i}", ld)
-                lo.location = c + _V(off) * span
-                lo.rotation_euler = rot
-                scene.collection.objects.link(lo)
-                created += [("obj", lo), ("light", ld)]
         world = bpy.data.worlds.new("_wondful_clay_world")
         world.use_nodes = True
         bg = world.node_tree.nodes.get("Background")
         if bg:
-            bg.inputs[1].default_value = 1.0
-            _clay_sky_gradient(world.node_tree, bg)
+            bg.inputs[0].default_value = (0.6, 0.6, 0.6, 1.0)
+            bg.inputs[1].default_value = 0.8
         scene.world = world
         created.append(("world", world))
         for k in frame_options:
@@ -1698,14 +1705,34 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
             render.image_settings.color_mode = "RGB"
         except Exception:
             pass
-        _render_still(scene)
+        detail = (detail or "").lower()
+        skyline = detail.endswith("+sky")          # 1.2.5 远山剪影 (高级 › 多角度)
+        detail = detail.split("+", 1)[0]
+        if detail and (ground_mode in {"CREST", "CUSTOM"} or massing is None):
+            LAST_CLAY_INFO["detail_blockout"] = "skipped: crest / custom ground" if massing is not None else ""
+            detail = ""
+        from .detail_blockout import detail_pass
+        floor_objs = [blk for kind, blk in created if kind == "obj" and blk.type == "MESH"]
+        with detail_pass(massing if detail == "clay" else None, extra_hide=floor_objs, skyline=skyline) as dp:
+            if dp.active:
+                context.view_layer.update()
+            _render_still(scene)
+        if dp.active:
+            context.view_layer.update()
+            LAST_CLAY_INFO["detail_clay"] = True
         ok = Path(filepath).exists() and image_dimensions(filepath) == (width, height)
         if ok and geometry_prefix:
             # 1.2.3 多角度场景一致: world position + normal passes with the same floor / pose / blocks
             try:
                 from .multiview import render_geometry_now
                 gw, gh = geometry_size or (width, height)
-                LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
+                with detail_pass(massing if detail else None, extra_hide=floor_objs, skyline=skyline) as dp:
+                    if dp.active:
+                        context.view_layer.update()
+                    LAST_CLAY_INFO["geometry"] = render_geometry_now(context, geometry_prefix, gw, gh)
+                    LAST_CLAY_INFO["detail_blockout"] = "carrier" if dp.active else LAST_CLAY_INFO.get("detail_blockout", "")
+                    LAST_CLAY_INFO["detail_skyline"] = bool(dp.active and dp.skyline_used)
+                context.view_layer.update()
             except Exception as exc:
                 LAST_CLAY_INFO["geometry"] = False
                 print(f"[Wondful] 多角度场景一致：几何通道失败：{exc}")
@@ -1754,6 +1781,9 @@ def render_clay_base(context, filepath: str, collection=None, ground="AUTO", cre
         render.filepath = snap["filepath"]
         render.resolution_x, render.resolution_y, render.resolution_percentage = snap["x"], snap["y"], snap["pct"]
         _restore_image_format(render.image_settings, snap["fmt"])
+        render.image_settings.color_mode = snap["color_mode"]
+        if "cycles" in snap:
+            cycles.samples, cycles.use_denoising = snap["cycles"]
         if hasattr(render, "film_transparent"):
             render.film_transparent = snap["film"]
         for k, v in frame_options.items():

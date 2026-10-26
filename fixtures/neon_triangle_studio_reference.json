@@ -1,0 +1,166 @@
+{
+  "scene_kind": "interior",
+  "scene_summary": "深色汽车影棚中三层嵌套发光三角框架，外层是画幅上方截断的超大白光倒V门架，中层是冷白V框，后层是细银蓝光条；后方水平红色灯带，地面黑色镜面。",
+  "environment_description": "Minimal dark automotive photography studio with a large cropped inverted-V white LED portal, a smaller cold-white triangular portal, an even smaller blue-white light outline and a red ground-level horizon light strip. The openings are empty, not solid walls. Near-black glossy floor and dark void background, high-contrast reflections. The hero vehicle remains the user's original real 3D model.",
+  "environment_zh": "黑色汽车影棚、三层开放式三角发光框架、黑色镜面地坪、远处水平红色灯带；车身身份不改变",
+  "camera": {
+    "height_m": 1.35,
+    "pitch_deg": 1.1,
+    "roll_deg": 0,
+    "hfov_deg": 64,
+    "horizon_y_frac": 0.527
+  },
+  "palette": {
+    "season": "not_applicable",
+    "season_evidence": "室内摄影棚",
+    "grass_hex": "#11161D",
+    "grass_words": "不适用",
+    "foliage_hex": "#11161D",
+    "foliage_words": "无",
+    "ground_hex": "#0B1117",
+    "ground_words": "近黑色镜面地坪",
+    "sky_words": "极暗背景无天空",
+    "snow_cover": false,
+    "autumn_colours": false,
+    "lock_zh": "黑色汽车摄影棚，黑色反光地坪，白色几何光框，细红色地平灯带"
+  },
+  "terrain": {
+    "far_m": 75,
+    "base_slope_deg": 0,
+    "base_slope_dir_deg": 0,
+    "smoothness": 1,
+    "surface": "deep charcoal polished black showroom floor",
+    "label_zh": "黑色镜面地坪",
+    "bumps": [],
+    "ridges": [],
+    "has_sea": false,
+    "sea_level_m": 0
+  },
+  "roads": [],
+  "mountain_bands": [],
+  "foliage_masses": [],
+  "primitives": [],
+  "cliffs": [],
+  "surface_zones": [],
+  "ribbons": [],
+  "product_spot": {
+    "x": -0.2,
+    "y": 8.0,
+    "rot_z_deg": -18.0,
+    "on": "黑色镜面地坪",
+    "reason": "参考主体居中偏左，低机位前侧四分之三角度"
+  },
+  "reference_subject": {
+    "present": true,
+    "bbox": {
+      "x_min": 0.235,
+      "y_min": 0.485,
+      "x_max": 0.752,
+      "y_max": 0.782
+    },
+    "ground_contact": {
+      "x_frac": 0.486,
+      "y_frac": 0.766
+    },
+    "heading_deg": -18.0,
+    "heading_confidence": 0.45
+  },
+  "light_frames": [
+    {
+      "id": "outer_v",
+      "label_zh": "前景巨型白光门架",
+      "points": [
+        {
+          "x_frac": 0.172,
+          "y_frac": 0.747
+        },
+        {
+          "x_frac": 0.531,
+          "y_frac": -0.241
+        },
+        {
+          "x_frac": 0.968,
+          "y_frac": 0.758
+        }
+      ],
+      "depth_m": 9.0,
+      "width_frac": 0.063,
+      "beam_depth_m": 0.5,
+      "color_hex": "#F1FBFF",
+      "emission": 3.5,
+      "material": "wide smooth white luminous rectangular beam, open inverted V with cropped apex",
+      "grounded": true
+    },
+    {
+      "id": "middle_v",
+      "label_zh": "中层冷白三角灯架",
+      "points": [
+        {
+          "x_frac": 0.5,
+          "y_frac": 0.551
+        },
+        {
+          "x_frac": 0.593,
+          "y_frac": 0.233
+        },
+        {
+          "x_frac": 0.756,
+          "y_frac": 0.752
+        }
+      ],
+      "depth_m": 10.0,
+      "width_frac": 0.019,
+      "beam_depth_m": 0.3,
+      "color_hex": "#D4EDF6",
+      "emission": 2.5,
+      "material": "thin angular cool-white light portal; center open",
+      "grounded": true
+    },
+    {
+      "id": "rear_v",
+      "label_zh": "后层细蓝光框",
+      "points": [
+        {
+          "x_frac": 0.556,
+          "y_frac": 0.564
+        },
+        {
+          "x_frac": 0.609,
+          "y_frac": 0.409
+        },
+        {
+          "x_frac": 0.684,
+          "y_frac": 0.624
+        }
+      ],
+      "depth_m": 11.5,
+      "width_frac": 0.005,
+      "beam_depth_m": 0.12,
+      "color_hex": "#C8E9FC",
+      "emission": 2,
+      "material": "very thin blue-white luminous outline",
+      "grounded": false
+    },
+    {
+      "id": "red_horizon",
+      "label_zh": "后景水平红灯带",
+      "points": [
+        {
+          "x_frac": 0.0,
+          "y_frac": 0.743
+        },
+        {
+          "x_frac": 1.0,
+          "y_frac": 0.743
+        }
+      ],
+      "depth_m": 11.5,
+      "width_frac": 0.0025,
+      "beam_depth_m": 0.12,
+      "color_hex": "#ED314A",
+      "emission": 3.5,
+      "material": "thin distant horizontal red floor light, behind the hero vehicle",
+      "grounded": true
+    }
+  ]
+}

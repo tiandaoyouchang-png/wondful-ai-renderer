@@ -33,7 +33,7 @@ def _product(h=270, w=480):
     wheel = ((xx - 170) ** 2 + (yy - 175) ** 2) <= 32 ** 2
     mask = (body | wheel).astype(np.float32)
     ang = np.arctan2(yy - 175, xx - 170)
-    spokes = 0.5 + 0.4 * np.sign(np.sin(ang * 5))
+    spokes = 0.5 + 0.25 * np.cos(ang * 5)
     det = np.dstack([np.full((h, w), 0.6, np.float32)] * 3)
     det[wheel] = np.repeat(spokes[wheel][:, None], 3, 1)
     det[body & ~wheel] = [0.2, 0.6, 0.25]

@@ -263,25 +263,29 @@ class FitScoreTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_registered_and_in_main_flow_step4(self):
+    def test_registered_and_in_reference_flow(self):
         init = (PKG / "__init__.py").read_text(encoding="utf-8")
         self.assertEqual(init.count("WONDFUL_OT_scene_blockout_build"), 2)
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        # 1.2.3: moved out of 高级 › 场景 › 环境体块 into the main flow as ④ 场景粗模（可选）
+        # Blockout is now part of the reference workflow, not an environment-only
+        # advanced section.
         massing = ui[ui.index("def _draw_massing("):ui.index("def _draw_block_refs")]
         self.assertNotIn("scene_blockout", massing)
         main = ui.split("class WONDFUL_PT_main")[1]
-        self.assertEqual(main.count("_draw_blockout_step("), 1)
+        self.assertIn('reference, tools = _step_card(layout, 2, "目标图与粗模" if replica else "环境参考"', main)
+        self.assertIn("if replica:", main)
         self.assertEqual(ui.count('"wondful.scene_blockout_build"'), 1)
-        self.assertIn('"wondful.scene_blockout_build", text="生成场景粗模"', ui)
-        for label in ("同时设置相机", "自动校正一轮"):
+        self.assertIn('"wondful.scene_blockout_build", text="生成新粗模版本"', ui)
+        for label in ("匹配相机", "自动校正"):
             self.assertIn(label, ui)
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         self.assertIn("sb_set_camera: BoolProperty(name=\"同时设置相机\", default=True", props)
         self.assertIn("sb_correct: BoolProperty(name=\"自动校正一轮\", default=False", props)
-        self.assertIn("这张图只用于分析，不会发给生图模型", props)   # 1.2.3: the hint moved into the tooltip
+        self.assertIn("sb_built_target_hash: StringProperty", props)
+        workflow = (PKG / "workflow.py").read_text(encoding="utf-8")
+        self.assertIn('target_hash != str(getattr(props, "sb_built_target_hash", "") or "")', workflow)
 
-    def test_operator_never_sends_reference_to_image_model(self):
+    def test_blockout_build_does_not_trigger_image_generation(self):
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
         body = ops.split("class WONDFUL_OT_scene_blockout_build")[1].split("\nclass ")[0]
         for call in ("edit_image", "generate_image", "style_images.add", "load_reference"):

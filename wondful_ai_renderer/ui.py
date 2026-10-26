@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from . import workflow
+from . import ui_components as UIC
 
 import unicodedata
 
@@ -76,10 +78,11 @@ def _draw_prompt_editor(layout, props, columns=36):
             # A backport may expose a different signature; keep the panel usable.
             pass
 
-    field = layout.box()
+    field = layout.column(align=True)
     # Always begin with one real editable field. Both routes edit props.prompt.
     entry = field.row()
-    entry.scale_y = 1.4
+    entry.scale_y = UIC.INPUT_HEIGHT
+    entry.use_property_decorate = False
     entry.prop(props, "prompt", text="")
     if props.prompt:
         preview = field.column(align=True)
@@ -88,7 +91,7 @@ def _draw_prompt_editor(layout, props, columns=36):
         for line in visible:
             preview.label(text=line or " ")
         if len(lines) > len(visible):
-            preview.label(text=f"还有 {len(lines) - len(visible)} 行，" + ("可在完整编辑器中读取" if expanded else "点击展开全文"))
+            UIC.help_icon(preview, f"还有 {len(lines) - len(visible)} 行，可展开或在完整编辑器读取")
     field.operator("wondful.open_prompt_text_editor", text="编辑完整提示词", icon="GREASEPENCIL")
 
 
@@ -196,82 +199,8 @@ def _draw_render_views(layout, context, props, busy, cells):
     return views
 
 
-def _draw_reference_card(layout, props, item, index, kind):
-    card = layout.box()
-    split = card.split(factor=0.36)
-    preview = split.column(align=True)
-    if item.image:
-        icon_value = bpy.types.UILayout.icon(item.image)
-        preview.template_icon(icon_value=icon_value, scale=5.0)
-    else:
-        preview.label(text="图片无效", icon="ERROR")
-
-    meta = split.column(align=True)
-    if kind == "STYLE":
-        primary_text = "主光来源"
-        icon0 = "LIGHT_SUN"
-    else:
-        primary_text = "主参考"
-        icon0 = "CHECKMARK"
-    if kind == "PRODUCT" and index > 0:
-        meta.label(text="未使用（只用第一张）", icon="ERROR")
-    else:
-        meta.label(text=primary_text if index == 0 else f"辅助 {index + 1}", icon=icon0 if index == 0 else "IMAGE_DATA")
-    if item.image:
-        name = item.image.name
-        meta.label(text=name if len(name) <= 24 else name[:21] + "…")
-    meta.prop(item, "instruction", text="造型重点" if kind == "PRODUCT" else "参考什么")
-    controls = meta.row(align=True)
-    if kind != "PRODUCT":
-        up = controls.operator("wondful.move_reference", text="", icon="TRIA_UP")
-        up.ref_kind, up.direction, up.item_index = kind, "UP", index
-        down = controls.operator("wondful.move_reference", text="", icon="TRIA_DOWN")
-        down.ref_kind, down.direction, down.item_index = kind, "DOWN", index
-    replace = controls.operator("wondful.replace_reference", text="", icon="FILE_REFRESH")
-    replace.ref_kind, replace.item_index = kind, index
-    remove = controls.operator("wondful.clear_reference", text="", icon="X")
-    remove.ref_kind, remove.item_index = kind, index
 
 
-def _draw_reference_group(layout, props, title, collection_attr, index_attr, kind, open_attr):
-    collection = getattr(props, collection_attr)
-    box = layout.box()
-    header = box.row(align=True)
-    opened = _disclosure(header, props, open_attr, title, suffix=f"  {len(collection)}")
-    header.separator()
-    replaces = kind in {"STYLE", "PRODUCT"} and bool(collection)
-    add_text = "换图" if replaces else "文件"
-    add_icon = "FILE_REFRESH" if replaces else "ADD"
-    add = header.operator("wondful.load_reference", text=add_text, icon=add_icon)
-    add.ref_kind = kind
-    paste = header.operator("wondful.paste_reference", text=("替换粘贴" if replaces else "粘贴"))
-    paste.ref_kind = kind
-    if collection:
-        clear_all = header.operator("wondful.clear_all_references", text="", icon="TRASH")
-        clear_all.ref_kind = kind
-    if not opened:
-        return
-
-    if kind == "PRODUCT":
-        box.label(text="只用 1 张，建议放三视图（正/侧/后拼成一张）。", icon="INFO")
-        box.label(text="仅参考产品造型，不参考原图打光。")
-    elif kind == "STYLE":
-        box.label(text="决定产品受光、反射、阴影与环境氛围。", icon="LIGHT")
-    if not collection:
-        empty = box.column(align=True)
-        empty.label(text="拖入文件，或复制图片后点“粘贴”", icon="IMAGE_DATA")
-        if kind == "STYLE":
-            empty.label(text="第一张决定主光，可用箭头调整顺序；最多 8 张。")
-        elif kind == "PRODUCT":
-            empty.label(text="只放 1 张；再上传会直接替换。")
-        else:
-            empty.label(text="第一张自动作为主参考；最多 8 张。")
-        return
-
-    # The preview and its identity/controls now live in one card. There is no
-    # detached name list + selected-image preview anymore.
-    for index, item in enumerate(collection):
-        _draw_reference_card(box, props, item, index, kind)
 
 
 # ---------------------------------------------------------------------------
@@ -280,23 +209,15 @@ def _draw_reference_group(layout, props, title, collection_attr, index_attr, kin
 
 STEP_NUMBERS = ("①", "②", "③", "④", "⑤", "⑥")
 GENERATE_STAGES = ("读产品图", "分析环境", "写提示词", "渲染验收")
-BUSY_STATUSES = {"AUTHENTICATING", "CLASSIFYING", "POLISHING", "RENDERING", "REFRESHING_MODELS", "BLOCKOUT"}
+BUSY_STATUSES = workflow.BUSY
 
 
 def _step_card(layout, number, title, *, done, ready=True):
-    """One step = one box. The number turns into a CHECKMARK once the step is done.
-
-    ``ready`` only greys the card (``active``); it never disables buttons, so
-    a user can always prepare a later step first.
-    """
     card = layout.box()
-    card.active = bool(ready or done)
+    card.use_property_split = True
+    card.use_property_decorate = False
     header = card.row(align=True)
-    title_col = header.row(align=True)
-    if done:
-        title_col.label(text=title, icon="CHECKMARK")
-    else:
-        title_col.label(text=f"{STEP_NUMBERS[number - 1]}  {_t(title)}")
+    header.label(text=f"{STEP_NUMBERS[number - 1]}  {_t(title)}")
     tools = header.row(align=True)
     tools.alignment = "RIGHT"
     return card, tools
@@ -320,17 +241,7 @@ def _thumb_scale(context, fraction=1.0, lo=4.0, hi=16.0):
 
 
 def _draw_thumbnail(layout, image, scale):
-    """Large preview of an image datablock (works in Blender 4.x sidebars)."""
-    if image is None:
-        layout.label(text="图片无效", icon="ERROR")
-        return
-    try:
-        image.preview_ensure()
-    except Exception:
-        pass
-    row = layout.row()
-    row.alignment = "CENTER"
-    row.template_icon(icon_value=bpy.types.UILayout.icon(image), scale=scale)
+    return UIC.preview(layout, getattr(bpy,"context",None), image)
 
 
 def _short(text, limit=26):
@@ -353,18 +264,11 @@ def _reference_header_tools(tools, collection, kind):
     clear_all.ref_kind = kind
 
 
-def _draw_reference_empty(card, kind, hint_lines):
-    drop = card.box()
-    actions = drop.row(align=True)
-    actions.scale_y = 1.6
-    add = actions.operator("wondful.load_reference", text="选择图片", icon="FILEBROWSER")
-    add.ref_kind = kind
-    paste = actions.operator("wondful.paste_reference", text="粘贴", icon="PASTEDOWN")
-    paste.ref_kind = kind
-    hints = drop.column(align=True)
-    hints.scale_y = 0.85
-    for index, line in enumerate(hint_lines):
-        hints.label(text=line, icon="INFO" if index == 0 else "BLANK1")
+def _draw_reference_empty(card, kind, hint_lines, context=None, props=None):
+    title = {"PRODUCT":"产品身份参考", "STYLE":"环境参考", "PERSON":"人物参考"}.get(kind, "参考图")
+    context = context or bpy.context
+    props = props or context.scene.wondful_ai
+    UIC.image_slot(card, context, props, kind, title=title, required=kind == "PRODUCT")
 
 
 def _draw_item_controls(row, item, index, kind, *, movable):
@@ -391,30 +295,13 @@ def _draw_instruction(layout, item, placeholder):
 
 
 def _draw_primary_reference(card, context, item, index, kind, *, caption, caption_icon, placeholder, movable):
-    """First reference: a large centred thumbnail, caption + compact controls under it."""
-    _draw_thumbnail(card, item.image, _thumb_scale(context))
-    meta = card.row(align=True)
-    label = meta.row(align=True)
-    label.label(text=caption, icon=caption_icon)
-    controls = meta.row(align=True)
-    controls.alignment = "RIGHT"
-    _fit(controls, 4.4 if movable else (3.3 if kind == "PRODUCT" else 2.2))
-    _draw_item_controls(controls, item, index, kind, movable=movable)
-    _draw_instruction(card, item, placeholder)
+    UIC.image_slot(card, context, context.scene.wondful_ai, kind, item=item, index=index,
+                   title=caption, required=kind == "PRODUCT", movable=movable)
 
 
 def _draw_secondary_reference(card, context, item, index, kind, *, caption, caption_icon, placeholder, movable):
-    """Further references: small thumbnail on the left, caption, controls and note on the right."""
-    sub = card.box()
-    row = sub.row()
-    thumb = row.column()
-    _draw_thumbnail(thumb, item.image, 2.6)
-    meta = row.column(align=True)
-    head = meta.row(align=True)
-    head.label(text=caption, icon=caption_icon)
-    controls = meta.row(align=True)
-    _draw_item_controls(controls, item, index, kind, movable=movable)
-    _draw_instruction(meta, item, placeholder)
+    _draw_primary_reference(card, context, item, index, kind, caption=caption,
+                            caption_icon=caption_icon, placeholder=placeholder, movable=movable)
 
 
 def _stage_index(props):
@@ -524,15 +411,20 @@ def _lines(layout, text, icon, cells, max_lines=3):
 
 
 def _note(layout, text, cells, state="ok", max_lines=3):
-    """A status note: ✓ done · ERROR failed · INFO advice · TIME running · plain."""
     if text:
-        _lines(layout, text, NOTE_ICONS.get(state, "INFO"), cells, max_lines)
+        row = layout.row(align=True)
+        row.alert = state == "fail"
+        # Actual statuses remain visible; explanatory details are on hover.
+        short = UIC.short_text(str(text).split("\n")[0], max(18, cells - 6))
+        row.label(text=short, icon=NOTE_ICONS.get(state, "INFO"))
+        UIC.help_icon(row, str(text))
 
 
 def _hint(layout, text, cells, max_lines=2):
-    """The one short explanation a section may carry (INFO)."""
     if text:
-        _lines(layout, text, "INFO", cells, max_lines)
+        row = layout.row(align=True)
+        row.alignment = "RIGHT"
+        UIC.help_icon(row, text)
 
 
 def _state(note, fail=("失败",), info=()):
@@ -548,6 +440,8 @@ def _state(note, fail=("失败",), info=()):
 def _section(layout, title, icon, props=None, toggle=None, *, enabled=True):
     """Level 2: a section inside an 高级 tab. Returns (box, header_row, on)."""
     box = layout.box()
+    box.use_property_split = True
+    box.use_property_decorate = False
     head = box.row(align=True)
     if toggle:
         switch = head.row(align=True)
@@ -618,6 +512,12 @@ def _draw_iou_gate(adv, context, props, busy):
         row.enabled = not busy
         row.prop(props, "iou_gate_max", text="最多生成次数")
         _hint(box, "IoU ≥ 0.95，固定坐标；不过线自动重新生成", cells)
+        try:    # 1.2.5: the preference is the hard cap — say so when it is lower than this setting
+            cap = int(context.preferences.addons[__package__].preferences.alignment_max_attempts)
+        except Exception:
+            cap = 0
+        if 0 < cap < int(getattr(props, "iou_gate_max", 3) or 3):
+            _hint(box, f"偏好设置「最多生成次数」= {cap}，实际每张最多 {cap} 次", cells)
     note = getattr(props, "last_iou_note", "")
     if note:
         ok = "通过（" in note and "未通过" not in note
@@ -641,7 +541,7 @@ def _draw_detail_paste(adv, context, props, busy):
             row.prop(props, "detail_colour_strength", text="强度", slider=True)
         coll = getattr(props, "product_collection", None)
         if coll is None:
-            _hint(box, "需要先在 ② 选择产品集合", cells)
+            _hint(box, "需要先在首步选择车模集合", cells)
         else:
             try:
                 from .viewport_capture import keep_exact_slots
@@ -684,7 +584,7 @@ def _draw_appearance_lock(adv, context, props, busy, has_product):
     if getattr(props, "product_autofill_message", ""):
         _note(box, props.product_autofill_message, cells, "ok", 2)
     else:
-        _hint(box, "留空即可，生成时按产品参考自动填写", cells)
+        _hint(box, "留空使用模型材质；需要时可点击上方按钮从产品参考填写", cells)
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +618,7 @@ def _draw_terrain(layout, props):
         for key, label in keys:
             presets.operator("wondful.terrain_preset", text=label).preset = key
     col = box.column(align=True)
-    col.label(text="四角坡度 (°)：正 = 抬高 · 负 = 降低", icon="INFO")
+    UIC.help_icon(col, "四角坡度：正值抬高，负值降低")
     for pair in (("fl", "fr"), ("bl", "br")):
         row = col.row(align=True)
         for key in pair:
@@ -746,13 +646,19 @@ def _draw_massing(adv, context, props, busy):
         from . import massing as MS
         coll = MS.find_collection(context.scene, props)
         if coll is not None:
-            blocks = MS.block_roots(MS.massing_objects(coll, getattr(props, "product_collection", None)))
+            objects = MS.massing_objects(coll, getattr(props, "product_collection", None))
+            if not workflow.is_reference(props):
+                excluded = workflow.generated_objects(context.scene)
+                objects = [obj for obj in objects if obj not in excluded]
+            blocks = MS.block_roots(objects)
     except Exception:
         coll, blocks = None, []
     if coll is not None:
         how = "已选择" if getattr(props, "massing_collection", None) else "自动识别"
         _note(box, f"{how}：{coll.name}{SEP}{len(blocks)} 个体块", cells, "ok", 2)
         _hint(box, "白模里显示为灰蓝色，AI 画成真实建筑", cells)
+        if not workflow.is_reference(props):
+            _hint(box, "只使用手动环境体块；旧复刻粗模在捕获时排除，不删除。", cells, 2)
     elif getattr(props, "massing_collection", None) is not None:
         _note(box, "该集合与产品集合重叠，已忽略", cells, "info")
     else:
@@ -781,12 +687,14 @@ def _draw_block_refs(box, context, props, busy, blocks):
         refs = MS.get_refs(root)
         _lines(col, f"当前体块：{root.name}{SEP}{len(refs)}/{MS.MAX_BLOCK_REFS} 张", "OBJECT_DATA", cells, 2)
         for index, path in enumerate(refs):
-            line = col.row(align=True)
-            missing = not Path(bpy.path.abspath(path)).is_file()
-            line.label(text=_short(Path(path).name, 36), icon="ERROR" if missing else "FILE_IMAGE")
-            op = line.operator("wondful.block_ref_clear", text="", icon="X")
-            op.index = index
+            card = UIC.path_preview(col, context, path, f"建筑参考 {index + 1}")
+            actions = card.row(align=True)
+            actions.scale_y = UIC.ACTION_HEIGHT
+            actions.operator("wondful.block_ref_clear", text="移除", icon="X").index = index
+        if not refs:
+            UIC.path_preview(col, context, "", "建筑参考")
         actions = col.row(align=True)
+        actions.scale_y = UIC.ACTION_HEIGHT
         add = actions.row(align=True)
         add.enabled = len(refs) < MS.MAX_BLOCK_REFS
         add.operator("wondful.block_ref_add", text="添加参考图", icon="ADD")
@@ -803,7 +711,7 @@ def _draw_block_refs(box, context, props, busy, blocks):
             op.name = obj.name
         if len(blocks) > 8:
             lst.label(text=f"另有 {len(blocks) - 8} 个体块…", icon="BLANK1")
-    _note(refs_box, f"每次生图最多带 {MS.MAX_BUILDING_IMAGES} 张，画面里大的体块优先", cells, "plain", 2)
+    UIC.help_icon(refs_box, f"每次生图最多使用 {MS.MAX_BUILDING_IMAGES} 张建筑参考，画面中较大的体块优先")
 
 
 def _draw_massing_hull(box, props, busy):
@@ -816,11 +724,11 @@ def _draw_massing_hull(box, props, busy):
     col.enabled = not busy
     col.row(align=True).prop(props, "hull_input", expand=True)
     if getattr(props, "hull_input", "SEPARATE") == "SHEET":
-        col.prop(props, "hull_sheet_path", text="拼图")
+        UIC.path_slot(col, bpy.context, props, "hull_sheet_path", "三视图拼图")
     else:
-        col.prop(props, "hull_front_path", text="正视")
-        col.prop(props, "hull_side_path", text="侧视")
-        col.prop(props, "hull_top_path", text="俯视")
+        UIC.path_slot(col, bpy.context, props, "hull_front_path", "正视参考")
+        UIC.path_slot(col, bpy.context, props, "hull_side_path", "侧视参考")
+        UIC.path_slot(col, bpy.context, props, "hull_top_path", "俯视参考")
     col.prop(props, "hull_side_front", text="侧视朝向")
     col.prop(props, "hull_top_front", text="俯视朝向")
     col.row(align=True).prop(props, "hull_size_mode", expand=True)
@@ -850,63 +758,8 @@ def _scene_blockout_exists(context):
     return scene_blockout_exists(context.scene)
 
 
-def _sb_first_reference_name(props):
-    try:
-        items = list(getattr(props, "style_images", []) or [])
-        if items:
-            return Path(getattr(items[0], "source_path", "") or getattr(getattr(items[0], "image", None), "filepath", "")
-                        or "").name or getattr(getattr(items[0], "image", None), "name", "") or "③"
-    except Exception:
-        pass
-    return ""
 
 
-def _draw_blockout_step(layout, context, props, busy, connected, is_antigravity, cells):
-    """④ 场景粗模（可选）(1.2.3, was 高级 › 场景 › 环境体块): one environment photo → a whole blockout
-    (Wondful 场景粗模) + optional camera. Compact: hint · 参考图 · two toggles · one button; stages + bar while running."""
-    from . import sb_progress as SP
-    running = props.status == "BLOCKOUT"
-    done = (not running) and _scene_blockout_exists(context)
-    card, tools = _step_card(layout, 4, "场景粗模", done=done, ready=connected)
-    _fit(tools, 2.4)
-    tools.label(text="可选")
-    custom = (getattr(props, "sb_image_path", "") or "").strip()
-    first = _sb_first_reference_name(props)
-    col = card.column()
-    col.enabled = not busy
-    if not running:
-        _hint(col, "用 ③ 的参考图搭灰模和相机，约 3–5 分钟", cells, 1)
-    if _supports_placeholder():
-        col.prop(props, "sb_image_path", text="参考图", placeholder="留空 = 用 ③ 第一张")
-    else:
-        col.prop(props, "sb_image_path", text="参考图")
-        if not custom and first:
-            _note(col, "留空 = 用 ③ 第一张", cells, "plain", 1)
-    if not custom and not first and not running:
-        _note(col, "③ 还没有环境参考图：先放一张，或在这里选图", cells, "info", 2)
-    row = col.row(align=True)
-    row.prop(props, "sb_set_camera", text="同时设置相机")
-    row.prop(props, "sb_correct", text="自动校正一轮")
-    failed = (getattr(props, "sb_failed_stage", "") or "") if not running else ""
-    if running or failed:
-        _draw_sb_progress(card, props, running, failed, SP)
-    if running:
-        # the only live control while it runs: 取消 takes the build button's place
-        cancel = card.row(align=True)
-        cancel.scale_y = 1.3
-        cancel.operator("wondful.cancel_task", text="取消", icon="CANCEL")
-        return
-    build = card.row(align=True)
-    build.scale_y = 1.3
-    build.enabled = bool(custom or first) and not busy
-    build.operator("wondful.scene_blockout_build", text="生成场景粗模", icon="MOD_BUILD")
-    if is_antigravity:
-        _hint(card, "需要 Codex 登录（高级 › 模型 › AI 服务）", cells, 1)
-    note = getattr(props, "last_sb_note", "")
-    if note:
-        _note(card, note, cells, _state(note, fail=("失败", "不存在"), info=("请先", "需要", "取消")), 4)
-    elif done:
-        _note(card, "已有场景粗模；重新生成会替换它", cells, "plain", 1)
 
 
 def _draw_sb_progress(layout, props, running, failed, SP):
@@ -930,7 +783,7 @@ def _draw_sb_progress(layout, props, running, failed, SP):
         layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
     tip = SP.hint(stage)
     if tip:
-        _hint(layout, tip, _cols(bpy.context, 2))
+        UIC.help_icon(layout, tip)
     bar = layout.column()
     bar.scale_y = 1.2
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
@@ -955,7 +808,7 @@ def _draw_person_refs(adv, context, props, busy):
     tools.alignment = "RIGHT"
     _reference_header_tools(tools, images, "PERSON")
     if not images:
-        _draw_reference_empty(box, "PERSON", ("可选 · 第一张作为主参考，最多 8 张",))
+        _draw_reference_empty(box, "PERSON", (), context, props)
     else:
         for index, item in enumerate(images):
             _draw_secondary_reference(box, context, item, index, "PERSON",
@@ -966,6 +819,27 @@ def _draw_person_refs(adv, context, props, busy):
         box.operator("wondful.auto_classify_references", text="按内容整理参考图（Jev）", icon="SORTALPHA")
     if getattr(props, "jev_status_message", ""):
         _note(box, props.jev_status_message, cells, "info", 2)
+
+
+# ---------------------------------------------------------------------------
+# 高级 › 成片
+# ---------------------------------------------------------------------------
+
+def _draw_photo_finish(adv, context, props, busy):
+    """高级 › 成片 › 照片质感 (1.2.4): 关 / 细微 / 标准, the last step on the final image."""
+    box, _head, _on = _section(adv, "照片质感", "IMAGE_DATA")
+    cells = _cols(context, 2)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "photo_finish", expand=True)
+    level = getattr(props, "photo_finish", "SUBTLE")
+    if level == "OFF":
+        _hint(box, "不加后期，输出与以前相同", cells)
+    else:
+        _hint(box, "高光滚降 · 环境饱和度 · 暗角 · 色差 · 颗粒；产品轮廓和颜色不变", cells)
+    note = getattr(props, "last_finish_note", "")
+    if note:
+        _note(box, note, cells, _state(note), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +856,7 @@ def _draw_multiview(adv, context, props, busy):
     row.operator("wondful.mv_set_master", text="设为主视角", icon="CAMERA_DATA")
     row = box.row(align=True)
     row.enabled = not busy
-    row.prop(props, "mv_master_image", text="主视角图")
+    UIC.path_slot(box, context, props, "mv_master_image", "主视角图")
     master = getattr(props, "mv_master_camera", None)
     try:
         from .operators import mv_pick
@@ -997,10 +871,29 @@ def _draw_multiview(adv, context, props, busy):
     row.enabled = not busy
     row.prop(props, "mv_widen", text="加宽体块")
     row.prop(props, "mv_env_check", text="环境一致性检查")
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "mv_colour_match", text="统一调色")
+    row.prop(props, "mv_avoid_occlusion", text="被遮挡就调视角")
+    # 1.2.5 细节粗模 (needs ④ 精确模式)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "sb_detail_carrier", text="细节粗模投影")
+    sub = row.row(align=True)
+    sub.enabled = not busy and bool(getattr(props, "sb_detail_carrier", True))
+    sub.prop(props, "sb_detail_clay", text="白模也用")
+    sub.prop(props, "sb_detail_skyline", text="远山剪影")
+    # 1.2.5 场景补全 refinements (default on; 空间三态 / 近密远疏 take effect at the next ④ build)
+    row = box.row(align=True)
+    row.enabled = not busy
+    row.prop(props, "sb_free_space", text="空间三态")
+    row.prop(props, "sb_lod_bands", text="近密远疏")
+    row.prop(props, "sb_seam_blend", text="接缝过渡")
+    row.prop(props, "sb_ground_bands", text="地面分带")
     if master is None:
         _hint(box, "先用 ⑥ 渲染满意的一张，再点「设为主视角」", cells)
     else:
-        _hint(box, "每个相机 1 次生图；产品超标最多重试 1 次", cells)
+        _hint(box, "每个相机 1 次生图；产品超标或 low 画质档最多重试 1 次", cells)
     act = box.row(align=True)
     act.scale_y = 1.2
     act.enabled = bool(master is not None and others) and not busy
@@ -1139,12 +1032,12 @@ def draw_github_footer(layout):
     row = layout.row(align=True)
     row.scale_y = 0.9
     row.alignment = "CENTER"
-    op = row.operator("wm.url_open", text="GitHub · 欢迎点 Star", icon="SOLO_ON", emboss=False)
+    op = row.operator("wm.url_open", text="GitHub", icon="SOLO_ON", emboss=False)
     op.url = GITHUB_URL
 
 
 class WONDFUL_PT_main(Panel):
-    bl_label = "Wondful AI 渲染器 · 1.2"
+    bl_label = "Wondful AI 渲染器"
     bl_idname = "WONDFUL_PT_main"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -1155,14 +1048,16 @@ class WONDFUL_PT_main(Panel):
         draw_github_footer(self.layout)
 
     def _draw_main(self, context):
-        """Six step cards (连接 / 产品三视图（可选） / 环境参考图 / 场景粗模（可选） / 提示词 / 生成); the rest in 高级 (tabs, 1.2.3)."""
+        """Consistent four-step workflows. Help lives in tooltips, not paragraphs."""
         from .operators import generate_needs_polish
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         props = context.scene.wondful_ai
         prefs = _prefs(context)
         busy = props.status in BUSY_STATUSES
+        replica = workflow.is_reference(props)
         cells = _cols(context, 1)
-
         active_is_antigravity = props.analysis_provider == "ANTIGRAVITY"
         state = props.antigravity_account_state if active_is_antigravity else props.codex_account_state
         account_message = props.antigravity_account_message if active_is_antigravity else props.codex_account_message
@@ -1171,220 +1066,178 @@ class WONDFUL_PT_main(Panel):
         refresh_op = "wondful.antigravity_check" if active_is_antigravity else "wondful.codex_check"
         camera = context.scene.camera
         camera_w, camera_h = camera_output_dimensions(context)
-
-        imagegen_enabled = prefs.codex_imagegen_enabled if not active_is_antigravity else prefs.antigravity_imagegen_enabled
-        structure_ready = bool((not prefs.structure_guides_enabled) or (not prefs.strict_composition_lock) or props.product_collection)
-        needs_polish = generate_needs_polish(props, prefs)
-
+        imagegen_enabled = prefs.antigravity_imagegen_enabled if active_is_antigravity else prefs.codex_imagegen_enabled
         connected = state == "LOGGED_IN"
-        has_product = len(props.product_images) > 0
-        has_style = len(props.style_images) > 0
-        prompt_ready = bool((props.prompt or "").strip()) and not needs_polish
-        can_generate = bool(not busy and connected and camera and structure_ready and imagegen_enabled)
-
+        structure_ready = bool(props.product_collection)
+        has_product = workflow.identity_available(props)
+        has_style = bool(props.sb_image_path) if replica else bool(props.style_images)
+        blockout = _scene_blockout_exists(context) if replica else False
+        replica_ready = bool(blockout and props.sb_image_path and props.sb_built_target_hash)
+        can_generate = bool(not busy and connected and camera and structure_ready and has_product
+                            and imagegen_enabled and (not replica or replica_ready))
+        selector = layout.box()
+        heading = selector.row(align=True)
+        heading.label(text="工作模式", icon="MODIFIER")
+        UIC.help_icon(heading, key="reference" if replica else "environment")
+        modes = selector.row(align=True); modes.enabled = not busy
+        modes.scale_y = UIC.ACTION_HEIGHT
+        for value, caption, symbol in (("ENVIRONMENT", "环境渲染", "WORLD"),
+                                       ("REFERENCE", "参考图复刻", "IMAGE_DATA")):
+            action = modes.operator("wondful.set_workflow_mode", text=caption, icon=symbol,
+                                    depress=(props.workflow_mode == value))
+            action.next_mode = value
         _draw_update_banner(layout, context)
-
-        # ---- ① 连接 -------------------------------------------------------------
-        step1, tools = _step_card(layout, 1, "连接", done=connected)
-        if connected:
-            _fit(tools, 4.6)
-            tools.label(text=("Google" if active_is_antigravity else "ChatGPT"))
-            tools.operator(refresh_op, text="", icon="FILE_REFRESH")
-        else:
-            account_text = {
-                "UNKNOWN": "未检测",
-                "NOT_INSTALLED": _t("找不到 {provider}").format(provider=provider_label),
-                "LOGGED_OUT": "未登录",
-                "ERROR": "异常",
-            }.get(state, state)
-            if active_is_antigravity and props.status == "AUTHENTICATING":
-                account_text = "正在连接"
-            _fit(tools, 6 if len(account_text) > 4 else 4)
-            tools.label(text=account_text, icon="QUESTION" if state == "UNKNOWN" else "ERROR")
-            tools.operator(refresh_op, text="", icon="FILE_REFRESH")
-            connect = step1.row(align=True)
-            connect.scale_y = 1.5
-            connect.enabled = not busy
+        connection = selector.row(align=True)
+        connection.label(text=provider_label, icon="LINKED")
+        connection.label(text="已连接" if connected else {"UNKNOWN":"未检测","NOT_INSTALLED":"未安装","LOGGED_OUT":"未登录"}.get(state,"连接异常"))
+        connect_tools = connection.row(align=True); connect_tools.enabled = not busy
+        connect_tools.operator(refresh_op, text="", icon="FILE_REFRESH")
+        UIC.help_icon(connection, workflow.BUILD_ID + "\n" + (account_message or "在设置中管理服务商和模型"))
+        if not connected:
+            login = selector.row(align=True); login.enabled = not busy; login.scale_y = UIC.ACTION_HEIGHT
+            login.operator("wondful.antigravity_terminal" if active_is_antigravity else "wondful.codex_login",
+                           text="登录", icon="USER")
             if active_is_antigravity:
-                connect.operator("wondful.antigravity_terminal", text="Google 登录", icon="USER")
-                connect.operator("wondful.antigravity_login", text="验证登录", icon="CHECKMARK")
-                _hint(step1, _t("在终端和浏览器里登录后，回来点「验证登录」"), cells)
-            else:
-                connect.operator("wondful.codex_login", text="使用 ChatGPT 登录", icon="USER")
-            if state == "NOT_INSTALLED":
-                _hint(step1, _t("已装 Codex 仍找不到？在 高级 › 诊断 › 偏好设置 里填路径"), cells)
-            elif account_message:
-                _note(step1, account_message, cells, "plain", 2)
+                login.operator("wondful.antigravity_login", text="验证登录", icon="CHECKMARK")
         if props.status == "AUTHENTICATING":
-            auth = step1.box()
+            if active_is_antigravity and props.auth_has_url:
+                selector.operator("wondful.antigravity_auth_browser", text="打开登录页", icon="URL")
+            if active_is_antigravity and props.auth_stage == "WAITING_CODE":
+                UIC.field(selector, context.window_manager, "wondful_auth_code", "授权码")
+                selector.operator("wondful.antigravity_submit_code", text="提交授权码", icon="CHECKMARK")
+            _draw_progress_bar(selector,props,"正在连接")
+            selector.operator("wondful.cancel_task",text="取消",icon="CANCEL")
+
+        vehicle, tools = _step_card(layout, 1, "车模与相机", done=structure_ready and has_product)
+        UIC.help_icon(tools, key="PRODUCT")
+        controls = vehicle.column(); controls.enabled = not busy
+        UIC.field(controls, props, "product_collection", "车模集合", icon="OUTLINER_COLLECTION")
+        UIC.field(controls, context.scene, "camera", "活动相机", icon="CAMERA_DATA")
+        product_item = props.product_images[0] if len(props.product_images) else None
+        UIC.image_slot(controls, context, props, "PRODUCT", item=product_item,
+                       title="产品身份参考", required=True)
+        if len(props.product_images) > 1:
+            _note(controls, "旧工程有多余身份图；替换后仅保留一张", cells, "info")
+
+        reference, tools = _step_card(layout, 2, "目标图与粗模" if replica else "环境参考", done=replica_ready if replica else has_style)
+        UIC.help_icon(tools, key="TARGET" if replica else "STYLE")
+        refs = reference.column()
+        editable_refs = refs.column(); editable_refs.enabled = not busy
+        if replica:
+            UIC.image_slot(editable_refs, context, props, "TARGET", title="复刻目标图", required=True)
+            settings = editable_refs.box()
+            caption = settings.row(align=True)
+            caption.label(text="粗模设置", icon="MOD_BUILD")
+            UIC.help_icon(caption, key="build")
+            switches = settings.row(align=True)
+            switches.scale_y = UIC.INPUT_HEIGHT
+            switches.prop(props, "sb_set_camera", text="匹配相机", toggle=True)
+            switches.prop(props, "sb_correct", text="自动校正", toggle=True)
+            detail = settings.row(align=True)
+            detail.prop(props, "ui_show_replica_advanced", text="更多选项",
+                        icon="TRIA_DOWN" if props.ui_show_replica_advanced else "TRIA_RIGHT",
+                        toggle=True)
+            if props.ui_show_replica_advanced:
+                extra = settings.row(align=True)
+                extra.scale_y = UIC.INPUT_HEIGHT
+                extra.prop(props, "sb_precise", text="深度测量", toggle=True)
+                extra.prop(props, "sb_complete", text="场景补全", toggle=True)
+            build = editable_refs.row(align=True); build.scale_y = UIC.ACTION_HEIGHT
+            build.enabled = bool(not busy and props.sb_image_path and structure_ready and has_product
+                                 and connected and not active_is_antigravity)
+            build.operator_context = "INVOKE_DEFAULT"
+            build.operator("wondful.scene_blockout_build", text="生成新粗模版本", icon="MOD_BUILD")
+            if props.status == "BLOCKOUT":
+                from . import sb_progress as SP
+                _draw_sb_progress(refs, props, True, "", SP)
+                cancel = refs.row(align=True)
+                cancel.operator("wondful.cancel_task", text="取消生成", icon="CANCEL")
+            elif props.sb_failed_stage:
+                from . import sb_progress as SP
+                _draw_sb_progress(refs, props, False, props.sb_failed_stage, SP)
+            if getattr(props, "sb_active_collection", None):
+                version_row = refs.row(align=True)
+                version_row.label(text=f"当前版本：{props.sb_active_collection.name}", icon="OUTLINER_COLLECTION")
+                UIC.help_icon(version_row, "旧版粗模不会删除；在大纲视图中可展开并重新显示。")
             if active_is_antigravity:
-                _lines(auth, props.auth_detail or _t("正在连接 AGY"), "TIME", _cols(context, 2), 4)
-                if props.auth_has_url:
-                    auth.operator("wondful.antigravity_auth_browser", text="打开本次登录页", icon="URL")
-                if props.auth_stage == "WAITING_CODE":
-                    auth.prop(context.window_manager, "wondful_auth_code", text="授权码")
-                    auth.operator("wondful.antigravity_submit_code", text="提交授权码", icon="CHECKMARK")
-                auth.operator("wondful.antigravity_auth_cancel", text="取消连接", icon="CANCEL")
-            else:
-                auth.prop(props, "progress", text="等待浏览器授权", slider=True)
-
-        # ---- ② 产品三视图 -------------------------------------------------------
-        # 1.1: the 三视图 is optional — the step is done once the product collection is set.
-        product_done = structure_ready and (has_product or bool(props.product_collection))
-        step2, tools = _step_card(layout, 2, "产品三视图（可选）", done=product_done, ready=connected)
-        _reference_header_tools(tools, props.product_images, "PRODUCT")
-        if not has_product:
-            _draw_reference_empty(step2, "PRODUCT", (
-                "可选：放 1 张三视图（正 / 侧 / 后拼成一张）",
-                "不放也能生成，产品以场景里的模型为准",
-            ))
+                _note(reference,"粗模分析需要 Codex",cells,"info")
+            if props.last_sb_note:
+                _note(reference,props.last_sb_note,cells,_state(props.last_sb_note))
+            review, tools = _step_card(layout, 3, "预览与调整", done=bool(props.sb_preview_image))
+            UIC.help_icon(tools, key="preview")
+            body = review.column(); body.enabled = not busy
+            preview_box = body.box()
+            preview_box.label(text="当前预览",icon="IMAGE_DATA")
+            UIC.preview(preview_box,context,props.sb_preview_image)
+            actions = preview_box.row(align=True); actions.scale_y = UIC.ACTION_HEIGHT
+            actions.enabled = bool(camera and blockout)
+            actions.operator("wondful.replica_preview",text="刷新预览",icon="FILE_REFRESH")
+            compare = actions.row(align=True)
+            compare.enabled = bool(props.sb_reference_image and props.sb_preview_image)
+            compare.operator("wondful.open_compare_workspace",text="打开对比",icon="ARROW_LEFTRIGHT")
+            if props.sb_reference_image and props.sb_preview_image:
+                UIC.field(body, props, "compare_pair", "对比对象")
+            UIC.text_input(body, props, "replica_feedback", "修改意见", UIC.HELP['preview'])
+            modify = body.row(align=True); modify.scale_y = UIC.ACTION_HEIGHT
+            apply = modify.row(align=True)
+            apply.enabled = bool(replica_ready and has_product and connected and not active_is_antigravity and props.replica_feedback.strip())
+            apply.operator("wondful.replica_refine",text="按意见修改",icon="MODIFIER")
+            undo = modify.row(align=True); undo.enabled = bool(props.replica_can_undo)
+            undo.operator("wondful.replica_undo",text="撤销调整",icon="LOOP_BACK")
+            if props.replica_revision_status:
+                _note(review,props.replica_revision_status,cells,_state(props.replica_revision_status,fail=("未应用",),info=("未处理",)))
+            prompt_card = review
         else:
-            for index, item in enumerate(props.product_images):
-                if index == 0:
-                    _draw_primary_reference(step2, context, item, index, "PRODUCT",
-                                            caption="三视图", caption_icon="IMAGE_DATA",
-                                            placeholder="造型重点（可选）", movable=False)
-                else:
-                    extra = step2.row(align=True)
-                    extra.label(text=f"未使用{SEP}{_short(item.image.name if item.image else '无效图片', 16)}", icon="INFO")
-                    remove = extra.operator("wondful.clear_reference", text="", icon="X")
-                    remove.ref_kind, remove.item_index = "PRODUCT", index
-        if not props.product_collection:
-            step2.label(text="产品所在集合（锁定构图用）：" if not structure_ready else "产品所在集合：")
-        target = step2.row(align=True)
-        target.prop(props, "product_collection", text="", icon="OUTLINER_COLLECTION")
-        if not camera:
-            _hint(step2, "场景里还没有活动相机", cells)
+            if not props.style_images:
+                UIC.image_slot(editable_refs,context,props,"STYLE",title="环境参考")
+            for index,item in enumerate(props.style_images):
+                UIC.image_slot(editable_refs,context,props,"STYLE",item=item,index=index,
+                    title="主环境参考" if index==0 else f"环境参考 {index+1}",movable=len(props.style_images)>1)
+            add = editable_refs.row(align=True); add.scale_y = UIC.ACTION_HEIGHT
+            add.enabled = len(props.style_images) < MAX_REFERENCES_PER_KIND
+            action = add.operator("wondful.load_reference", text="添加参考图",icon="ADD")
+            action.ref_kind = "STYLE"; action.append_to_set = True
+            prompt_card, tools = _step_card(layout,3,"需求与提示词",done=bool(props.prompt or props.scene_brief))
+            UIC.help_icon(tools,key="prompt")
 
-        # ---- ③ 环境参考图 -------------------------------------------------------
-        step3, tools = _step_card(layout, 3, "环境参考图", done=has_style, ready=connected and product_done)
-        _reference_header_tools(tools, props.style_images, "STYLE")
-        if not has_style:
-            _draw_reference_empty(step3, "STYLE", (
-                "决定受光、反射、阴影与氛围（可选）",
-                "第一张作为主光来源，最多 8 张",
-            ))
-        else:
-            for index, item in enumerate(props.style_images):
-                if index == 0:
-                    _draw_primary_reference(step3, context, item, index, "STYLE",
-                                            caption="主光来源", caption_icon="LIGHT_SUN",
-                                            placeholder="参考什么（可选）", movable=len(props.style_images) > 1)
-                else:
-                    _draw_secondary_reference(step3, context, item, index, "STYLE",
-                                              caption=f"辅助 {index + 1}", caption_icon="IMAGE_DATA",
-                                              placeholder="参考什么", movable=True)
+        editor = prompt_card.column(); editor.enabled = not busy
+        UIC.text_input(editor, props, "scene_brief", "渲染需求" if replica else "一句话需求", UIC.HELP['prompt'])
+        if _disclosure(editor.row(align=True),props,"ui_show_prompt","完整提示词",icon="TEXT"):
+            UIC.field(editor,props,"prompt_expanded","展开全文")
+            _draw_prompt_editor(editor,props,max(16,cells))
+        polish=editor.row(align=True);polish.scale_y=UIC.ACTION_HEIGHT
+        polish.enabled = not busy and connected and has_product
+        polish.operator("wondful.polish_prompt",text="AI 润色",icon="TEXT")
+        if props.prompt_notice:
+            UIC.help_icon(editor,props.prompt_notice)
 
-        # ---- ④ 场景粗模（可选）--------------------------------------------------
-        _draw_blockout_step(layout, context, props, busy, connected, active_is_antigravity, cells)
-
-        # ---- ⑤ 提示词 -----------------------------------------------------------
-        step4, tools = _step_card(layout, 5, "提示词", done=prompt_ready, ready=connected and product_done)
-        _fit(tools, 3)
-        tools.label(text=f"{_prompt_char_count(props.prompt)} 字")
-        brief = step4.row(align=True)
-        brief.scale_y = 1.25
-        if _supports_placeholder():
-            brief.prop(props, "scene_brief", text="", icon="GREASEPENCIL", placeholder="一句话需求（可留空）：雪地清晨，冷色调")
-        else:
-            step4.label(text="一句话需求（可留空）：")
-            brief = step4.row(align=True)
-            brief.scale_y = 1.25
-            brief.prop(props, "scene_brief", text="", icon="GREASEPENCIL")
-        status_row = step4.row(align=True)
-        status_row.scale_y = 0.85
-        if prompt_ready:
-            status_row.label(text="提示词已就绪，生成时直接使用", icon="CHECKMARK")
-        else:
-            status_row.label(text="点「生成」时自动读图并写提示词", icon="INFO")
-        prompt_box = step4.column()
-        if _disclosure(prompt_box.row(align=True), props, "ui_show_prompt", "查看 / 编辑完整提示词", icon="TEXT"):
-            region_width = getattr(getattr(context, "region", None), "width", 330)
-            ui_scale = getattr(getattr(context.preferences, "system", None), "ui_scale", 1.0)
-            columns = max(16, int((region_width / max(.5, ui_scale) - 65) / 7.5))
-            prompt_box.prop(props, "prompt_expanded", text="收起" if props.prompt_expanded else "展开全文", emboss=False)
-            _draw_prompt_editor(prompt_box, props, columns)
-            if props.prompt_notice:
-                _note(prompt_box, props.prompt_notice, cells, "info", 2)
-            if getattr(props, "prompt_removed_notice", ""):
-                _lines(prompt_box, props.prompt_removed_notice, "TRASH", cells, 2)
-            polish = prompt_box.row(align=True)
-            polish.enabled = bool(not busy and connected)
-            polish.operator("wondful.polish_prompt", text="只重写提示词", icon="TEXT")
-
-        # ---- ⑥ 生成 -------------------------------------------------------------
-        result_done = bool(props.result_image) and not busy
-        step5, tools = _step_card(layout, 6, "生成", done=result_done, ready=can_generate or busy)
-        if props.two_step and not busy:
-            _fit(tools, 3)
-            tools.label(text="分两步")
-        generating = props.status in {"POLISHING", "RENDERING"}
-        # 1.2.3: side tasks report here too (场景粗模 from ④ as one line, 多角度 from 高级), whatever tab is open
-        side_task = props.status == "BLOCKOUT" or (generating and (props.task_phase or "").startswith("多角度"))
-        if side_task:
-            _draw_task_progress(step5, props, cells)
-        elif generating:
-            from .operators import views_plan
-            plan = views_plan(props)
-            if plan:
-                _note(step5, _view_phase(1, int(plan.get("total") or len(plan["cameras"])), plan["cameras"][0], True),
-                      cells, "run", 1)
-            current = _stage_index(props)
-            stages = step5.column(align=True)
-            stages.scale_y = 0.8
-            for index, name in enumerate(GENERATE_STAGES):
-                icon = "CHECKMARK" if index < current else ("PLAY" if index == current else "RADIOBUT_OFF")
-                cell = stages.row(align=True)
-                cell.active = index <= current
-                cell.label(text=name + (SEP + "进行中" if index == current else ""), icon=icon)
-            pct = max(0, min(100, int(round(float(props.progress) * 100))))
-            phase = getattr(props, "task_phase", "") or GENERATE_STAGES[max(0, current)]
-            _note(step5, phase, cells, "run", 2)
-            bar = step5.column()
-            bar.scale_y = 1.4
-            _draw_progress_bar(bar, props, f"估算 {pct}%")
-        else:
-            views = []
-            if _scene_blockout_exists(context):      # 1.2.3: ④ built a 场景粗模 → choose the views to render
-                views = _draw_render_views(step5, context, props, busy, cells)
-            if props.two_step:
-                go_text = "生成提示词" if needs_polish else "渲染"
-            else:
-                go_text = "生成"
-            if len(views) > 1 and not (props.two_step and needs_polish):
-                go_text += f" {len(views)} 个视角"
-            # 1.2.2: images per generation, right above 生成.
-            count_row = step5.row(align=True)
-            count_row.enabled = not busy
-            count_row.label(text="张数")
-            count_row.prop(props, "render_count", expand=True)
-            cap = provider_variant_cap("antigravity" if active_is_antigravity else "codex")
-            if int(props.render_count) > cap:
-                _hint(step5, f"Antigravity 每次最多 {cap} 张，将生成 {cap} 张", cells)
-            go = step5.row(align=True)
-            go.scale_y = 2.0
-            go.enabled = can_generate
-            go.operator("wondful.generate", text=go_text, icon="RENDER_STILL")
+        step5,tools=_step_card(layout,4,"渲染复刻图" if replica else "生成效果图",done=bool(props.result_image))
+        UIC.help_icon(tools,key="output")
+        output=step5.column();output.enabled=not busy
+        UIC.field(output,props,"render_mode","质量")
+        UIC.field(output,prefs,"long_edge","目标长边")
+        UIC.field(output,props,"render_count","张数")
+        UIC.field(output,props,"output_directory","保存目录")
+        if replica:
+            UIC.field(output,props,"workflow_multiview","多视角")
+            if props.workflow_multiview:
+                _draw_render_views(output,context,props,busy,cells)
         if busy:
-            if props.status not in {"POLISHING", "RENDERING"} and not side_task:
-                _note(step5, getattr(props, "task_phase", "") or "后台任务进行中", cells, "run", 2)
-            cancel_row = step5.row(align=True)
-            cancel_row.scale_y = 1.2
-            cancel_row.operator("wondful.cancel_task", text="取消", icon="CANCEL")
+            if props.status != "BLOCKOUT":
+                _draw_task_progress(step5,props,cells)
+                step5.operator("wondful.cancel_task",text="取消任务",icon="CANCEL")
         else:
-            next_step = (
-                "先完成 ① 连接" if not connected else
-                "先在场景里设置活动相机" if not camera else
-                "先在 ② 选择产品集合" if not structure_ready else
-                "ImageGen 已在偏好设置里关闭" if not imagegen_enabled else "")
-            if next_step:
-                _hint(step5, next_step, cells)
-        if getattr(props, "model_notice", ""):
-            _note(step5, props.model_notice, cells, "info", 3)
-        if props.status == "ERROR" and props.last_error:
-            err = step5.box()
-            _note(err, props.last_error, _cols(context, 2), "fail", 6)
-            err.operator("wondful.copy_diagnostics", text="复制诊断信息", icon="COPYDOWN")
+            go=step5.row(align=True);go.enabled=can_generate;go.scale_y=UIC.ACTION_HEIGHT
+            go.operator("wondful.generate",text="按当前场景渲染" if replica else "生成效果图",icon="RENDER_STILL")
+            missing=("缺少身份参考" if not has_product else "未连接账号" if not connected else "未选择车模" if not structure_ready
+                     else "未选择相机" if not camera else "粗模未就绪" if replica and not replica_ready else "生图未启用" if not imagegen_enabled else "")
+            if missing:
+                _note(step5,missing,cells,"info")
+        if props.status=="ERROR" and props.last_error:
+            _note(step5,props.last_error,cells,"fail")
+            step5.operator("wondful.copy_diagnostics",text="复制诊断",icon="COPYDOWN")
+        if props.model_notice:
+            _note(step5,props.model_notice,cells,"info")
 
         # ---- 结果（属于 ⑥）------------------------------------------------------
         provider_variant_count = render_variant_count("antigravity" if active_is_antigravity else "codex", props)
@@ -1392,13 +1245,15 @@ class WONDFUL_PT_main(Panel):
             rcells = _cols(context, 2)
             result = step5.box()
             title = result.row(align=True)
-            title.label(text="结果", icon="IMAGE_DATA")
+            title.label(text=(workflow.label(props.result_workflow) + " · 结果") if props.result_workflow else "上次结果", icon="IMAGE_DATA")
             if props.alignment_score >= 0:
                 ok = props.alignment_score >= prefs.alignment_threshold
                 score = title.row(align=True)
                 score.alignment = "RIGHT"
                 _fit(score, 3.6)
                 score.label(text=f"对齐 {props.alignment_score:.0f}", icon="CHECKMARK" if ok else "INFO")
+            if replica:
+                result.prop(props, "compare_pair", text="对比对象")
             _draw_view_flip(result, props)
             _draw_thumbnail(result, props.result_image, _thumb_scale(context, 1.0, hi=18.0))
             exported_count = max(0, int(getattr(props, "variant_count", 0)))
@@ -1419,24 +1274,27 @@ class WONDFUL_PT_main(Panel):
                 _note(result, detail_note.partition(" · 注意：")[0], rcells,
                       _state(detail_note, info=("跳过", "已放弃", "无可用生图")), 2)
             again = result.row(align=True)
-            again.scale_y = 1.4
-            again.enabled = not busy
-            again.operator("wondful.ai_render", text="再来一张", icon="FILE_REFRESH")
+            again.scale_y = UIC.ACTION_HEIGHT
+            again.enabled = can_generate
+            again.operator("wondful.generate", text="重新生成", icon="FILE_REFRESH")
             actions = result.row(align=True)
-            actions.scale_y = 1.2
-            actions.operator("wondful.open_compare_workspace", text="对比原图", icon="ARROW_LEFTRIGHT")
+            actions.scale_y = UIC.ACTION_HEIGHT
+            actions.operator("wondful.open_compare_workspace", text="打开对比", icon="ARROW_LEFTRIGHT")
             actions.operator("wondful.open_output_directory", text="打开文件夹", icon="FILE_FOLDER")
 
         # ---- 高级 ---------------------------------------------------------------
-        # 1.2.3: one group at a time (模型 · 输出 · 产品 · 场景 · 多角度 · 诊断); running progress stays in ⑥ (场景粗模: ④ + one line in ⑥).
+        # 1.2.3: one group at a time (模型 · 输出 · 成片 · 产品 · 场景 · 多角度 · 诊断; 成片 1.2.4); running progress stays in ⑥ (场景粗模: ④ + one line in ⑥).
         layout.separator()
         advanced = layout.box()
         if not _disclosure(advanced.row(align=True), props, "ui_show_advanced", "高级", icon="PREFERENCES"):
             return
         tabs = advanced.row(align=True)
         tabs.scale_y = 1.2
-        tabs.prop(props, "ui_adv_tab", expand=True)
+        UIC.field(tabs, props, "ui_adv_tab", "设置分类")
         adv = advanced.column()
+        adv.use_property_split = True
+        adv.use_property_decorate = False
+        adv.enabled = not busy
         tab = getattr(props, "ui_adv_tab", "MODEL")
         acells = _cols(context, 2)
 
@@ -1463,15 +1321,15 @@ class WONDFUL_PT_main(Panel):
             if msg:
                 _note(ai, msg, acells, "plain", 2)
             if active_is_antigravity:
-                ai.label(text="生图：AGY generate_image（由 CLI 管理）", icon="RENDER_STILL")
+                UIC.help_icon(ai, "生图使用 AGY generate_image，由 CLI 管理")
             else:
                 ai.prop(prefs, "codex_direct_edit", text="图像编辑直连（推荐）")
                 if getattr(prefs, "codex_direct_edit", True):
                     simple = ai.row(align=True)
                     simple.separator(factor=2.0)
                     simple.prop(prefs, "codex_direct_simple", text="简洁输入（推荐）")
-                ai.label(text=("生图：Codex 图像编辑 · 失败自动改用 CLI" if getattr(prefs, "codex_direct_edit", True)
-                               else "生图：Codex ImageGen（由 CLI 管理）"), icon="RENDER_STILL")
+                UIC.help_icon(ai, ("Codex 图像编辑，失败后可改用 CLI" if getattr(prefs, "codex_direct_edit", True)
+                                  else "Codex ImageGen，由 CLI 管理"))
                 if getattr(prefs, "codex_direct_edit", True) and getattr(prefs, "codex_direct_simple", True):
                     _hint(ai, "地面 / 地形在 场景 › 地面", acells)
             acct, _head, _on = _section(adv, "账户", "USER")
@@ -1488,7 +1346,9 @@ class WONDFUL_PT_main(Panel):
 
         elif tab == "OUTPUT":
             flow, _head, _on = _section(adv, "流程", "SEQUENCE")
-            flow.prop(props, "two_step", text="分两步：先写提示词，确认后再渲染")
+            flow.prop(props, "auto_polish_on_generate", text="生成前自动润色（可选）")
+            if props.auto_polish_on_generate:
+                flow.prop(props, "two_step", text="润色后暂停，确认再渲染")
             mode_row = flow.row(align=True)
             mode_row.label(text="模式")
             mode_row.prop(props, "render_mode", expand=True)
@@ -1510,9 +1370,12 @@ class WONDFUL_PT_main(Panel):
                 full = getattr(props, "layered_mode", "SHADOW") == "FULL"
                 _hint(layers, ("每张约多 30–50 秒" if full else "几秒完成") + SEP + "存到结果图旁（PNG + PSD）", acells)
                 if not getattr(props, "product_collection", None):
-                    _hint(layers, "需要先在 ② 选择产品集合", acells)
+                    _hint(layers, "需要先在首步选择车模集合", acells)
             if getattr(props, "last_layers_note", ""):
                 _note(layers, props.last_layers_note, acells, _state(props.last_layers_note), 2)
+
+        elif tab == "FINISH":
+            _draw_photo_finish(adv, context, props, busy)
 
         elif tab == "PRODUCT":
             _draw_iou_gate(adv, context, props, busy)
@@ -1527,14 +1390,17 @@ class WONDFUL_PT_main(Panel):
             _draw_person_refs(adv, context, props, busy)
 
         elif tab == "MULTIVIEW":
-            _draw_multiview(adv, context, props, busy)
+            if replica:
+                _draw_multiview(adv, context, props, busy)
+            else:
+                _hint(adv, "多角度扩展属于参考图复刻；切换模式后使用。", acells, 3)
 
         else:  # DIAG
             info, _head, _on = _section(adv, "上次渲染", "RENDER_RESULT")
             if not props.result_image:
                 _hint(info, "还没有渲染结果", acells)
             else:
-                info.template_ID_preview(props, "result_image", rows=4, cols=7)
+                UIC.preview(info, context, props.result_image)
                 if props.last_export_path:
                     _note(info, f"输出：{props.last_export_path}", acells, "plain", 2)
                 if props.alignment_attempts:
