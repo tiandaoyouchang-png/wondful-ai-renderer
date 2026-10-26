@@ -12,7 +12,7 @@ from pathlib import Path
 
 ENVIRONMENT = "ENVIRONMENT"
 REFERENCE = "REFERENCE"
-BUILD_ID = "two-workflows-ui-r2"
+BUILD_ID = "two-workflows-geometry-r3"
 BUSY = {"POLISHING", "RENDERING", "AUTHENTICATING", "BLOCKOUT", "CHECKING", "AUTOFILLING", "CLASSIFYING", "REFRESHING_MODELS"}
 DRAFT_FIELDS = ("prompt", "scene_brief", "scene_brief_used", "prompt_source", "last_ai_prompt",
                 "prompt_style_fingerprint", "prompt_style_revision", "prompt_reference_policy_version",

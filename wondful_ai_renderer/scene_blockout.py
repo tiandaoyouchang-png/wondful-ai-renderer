@@ -31,7 +31,7 @@ CAMERA_NAME = "Wondful 参考相机"
 TEXT_NAME = "wondful_scene_blockout.json"
 SCENE_NOTE_PROP = "wondful_sb_scene_note"
 GROUP_PROP = "wondful_sb_group"
-SCHEMA_NAME = "wondful_scene_blockout_v1"
+SCHEMA_NAME = "wondful_scene_blockout_v2"
 EFFORT_FIRST = "high"
 EFFORT_CORRECT = "medium"
 WORK_LONG = 1600          # analysis image long edge
@@ -55,7 +55,7 @@ SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["scene_kind", "scene_summary", "environment_description", "environment_zh", "palette", "camera",
                  "terrain", "roads", "mountain_bands", "foliage_masses", "primitives", "product_spot", "cliffs",
-                 "surface_zones", "reference_subject", "ribbons"],
+                 "surface_zones", "reference_subject", "ribbons", "light_frames"],
     "properties": {
         "scene_kind": {"type": "string", "enum": ["outdoor", "interior"]},
         "scene_summary": _s,
@@ -136,6 +136,16 @@ SCHEMA = {
                            "sections": {"type": "array", "minItems": 2, "maxItems": 32, "items": {
                                "type": "object", "additionalProperties": False,
                                "required": ["left", "right"], "properties": {"left": _pt3, "right": _pt3}}}}}},
+        "light_frames": {"type": "array", "maxItems": 12, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "label_zh", "points", "depth_m", "width_frac", "beam_depth_m",
+                         "color_hex", "emission", "material", "grounded"],
+            "properties": {
+                "id": _s, "label_zh": _s,
+                "points": {"type": "array", "minItems": 2, "maxItems": 16, "items": _spt},
+                "depth_m": _num, "width_frac": _num, "beam_depth_m": _num,
+                "color_hex": _s, "emission": _num, "material": _s,
+                "grounded": {"type": "boolean"}}}},
         "cliffs": {"type": "array", "maxItems": 4, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "label_zh", "base_points", "top_z_m", "side", "thickness_m", "lean_deg", "roughness",
@@ -170,6 +180,8 @@ SCENE_KIND: outdoor or interior (a room). For an interior: terrain = flat floor 
  height, h 0.2), windows/glass doors = thin box type window placed in the wall plane (slightly in front of it), curtains =
  thin box type curtain, sofas/tables/TV units/cabinets/shelves = type furniture (box), rugs = very flat box type rug (h 0.02),
  lamps = type lamp, indoor plants = type plant. Typical room height 2.6-3.0 m, camera height ~1.2-1.6 m.
+ For abstract automotive photo studios, leave invisible walls and ceilings OUT: a black void does not mean a solid
+ wall. Keep a flat floor, the real car and ONLY the actual visible illuminated structures. Do not invent buildings.
 
 PALETTE (season lock; these words must also work when a source image cannot be attached): name the season you SEE (not what is typical),
  with evidence (leaf colour, snow, light, flowers). Give the colours as they appear in the photo with a hex estimate:
@@ -222,6 +234,29 @@ RIBBONS (max 12): continuous curved walls, broad twisting concrete bands, overhe
  preserve their gaps and front/back order. For a flared wall the two edges can run from ground to its upper rim. Describe
  only visible evidence; this is a view-matched approximation, not a unique recovery of hidden geometry. Use [] if absent.
  Do not also duplicate a ribbon as primitives. material describes its real surface; label_zh names the structure.
+LIGHT_FRAMES (max 12): architectural LED portals, triangular/V-shaped light tunnels, illuminated polygonal beams,
+ long straight luminous light bars and horizontal neon strips that form explicit scene geometry. Do NOT approximate these
+ with building boxes, cylinders, a terrain ridge, or the smooth ribbons meant for CURVED solid walls.
+ Each frame is a real closed 3D rectangular beam chain, its centreline defined by 2–16 screen-space points in ORDER
+ (x_frac,y_frac, 0 left/top, 1 right/bottom; frame endpoints may leave the image: -1.5..2.5). Trace the CENTRE of
+ the bright beam, NOT its outer edge. A large V portal is one polyline [left floor tip, upper apex, right floor tip],
+ even if its apex is ABOVE the photo: EXTRAPOLATE the two visible straight edges to their intersection outside the
+ crop. Each nested V is a separate frame at its own depth. Distinguish: main outer V, smaller inner V and thin rearmost
+ V; never replace them with a single pyramid or filled triangle. A horizontal red floor-light line is another frame
+ with two endpoints, and goes BEHIND the main product if it is occluded by the car.
+ width_frac = full BEAM width divided by PHOTO WIDTH, not screen height; e.g. 90 pixels / 1456 = 0.062.
+ depth_m is a plausible distance along camera forward (+Y) for the entire upright frame, with nearer frames in front
+ of farther ones. Its visible FOOT at the dark floor should project near ground level: do NOT place a studio frame
+ 10 metres BELOW the floor simply to match a cropped beam. The camera height and depth must be mutually consistent.
+ Set grounded=true ONLY when the visible endpoint of the open LED structure actually touches the floor;
+ the builder will calibrate its depth from that endpoint and the known floor plane. Set false for suspended frames
+ and hidden/uncertain feet to preserve the predicted depth.
+ beam_depth_m is its actual physical depth/solid thickness in metres. color_hex #RRGGBB,
+ emission is brightness 0..30, material describes the light/diffuser and support material. Preserve the black NEGATIVE
+ SPACE inside every outline: light_frames are open outlines, never a filled face. Keep overlapping near/far ordering.
+ If there are no visible illuminated rigid architectural frames, use [] — do not hallucinate glowing geometry.
+ LIGHT_FRAMES is especially important for high-contrast studio photos with a black backdrop, shiny floor and large
+ illuminated triangles. Their SCREEN ANCHORS, beam width and gaps are stronger evidence than guessed 3D wall dimensions.
 PRIMITIVES (max 30, biggest silhouettes first; they sit ON the terrain: z_offset = 0 normally):
  x,y = footprint centre; w along local X, d along local Y, h = height (for gable: eave height), roof_h = gable roof height
  (ridge along local X; 0 for other shapes), rot_z_deg = rotation about Z.
@@ -273,7 +308,10 @@ sky / background), and a 50% overlay of the render on the photo.
 Fit score of the previous round (0..1, higher is better): {scores}
 Measured differences (fractions of the frame; x 0 left..1 right, y 0 top..1 bottom):
 {hints}
-Fix in this order: camera (horizon, pitch, FOV) if the horizon/vanishing point is off; then the skyline (mountain band profiles,
+Fix in this order: when light_frames are present, FIRST fix each rigid frame's projected centreline, V apex,
+ cropped endpoints, beam width and near/far nesting against the actual photo. Keep the negative space OPEN, and do
+ not substitute a filled triangle, wall or box. Never drop correctly aligned nested frames merely to improve a sky
+ IoU score. For other scenes fix camera (horizon, pitch, FOV) if the horizon/vanishing point is off; then the skyline (mountain band profiles,
 building tops, foliage outlines) where sky/non-sky disagree; then large region extents; then details. Keep what already fits
 (do not change an element whose region already matches). Keep the palette and the label_zh names unless they are wrong.
 Return the full corrected JSON.
@@ -381,7 +419,12 @@ def scene_note(data) -> str:
     if ribbons:
         names = "、".join(dict.fromkeys(element_label("ribbon", r) for r in ribbons[:12]))
         topology = f"连续曲面：{names}，按已有网格保持带状连通、转折和结构间空隙"
-    parts = [x for x in (topology, env[:200], lock[:220]) if x]
+    light = data.get("light_frames") or []
+    light_note = ""
+    if light:
+        names = "、".join(dict.fromkeys(str(f.get("label_zh") or "发光框架") for f in light[:12]))
+        light_note = f"实体发光框架：{names}；保持开放轮廓、梁宽、白光/红光、前后嵌套与负空间，不要合成实心三角体"
+    parts = [x for x in (light_note, topology, env[:200], lock[:220]) if x]
     if not parts:
         return ""
     return "场景（按环境参考图分析的季节与色彩，保持一致）：" + "；".join(parts)
@@ -533,6 +576,9 @@ def normalize(data) -> dict:
     spot["rot_z_deg"] = _f(spot.get("rot_z_deg"), 0.0)
     d["reference_subject"] = reference_subject(d)
     d["ribbons"], warnings = normalize_ribbons(d.get("ribbons"))
+    from .studio_frames import normalize_frames
+    d["light_frames"], light_warnings = normalize_frames(d.get("light_frames"))
+    warnings.extend(light_warnings)
     if warnings:
         d["_geometry_warnings"] = list(dict.fromkeys(list(d.get("_geometry_warnings") or []) + warnings))
     d.setdefault("palette", {})

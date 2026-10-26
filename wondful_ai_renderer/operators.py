@@ -1765,6 +1765,22 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                          "set_camera": bool(props.sb_set_camera), "correct": correct, "stage": 1, "scores": [],
                          "rounds": [], "model": model, "client_version": client_version, "source": source})
         content = SB.analysis_content(CD.data_url(upload)[0], frame, dims, vehicle)
+        # Pure-numpy structural hints: helps the model locate bright, long
+        # architectural edges even in a dark studio. They are only candidates;
+        # no car highlight or reflection is treated as geometry automatically.
+        try:
+            from .studio_edge_guides import bright_bar_hints, guide_text
+            from .png_io import read_png
+            import numpy as np
+            sampled = read_png(upload)
+            hints = bright_bar_hints(sampled)
+            if hints:
+                content.append({"type": "input_text", "text": guide_text(hints)})
+            self._sb["light_edge_candidates"] = len(hints)
+            self._sb["light_edge_hints"] = hints
+            self._sb["dark_reference"] = bool(float(np.median(sampled[..., :3].mean(axis=2))) < 58.)
+        except (ValueError, OSError, TypeError) as exc:
+            print(f"[Wondful] 建筑直线辅助分析不可用：{exc}")
         if (props.sb_target_note or "").strip():
             content.append({"type": "input_text", "text": "Reference priorities: " + props.sb_target_note.strip()})
         self._sb["content"] = content
@@ -1910,6 +1926,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         from . import scene_blockout as SB
         from . import scene_blockout_build as SBB
         from .png_io import read_png, write_png
+        import numpy as np
         d = Path(self._sb["session"])
         path = d / f"scene_preview_{tag}.png"
         if rendered is None or not Path(rendered).is_file():
@@ -1917,7 +1934,30 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         photo = read_png(self._sb["upload"]).astype("float32")[..., :3]
         render = read_png(str(path)).astype("float32")
         subject = (self._sb.get("analysis") or {}).get("reference_subject") or {}
-        sc = SB.fit_score(photo, render, exclude_bbox=subject.get("bbox") if subject.get("present") else None)
+        exclude = subject.get("bbox") if subject.get("present") else None
+        sc = SB.fit_score(photo, render, exclude_bbox=exclude)
+        analysis = self._sb.get("data") or self._sb.get("analysis") or {}
+        frames = SB.normalize(analysis).get("light_frames") or []
+        prior = self._sb.get("rounds") or []
+        prior_frames = bool(prior and SB.normalize(prior[0]).get("light_frames"))
+        # If round 2 deletes a correctly found frame, the metric must not
+        # silently revert to (irrelevant) black-studio sky IoU. Likewise, a
+        # first round that entirely missed obvious bright architecture should
+        # not win merely because its empty background resembles sky.
+        dark_studio = (analysis.get("scene_kind") == "interior"
+                       and self._sb.get("light_edge_candidates", 0) >= 2
+                       and float(np.median(photo[..., :3].mean(axis=2))) < 58.0)
+        if frames or prior_frames or dark_studio:
+            from .studio_frames import frame_alignment_score
+            metric = frame_alignment_score(photo, frames, exclude_bbox=exclude) if frames else {
+                "frame_f": 0.0, "frame_precision": 0.0, "frame_recall": 0.0,
+                "frame_hints": ["高对比影棚未重建发光框架，检查多层开口式LED梁体"]}
+            sc.update(metric)
+            # Dark studio backgrounds are not photographic 'sky'. The exact
+            # bright-beam match matters more than the old sky-IoU heuristic.
+            sc["score"] = round(.8 * metric["frame_f"] + .2 * sc["edge_f"], 3)
+            sc["hints"] = list(metric.get("frame_hints", []))
+            sc["metric"] = "LUMINOUS_FRAME_ALIGNMENT"
         if info.get("framing_fit"):
             sc["product_framing"] = info["framing_fit"]
         pr = self._sb.get("precise_rounds") or []
@@ -1926,7 +1966,6 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             sc["dist3d_err_pct"] = pr[k]["err_after_pct"]      # 3D: median distance error vs the measured depth
         print(f"[Wondful] 场景粗模 {tag}：2D 吻合度 {sc['score']:.3f}（skyIoU {sc.get('sky_iou', '-')} · edgeF "
               f"{sc.get('edge_f')}）" + (f" · 3D 距离误差 {sc['dist3d_err_pct']}%" if "dist3d_err_pct" in sc else ""))
-        import numpy as np
         flat = render[..., :3] * (render[..., 3:4] / 255.0) + 255.0 * (1.0 - render[..., 3:4] / 255.0)
         write_png(str(d / f"scene_preview_{tag}_flat.png"), flat.clip(0, 255).astype(np.uint8))
         write_png(str(d / f"scene_overlay_{tag}.png"), SB.overlay(photo, flat))
@@ -2033,6 +2072,15 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
                         return self._finish(context, info, 1)
                     return self._fail(context, props, exc)
                 data = SB.normalize(self._result)
+                if not sb["cached"] and sb["stage"] == 1 and sb.get("light_edge_hints"):
+                    # The assistant may omit bright cropped V portals even when
+                    # both photo limbs are unambiguous. Recover only a strictly
+                    # supported outer portal and mark it for manual review.
+                    from .studio_edge_guides import rescue_outer_portal
+                    data, recovered = rescue_outer_portal(data, sb["light_edge_hints"],
+                                                           dark_studio=bool(sb.get("dark_reference")))
+                    if recovered:
+                        print("[Wondful] 从图像直线候选补建外层V灯架；前后层级需人工复核")
                 try:
                     Path(sb["session"], f"scene_analysis_r{sb['stage']}.json").write_text(
                         json.dumps(self._result, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -23,6 +23,11 @@ SCHEMA = obj({
         'id':{'type':'string'},'translation':VEC,'rotation_deg':VEC,'scale':VEC,'hidden':{'type':'boolean'}})},
     'ribbons': {'type':'array','maxItems':8,'items':obj({
         'id':{'type':'string'},'sections':{'type':'array','minItems':2,'maxItems':32,'items':SECTION}, 'thickness_m':NUM})},
+     'light_frames': {'type':'array','maxItems':8,'items':obj({
+        'id':{'type':'string'},
+        'points':{'type':'array','minItems':2,'maxItems':16,'items':obj({'x_frac':NUM,'y_frac':NUM})},
+        'width_frac':NUM,'depth_m':NUM,'beam_depth_m':NUM,'color_hex':{'type':'string'},
+        'emission':NUM,'grounded':{'type':'boolean'}})},
     'additions': {'type':'array','maxItems':8,'items':obj({
         'label':{'type':'string'},'location':VEC,'dimensions':VEC,'rotation_deg':VEC})},
 })
@@ -53,7 +58,7 @@ def validate(reply, snapshot, ribbon_builder=None):
     unresolved=reply['unresolved']
     if not isinstance(unresolved,list) or len(unresolved)>8 or any(not isinstance(v,str) or len(v)>1000 for v in unresolved):
         raise ValueError('Invalid unresolved-request list')
-    out={'summary':reply['summary'],'unresolved':unresolved[:], 'edits':[], 'ribbons':[], 'additions':[]}
+    out={'summary':reply['summary'],'unresolved':unresolved[:], 'edits':[], 'ribbons':[], 'light_frames':[], 'additions':[]}
     camera=reply['camera'];keys(camera,SCHEMA['properties']['camera']['required'])
     if type(camera['apply']) is not bool:
         raise ValueError('Invalid camera apply flag')
@@ -104,7 +109,27 @@ def validate(reply, snapshot, ribbon_builder=None):
                     raise ValueError('Invalid new-block label')
                 out[kind].append(dict(label=label.strip(),location=vector(row['location'],-20000,20000),
                     dimensions=vector(row['dimensions'],0.02,1000),rotation_deg=vector(row['rotation_deg'],-180,180)))
-    if not out['camera']['apply'] and not any(out[k] for k in ('edits','ribbons','additions')):
+    from .studio_frames import normalize_frames
+    used_frames = set()
+    frames = reply['light_frames']
+    if not isinstance(frames, list) or len(frames) > 8:
+        raise ValueError('Too many luminous-frame corrections')
+    for frame in frames:
+        keys(frame, SCHEMA['properties']['light_frames']['items']['required'])
+        ident = frame['id']
+        if not isinstance(ident, str) or ident not in known or ident in used_frames:
+            raise ValueError('Unknown or duplicate luminous-frame ID')
+        if known[ident].get('kind') != 'light_frame':
+            raise ValueError('Only generated light frames can change screen anchors')
+        used_frames.add(ident)
+        old = known[ident].get('frame') or {}
+        full = dict(frame, id=ident, label_zh=old.get('label_zh') or known[ident].get('name') or '发光框架',
+                    material=old.get('material', ''))
+        parsed, warnings = normalize_frames([full])
+        if warnings or len(parsed) != 1:
+            raise ValueError('Invalid luminous-frame correction: '+('; '.join(warnings)))
+        out['light_frames'].append(parsed[0])
+    if not out['camera']['apply'] and not any(out[k] for k in ('edits','ribbons','additions','light_frames')):
         out['no_change']=True
     return out
 
@@ -123,6 +148,11 @@ Camera translation is WORLD metres and rotation_deg is WORLD XYZ orientation DEL
 Keep the current camera when no camera change is requested; set apply=false and retain current lens and shifts.
 Ribbons: only existing kind=ribbon IDs; paired sections are absolute OBJECT-LOCAL coordinates, not screen or world.
 Their object transform remains unchanged unless also listed in edits. Preserve side correspondence and thickness.
+Light frames: only IDs with kind=light_frame. Use the original normalized PHOTO space coordinates, 0 left/top to
+1 right/bottom, and possibly beyond the frame for cropped V apexes. Return the ENTIRE ordered screen centreline of
+that frame when a user asks to change its apex, length, angle or beam width. Keep the beam open: never fill the triangle.
+Each replacement includes width_frac, depth_m (camera-forward metres), beam_depth_m, RGB hex color, emission
+and grounded. Do not change the product or other frames; unchanged light_frames=[].
 Additions are coarse boxes only, with WORLD location, full dimensions, and WORLD absolute XYZ rotation. Do not use
 boxes to fake twisted surfaces. Never alter unrequested objects. If a request cannot be expressed with these bounded
 operations (for example photoreal car-paint relighting), explain it in unresolved, not an unrelated substitute.

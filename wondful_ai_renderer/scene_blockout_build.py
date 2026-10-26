@@ -24,6 +24,7 @@ from mathutils import Euler, Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from . import scene_blockout as SB
+from . import studio_frames as SF
 
 MAT_PREFIX = "Wondful粗模_"
 TINT = {
@@ -305,7 +306,12 @@ class _Builder:
         g = _hexrgb(P.get("ground_hex")) if (self.interior or P.get("snow_cover") or any(
             k in surf for k in ("sand", "dune", "snow", "desert", "paving", "floor", "concrete", "cobble"))) \
             else _hexrgb(P.get("grass_hex"))
-        self.T["terrain"] = _mix(self.T["terrain"], g, 0.5)
+        # A black mirror studio floor is not a mid-gray outdoor clay terrain.
+        # Keep its actual dark color and polished reflections in the blockout.
+        self.studio_reflective = bool(self.interior and self.S.get("light_frames")
+                                      and any(term in surf for term in (
+                                          "mirror", "gloss", "polish", "reflect", "镜面", "抛光", "反光", "倒影")))
+        self.T["terrain"] = g if self.studio_reflective else _mix(self.T["terrain"], g, 0.5)
         f = _hexrgb(P.get("foliage_hex"))
         for k in list(self.T):
             if k.startswith("foliage_") or k in ("tree", "bush", "hedge", "plant", "band_forested"):
@@ -328,9 +334,39 @@ class _Builder:
             bsdf = m.node_tree.nodes.get("Principled BSDF")
             if bsdf:
                 bsdf.inputs["Base Color"].default_value = (*c, 1.0)
-                bsdf.inputs["Roughness"].default_value = 0.85
+                bsdf.inputs["Roughness"].default_value = (0.10 if self.studio_reflective and t == "terrain"
+                                                          else 0.85)
+                if self.studio_reflective and t == "terrain":
+                    bsdf.inputs["Metallic"].default_value = 0.15
             self.mats[t] = m
         return self.mats[t]
+
+    def light_material(self, hex_color, emission, side=False):
+        """One physically emissive camera-facing skin and neutral dark sidewalls."""
+        key = ("light_frame", hex_color, round(emission, 3), side)
+        if key not in self.mats:
+            value = hex_color.lstrip("#")
+            rgb = tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
+            if side:
+                rgb = tuple(v * 0.18 for v in rgb)
+            name = f"{MAT_PREFIX}Frame_{value}_{round(emission, 3)}_{'side' if side else 'front'}"
+            mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
+            mat.diffuse_color = (*rgb, 1.0)
+            mat.use_nodes = True
+            nodes = mat.node_tree.nodes
+            nodes.clear()
+            out = nodes.new("ShaderNodeOutputMaterial")
+            if side:
+                surface = nodes.new("ShaderNodeBsdfPrincipled")
+                surface.inputs["Base Color"].default_value = (*rgb, 1.0)
+                surface.inputs["Roughness"].default_value = 0.55
+            else:
+                surface = nodes.new("ShaderNodeEmission")
+                surface.inputs["Color"].default_value = (*rgb, 1.0)
+                surface.inputs["Strength"].default_value = emission
+            mat.node_tree.links.new(surface.outputs[0], out.inputs["Surface"])
+            self.mats[key] = mat
+        return self.mats[key]
 
     def obj(self, name, me, t, smooth=False):
         o = bpy.data.objects.new(name, me)
@@ -857,6 +893,57 @@ class _Builder:
             except (ValueError, TypeError, KeyError) as exc:
                 self.warn.append(f"{label}：{exc}，已跳过")
 
+    def light_frames(self):
+        """Camera-matched polygonal LED portals: geometry + emission, not filled triangles."""
+        for entry in self.S.get("light_frames", []):
+            name = str(entry["label_zh"])
+            try:
+                def project(u, v, depth):
+                    ray = self.ray(u, v)
+                    if ray.y <= 0.01:
+                        raise ValueError("框架端点落在相机后方")
+                    return self.CAMPOS + ray * ((depth - self.CAMPOS.y) / ray.y)
+
+                frame = dict(entry)
+                if frame.get("grounded"):
+                    # Solve the screen-to-floor ray for the visible lower endpoint
+                    # instead of trusting an arbitrary 3D depth from the model.
+                    end_points = (frame["points"][0], frame["points"][-1])
+                    candidates = []
+                    for pt in end_points:
+                        if not 0.64 <= pt["y_frac"] <= 1.05:
+                            continue
+                        ray = self.ray(pt["x_frac"], pt["y_frac"])
+                        floor = self.th(0, 0)
+                        if ray.z < -0.005:
+                            depth = self.CAMPOS.y + (floor-self.CAMPOS.z)*ray.y/ray.z
+                            if 2 <= depth <= 200 and math.isfinite(depth):
+                                candidates.append(depth)
+                    if candidates:
+                        estimate = float(np.median(candidates))
+                        if abs(frame["depth_m"]-estimate) > 0.4:
+                            self.warn.append(f"{name}按梁脚与地坪交点校准深度 {frame['depth_m']:.1f}→{estimate:.1f}m")
+                        frame["depth_m"] = estimate
+                    else:
+                        self.warn.append(f"{name}无法确认地坪交点，使用分析深度")
+                verts, faces, layout = SF.beam_mesh(
+                    frame["points"], (self.fw, self.fh), frame["width_frac"],
+                    frame["depth_m"], frame["beam_depth_m"], project)
+                obj = self.mesh(name, verts, faces, "building")
+                obj.data.materials.clear()
+                obj.data.materials.append(self.light_material(entry["color_hex"], entry["emission"], side=True))
+                obj.data.materials.append(self.light_material(entry["color_hex"], entry["emission"], side=False))
+                for polygon in obj.data.polygons[:layout["front_faces"]]:
+                    polygon.material_index = 1
+                obj["wondful_env_type"] = "light_frame"
+                obj["wondful_sb_light_frame"] = 1
+                obj["wondful_sb_frame_spec"] = json.dumps(frame, ensure_ascii=False)
+                obj["wondful_sb_frame_front_faces"] = layout["front_faces"]
+                obj["wondful_material"] = entry.get("material", "")
+                self.group(name, [obj])
+            except (TypeError, KeyError, ValueError) as exc:
+                self.warn.append(f"{name}：{exc}，发光框架未生成")
+
     # ---------------------------------------------------------------- foliage
     def _lumpy(self, name, lump, seed):
         bm = bmesh.new()
@@ -1114,6 +1201,7 @@ class _Builder:
         self.cliffs()
         self.primitives()
         self.ribbons()
+        self.light_frames()
         self.foliage()
         return self
 
@@ -1303,6 +1391,7 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
             "labels": [lab for lab, _o in b.groups], "notes": notes, "scene_note": note,
             "horizon_check": round(hz - c["horizon_y_frac"], 3), "spot_world": list(world @ local_spot),
             "framing_fit": framing_fit, "ribbons": sum(bool(o.get("wondful_sb_connected_surface")) for o in coll.all_objects),
+            "light_frames": sum(bool(o.get("wondful_sb_light_frame")) for o in coll.all_objects),
             # 1.2.5 细节粗模: analysis → world matrix, camera height in the local frame, product spot + pad
             "world": [list(r) for r in world], "cam_local_z": float(b.CAMPOS.z), "spot_local": [sx, sy, zs],
             "pad_radius": float(pad[2]) if pad else 2.5}
@@ -1343,9 +1432,10 @@ def render_preview(context, info, path, width=480, product_collection=None):
         made.append(world)
         world.use_nodes = True
         bg = world.node_tree.nodes.get("Background")
+        studio = bool(info.get("light_frames"))
         if bg:
-            bg.inputs[0].default_value = (0.80, 0.84, 0.90, 1)
-            bg.inputs[1].default_value = 0.6
+            bg.inputs[0].default_value = (0.018, 0.024, 0.032, 1) if studio else (0.80, 0.84, 0.90, 1)
+            bg.inputs[1].default_value = 0.45 if studio else 0.6
         tmp.world = world
         sd = bpy.data.lights.new("_wondful_sb_preview_sun", "SUN")
         sd.energy = 2.5
@@ -1357,7 +1447,9 @@ def render_preview(context, info, path, width=480, product_collection=None):
         r.resolution_x = int(width)
         r.resolution_y = max(8, int(round(width * fh / float(fw))))
         r.resolution_percentage = 100
-        r.film_transparent = True
+        # A white transparent background makes white LED frame geometry
+        # invisible in the thumbnail. Show the actual dark negative space here.
+        r.film_transparent = not studio
         r.image_settings.file_format = "PNG"
         r.image_settings.color_mode = "RGBA"
         tmp.view_settings.view_transform = "Standard"

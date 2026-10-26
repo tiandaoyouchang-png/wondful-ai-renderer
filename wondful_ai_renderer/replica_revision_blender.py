@@ -112,6 +112,11 @@ def snapshot(context, props):
              'members':[o.name for o in members]}
         if row['kind']=='ribbon':
             row['sections']=_ribbon_sections(root)
+        if row['kind']=='light_frame':
+            try:
+                row['frame']=json.loads(root.get('wondful_sb_frame_spec','{}'))
+            except (ValueError, TypeError):
+                row['frame']={}
         rows.append(row)
         for o in members:
             exact.append((o.name, o.data.as_pointer(), o.parent.name if o.parent else None,
@@ -139,7 +144,8 @@ class Transaction:
         self.scene=context.scene;self.original_camera=self.scene.camera
         self.objects={o for _,members in mapping.values() for o in members}
         self.states=[(o,o.matrix_world.copy(),o.data,o.hide_render,o.hide_get()) for o in self.objects]
-        self.tags={o:{k:o.get(k) for k in ('wondful_sb_width_subdivisions','wondful_sb_skin_faces')} for o in self.objects}
+        self.tags={o:{k:o.get(k) for k in ('wondful_sb_width_subdivisions','wondful_sb_skin_faces',
+                           'wondful_sb_frame_spec','wondful_sb_frame_front_faces')} for o in self.objects}
         self.new_objects=[];self.new_meshes=[];self.old_meshes=[];self.new_camera_data=[]
         self.camera_state=(self.original_camera.matrix_world.copy(),self.original_camera.data.copy())
         self.original_preview=props.sb_preview_image
@@ -219,6 +225,42 @@ class Transaction:
             # Layout metadata is used only to recover sections for the next revision.
             root['wondful_sb_width_subdivisions']=layout['width_subdivisions']
             root['wondful_sb_skin_faces']=layout['skin_faces']
+        # Replace selected LED mesh silhouettes using the active reference view.
+        # Only generated light-frame roots are eligible: real products stay untouched.
+        from . import studio_frames as SF
+        from . import scene_blockout_build as SBB
+        for row in plan['light_frames']:
+            root,members=self.mapping[row['id']]
+            if len(members) != 1 or not root.get('wondful_sb_light_frame'):
+                raise RuntimeError('不是独立的已生成发光框架，未修改')
+            cam=self.scene.camera
+            w,h=self.scene.render.resolution_x,self.scene.render.resolution_y
+            if w<=0 or h<=0:
+                raise RuntimeError('相机渲染分辨率无效')
+            if abs(cam.data.shift_x)>1e-5 or abs(cam.data.shift_y)>1e-5:
+                raise RuntimeError('偏移相机下的框架端点修改暂不支持，请先归零相机 Shift')
+            tangent=cam.data.sensor_width/(2*cam.data.lens)
+            inv=root.matrix_world.inverted()
+            mat=cam.matrix_world.copy()
+            def screen_to_local(u,v,depth):
+                local=Vector(((2*u-1)*tangent*depth,
+                              (1-2*v)*tangent*(h/float(w))*depth,-depth))
+                return inv@(mat@local)
+            verts,faces,layout=SF.beam_mesh(row['points'],(w,h),row['width_frac'],
+                                             row['depth_m'],row['beam_depth_m'],screen_to_local)
+            mesh=bpy.data.meshes.new(root.name+'_screen_revised')
+            self.new_meshes.append(mesh)
+            mesh.from_pydata(verts.tolist(),[],faces)
+            mesh.update()
+            materials=SBB._Builder({'terrain':{},'camera':{}},self.owner,(w,h))
+            mesh.materials.append(materials.light_material(row['color_hex'],row['emission'],side=True))
+            mesh.materials.append(materials.light_material(row['color_hex'],row['emission'],side=False))
+            for poly in mesh.polygons[:layout['front_faces']]:
+                poly.material_index=1
+            self.old_meshes.append(root.data)
+            root.data=mesh
+            root['wondful_sb_frame_spec']=json.dumps(row,ensure_ascii=False)
+            root['wondful_sb_frame_front_faces']=layout['front_faces']
         self.context.view_layer.update()
         for row in plan['edits']:
             root,members=self.mapping[row['id']]
