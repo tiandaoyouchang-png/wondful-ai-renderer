@@ -601,7 +601,10 @@ class ExecTimeoutRetry(unittest.TestCase):
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         i = props.index("codex_render_timeout: IntProperty(")
         self.assertIn("default=1800", props[i:i + 400])
-        self.assertIn('col.prop(self, "codex_render_timeout")', props)
+        # Preferences now render through the shared field helper; retain the
+        # timeout in the generation-settings field list.
+        self.assertIn('"codex_polish_timeout", "codex_audit_timeout", "codex_render_timeout", "antigravity_polish_timeout"', props)
+        self.assertIn('UIC.field(engine, self, name, None)', props)
         cc = (PKG / "codex_client.py").read_text(encoding="utf-8")
         self.assertIn("Codex ImageGen 超时（秒）", cc)
 

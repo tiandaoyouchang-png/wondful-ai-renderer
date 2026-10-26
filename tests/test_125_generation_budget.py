@@ -77,7 +77,10 @@ class OperatorWiring(unittest.TestCase):
 
     def test_pref_always_visible(self):
         props = (PKG / "properties.py").read_text(encoding="utf-8")
-        self.assertIn('            col.prop(self, "alignment_threshold")\n        col.prop(self, "alignment_max_attempts")', props)
+        # The shared component keeps the attempt cap visible even when strict
+        # alignment retry (and therefore its threshold) is disabled.
+        self.assertIn('if self.auto_alignment_retry:\n            UIC.field(quality, self, "alignment_threshold", None)', props)
+        self.assertIn('UIC.field(quality, self, "alignment_max_attempts", None)', props)
 
     def test_harness_sets_one_variant(self):
         h = (PKG.parent / "tools" / "e2e_detail_mv_bg.py").read_text(encoding="utf-8")

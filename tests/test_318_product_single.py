@@ -37,8 +37,17 @@ class ProductSingleTests(unittest.TestCase):
 
     def test_ui_hint_and_label(self):
         src = (PKG / "ui.py").read_text()
-        self.assertIn("建议放三视图", src)
-        self.assertRegex(src, r"3\.\d+\.\d+")
+        components = (PKG / "ui_components.py").read_text()
+        # The redesigned card keeps the guidance in its help affordance rather
+        # than permanently occupying the sidebar.
+        self.assertIn('UIC.help_icon(tools, key="PRODUCT")', src)
+        tree = ast.parse(components)
+        help_value = ast.literal_eval(next(node.value for node in tree.body
+                                           if isinstance(node, ast.Assign)
+                                           and any(isinstance(target, ast.Name) and target.id == "HELP"
+                                                   for target in node.targets)))
+        self.assertIn("正、侧、后三视图拼图", help_value["PRODUCT"])
+        self.assertIn("fit='contain' if kind == 'PRODUCT'", components)
         ast.parse(src)
 
 

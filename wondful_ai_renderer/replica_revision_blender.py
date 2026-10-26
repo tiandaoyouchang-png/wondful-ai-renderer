@@ -18,12 +18,18 @@ def _key(scene):
 
 def owners(scene, props):
     product=set(getattr(getattr(props,'product_collection',None),'all_objects',()))
-    found=[c for c in scene.collection.children_recursive if c.get('wondful_scene_blockout')]
-    if len(found)!=1:
+    from . import blockout_versions as BV
+    found=BV.all_versions(scene)
+    owner=BV.active(scene,props)
+    visible=[c for c in found if not getattr(c,'hide_render',False)]
+    marked=[c for c in visible if c.get(BV.ACTIVE)]
+    picked=getattr(props,'sb_active_collection',None)
+    explicit=picked in found and picked is owner
+    if owner is None or not (explicit or len(marked)==1 or len(visible)==1):
         raise RuntimeError('\u8bf7\u4f7f\u7528\u5355\u4e00\u6765\u6e90\u7684\u590d\u523b\u7c97\u6a21')
-    if any(o in product for o in found[0].all_objects):
+    if any(o in product for o in owner.all_objects):
         raise RuntimeError('\u4ea7\u54c1\u4e0e\u7c97\u6a21\u96c6\u5408\u91cd\u53e0\uff0c\u4e0d\u6267\u884c\u4fee\u6539')
-    return found[0]
+    return owner
 
 
 def _bounds(obj):

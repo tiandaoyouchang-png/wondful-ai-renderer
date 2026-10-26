@@ -9,8 +9,10 @@ PKG = Path(__file__).resolve().parents[1] / "wondful_ai_renderer"
 class SimpleFlowTests(unittest.TestCase):
     def test_panel_steps(self):
         src = (PKG / "ui.py").read_text()
-        # 3.2.0 replaced the four-step layout with five step cards, six since 1.2.3 (see test_320).
-        for text in ("\"连接\"", "\"产品三视图（可选）\"", "\"环境参考图\"", "wondful.generate", "\"高级\""):
+        # The compact panel has an explicit workflow selector followed by the
+        # current four-card flow; connection state stays visible in the selector.
+        for text in ("wondful.set_workflow_mode", '"环境渲染"', '"参考图复刻"',
+                     '"车模与相机"', '"环境参考"', "wondful.generate", '"高级"'):
             self.assertIn(text, src)
         ast.parse(src)
 

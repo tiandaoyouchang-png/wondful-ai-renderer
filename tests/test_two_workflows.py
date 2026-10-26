@@ -432,8 +432,10 @@ class UILayoutContractTests(unittest.TestCase):
         self.assertFalse(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in env))
         self.assertTrue(any(x[:2]==("operator","wondful.target_load") for x in ref))
         self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in ref))
+        for calls in (env, ref):
+            self.assertEqual(sum(x[:2] == ("operator", "wondful.set_workflow_mode") for x in calls), 2)
         for calls in (env,ref):
-            for prop in ("workflow_mode","product_collection","camera","output_directory","long_edge","render_count"):
+            for prop in ("product_collection","camera","output_directory","long_edge","render_count"):
                 self.assertTrue(any(x[0]=="prop" and x[1]==prop for x in calls),prop)
             self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.polish_prompt" for x in calls))
     def test_replica_render_no_longer_requires_review_in_ui(self):

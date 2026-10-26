@@ -60,7 +60,7 @@ class RNACollection(list):
 
 def reply():
     return dict(summary='Adjusted',unresolved=[],camera=dict(apply=False,translation=[0,0,0],
-        rotation_deg=[0,0,0],lens_mm=45,shift_x=0,shift_y=0),edits=[],ribbons=[],additions=[])
+        rotation_deg=[0,0,0],lens_mm=45,shift_x=0,shift_y=0),edits=[],ribbons=[],light_frames=[],additions=[])
 
 
 def scene_snapshot():
@@ -216,6 +216,9 @@ class DeclarativeRevisionTests(unittest.TestCase):
     def test_unsafe_extra_fields_rejected(self):
         p=reply();p['execute']='import os'
         with self.assertRaises(ValueError):RR.validate(p,scene_snapshot())
+    def test_missing_light_frames_rejected(self):
+        p=reply();p.pop('light_frames')
+        with self.assertRaises(ValueError):RR.validate(p,scene_snapshot())
     def test_nested_extra_fields_rejected(self):
         p=reply();p['edits']=[dict(edit(),path='/tmp/model.blend')]
         with self.assertRaises(ValueError):RR.validate(p,scene_snapshot())
@@ -335,6 +338,36 @@ class RevisionTransactionTests(unittest.TestCase):
         self.assertNotIn('target_changed',ast.unparse(node))
 
 
+class RevisionOwnerTests(unittest.TestCase):
+    def version(self,name,number,*,active=False,hidden=False,objects=()):
+        coll=T.Collection(name,objects,tags={'wondful_scene_blockout':1,
+            'wondful_sb_version':number,'wondful_sb_active':int(active)})
+        coll.hide_render=hidden
+        return coll
+    def scene(self,*versions):
+        return NS(collection=NS(children_recursive=list(versions)))
+    def props(self,active=None,product=()):
+        return NS(sb_active_collection=active,product_collection=NS(all_objects=list(product)))
+    def test_archived_version_does_not_block_active_revision_owner(self):
+        archived=self.version('archived',1,active=False,hidden=True)
+        current=self.version('current',2,active=True)
+        self.assertIs(RB.owners(self.scene(archived,current),self.props(current)),current)
+    def test_active_collection_from_another_scene_is_not_used(self):
+        foreign=self.version('foreign',2,active=True)
+        current=self.version('current',1,active=True)
+        self.assertIs(RB.owners(self.scene(current),self.props(foreign)),current)
+    def test_multiple_visible_unmarked_versions_remain_ambiguous(self):
+        first=self.version('first',1)
+        second=self.version('second',2)
+        with self.assertRaises(RuntimeError):
+            RB.owners(self.scene(first,second),self.props())
+    def test_product_overlap_still_blocks_active_owner(self):
+        product=T.Item('product')
+        current=self.version('current',1,active=True,objects=[product])
+        with self.assertRaises(RuntimeError):
+            RB.owners(self.scene(current),self.props(current,[product]))
+
+
 class RecordingLayout(T.Layout):
     def child(self,*a,**kw):return RecordingLayout(self.log,self)
     row=column=box=split=grid_flow=child
@@ -388,7 +421,7 @@ class ConsistentUILayoutTests(unittest.TestCase):
             UIC.image_slot(layout,c,p,kind,item=item,title=kind,required=True)
             counts.append((sum(x[0]=='thumbnail' for x in layout.log),sum(x[0]=='prop' for x in layout.log)))
             self.assertTrue(any(x[0]=='label' and x[1].endswith(' *') for x in layout.log))
-        self.assertEqual(counts,[(1,1)]*4)
+        self.assertEqual(counts,[(2,1)]*4)
     def test_empty_cards_keep_note_and_image_well(self):
         p=T.props();c=T.context(p)
         for kind in ('PRODUCT','STYLE','TARGET','PERSON'):
@@ -481,12 +514,13 @@ class ThumbnailCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'x.png';path.write_bytes(b'a')
             self.cache.icon_for_path(str(path));self.cache._tick();self.assertEqual(self.collection.loads,1)
-            self.cache._pending.add(str(path));self.cache._tick();self.assertEqual(self.collection.loads,1)
+            key='path:cover:'+str(path)
+            self.cache._pending.add(key);self.cache._tick();self.assertEqual(self.collection.loads,1)
             path.write_bytes(b'longer')
-            self.cache._pending.add(str(path));self.cache._tick();self.assertEqual(self.collection.loads,2)
+            self.cache._pending.add(key);self.cache._tick();self.assertEqual(self.collection.loads,2)
     def test_missing_file_becomes_empty_preview_without_crash(self):
         self.cache.icon_for_path('/missing/definitely-not-a-file.png');self.cache._tick()
-        self.assertEqual(self.cache._records['/missing/definitely-not-a-file.png']['icon'],0)
+        self.assertEqual(self.cache._records['path:cover:/missing/definitely-not-a-file.png']['icon'],0)
     def test_lru_bounds_memory_and_unregister_cleans_up(self):
         for i in range(55):self.cache.icon_for_path('/missing/%s.png'%i)
         self.cache._tick();self.assertLessEqual(len(self.cache._records),48)
@@ -495,15 +529,15 @@ class ThumbnailCacheTests(unittest.TestCase):
         image=NS(as_pointer=lambda:3,filepath='/missing/old.png',packed_file=object(),source='FILE',
                  size=(4,2),pixels=[.2,.4,.6,1]*8,is_dirty=False,name_full='Packed')
         self.cache.icon_for_image(image);self.cache._tick()
-        self.assertEqual(self.cache._records['image:3']['icon'],999)
-        self.assertEqual(self.collection['image:3'].image_size,(4,2))
+        self.assertEqual(self.cache._records['image:cover:3']['icon'],999)
+        self.assertEqual(self.collection['image:cover:3'].image_size,(256,256))
         self.assertEqual(self.collection.loads,0)
     def test_pixel_thumbnail_is_aspect_preserving_and_non_destructive(self):
         pixels=[.1,.2,.3,1]*40000;before=pixels[:]
         image=NS(size=(400,100),pixels=pixels);thumb=NS()
         self.cache._pixels_thumbnail(image,thumb)
-        self.assertEqual(thumb.image_size,(256,64));self.assertEqual(pixels,before)
-        self.assertEqual(len(thumb.image_pixels_float),256*64*4)
+        self.assertEqual(thumb.image_size,(256,256));self.assertEqual(pixels,before)
+        self.assertEqual(len(thumb.image_pixels_float),256*256*4)
     def test_invalid_pixel_buffer_fails_explicitly(self):
         with self.assertRaises(ValueError):self.cache._pixels_thumbnail(NS(size=(10,10),pixels=[]),NS())
 

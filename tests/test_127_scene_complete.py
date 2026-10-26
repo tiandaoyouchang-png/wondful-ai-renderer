@@ -315,11 +315,13 @@ class Wiring(unittest.TestCase):
     def test_property_ui_operator(self):
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         i = props.index("sb_complete: BoolProperty(")
-        self.assertIn("default=True", props[i:i + 120])
+        # Completing unseen geometry is deliberately opt-in: it can add inferred
+        # scene geometry, so an existing scene must not change on upgrade.
+        self.assertIn("default=False", props[i:i + 120])
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        self.assertIn('row.prop(props, "sb_complete", text="场景补全")', ui)
+        self.assertIn('extra.prop(props, "sb_complete", text="场景补全", toggle=True)', ui)
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
-        self.assertIn('complete = bool(getattr(props, "sb_complete", True))', ops)
+        self.assertIn('complete = bool(getattr(props, "sb_complete", False))', ops)
         self.assertIn("complete_llm_in_blender", ops)
         self.assertIn("fillers=not has_inferred", ops)
         self.assertIn("MV.usable_source", ops)
