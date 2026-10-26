@@ -1217,12 +1217,34 @@ def remove_carrier():
         bpy.data.collections.remove(coll)
 
 
-def find_carrier(scene=None):
+def _current_tagged(tag, scene=None, parent=None, *, requires_objects=True):
+    """Resolve detail collections inside the active coarse-model version only.
+
+    Archived versions must never leak into detail previews, multi-view passes,
+    or completion metadata. Do not fall back to a hidden old version when the
+    active version has no matching detail collection.
+    """
     import bpy
-    for coll in bpy.data.collections:
-        if coll.get(CARRIER_TAG) and len(coll.objects):
+    if parent is not None:
+        scope = parent
+    else:
+        scene = scene or getattr(bpy.context, "scene", None)
+        if scene is None:
+            return None
+        from . import blockout_versions as BV
+        scope = BV.active(scene, getattr(scene, "wondful_ai", None))
+    if scope is None:
+        return None
+    children = getattr(scope, "children_recursive", ())
+    for coll in children:
+        if coll.get(tag) and (not requires_objects or len(coll.objects)):
             return coll
     return None
+
+
+def find_carrier(scene=None, parent=None):
+    """Find only the active version's measured detail geometry."""
+    return _current_tagged(CARRIER_TAG, scene, parent)
 
 
 def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, analysis=None, complete=True,
@@ -1237,7 +1259,8 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, 
     from mathutils import Matrix, Vector
     from . import massing as MS
     from . import scene_blockout as SB
-    remove_carrier()
+    # Every generated version owns its detail collections. Never delete the
+    # previous version's carrier or inferred objects during a new build.
     t0 = time.time()
     coll = bpy.data.collections.get(info["collection"])
     if coll is None:
@@ -1279,8 +1302,10 @@ def build_in_blender(context, info, geo, scene_kind="outdoor", r_split=R_SPLIT, 
     sub = bpy.data.collections.new(COLLECTION_NAME)
     sub[CARRIER_TAG] = 1
     coll.children.link(sub)
-    mat = bpy.data.materials.get(MS.MAT_NAME + "_细节") or MS.make_material(bpy.data.materials.new)
-    mat.name = MS.MAT_NAME + "_细节"
+    material_name = f"{MS.MAT_NAME}_细节_{coll.name}"
+    mat = bpy.data.materials.get(material_name)
+    if mat is None:
+        mat = MS.make_material(lambda _unused: bpy.data.materials.new(material_name))
     V, F, C = res["V"], res["F"], res["C"]
     Mw = np.array(world)
     Vw = V @ Mw[:3, :3].T + Mw[:3, 3]
@@ -1400,21 +1425,17 @@ def remove_inferred():
         bpy.data.collections.remove(old)
 
 
-def find_inferred(scene=None):
-    """The 场景补全 collection (visible part of the 场景粗模), or None."""
-    import bpy
-    for coll in bpy.data.collections:
-        if coll.get(INFER_TAG) and len(coll.objects):
-            return coll
-    return None
+def find_inferred(scene=None, parent=None):
+    """Find completion geometry from the active coarse-model version only."""
+    return _current_tagged(INFER_TAG, scene, parent)
 
 
 def completion_layout(scene=None):
-    """World-frame 场景补全 layout (dict) of the current 场景粗模, or None."""
+    """World-frame completion layout belonging to the active version."""
     import json as _json
-    import bpy
-    for coll in bpy.data.collections:
-        raw = coll.get(LAYOUT_KEY) if (coll.get(INFER_TAG) or coll.get(CARRIER_TAG)) else None
+    for coll in (_current_tagged(INFER_TAG, scene, requires_objects=False),
+                 _current_tagged(CARRIER_TAG, scene, requires_objects=False)):
+        raw = coll.get(LAYOUT_KEY) if coll is not None else None
         if raw:
             try:
                 return _json.loads(raw)
@@ -1498,7 +1519,8 @@ def complete_llm_in_blender(context, info, analysis=None, bands=True, seam=True)
     coll = bpy.data.collections.get(info.get("collection", ""))
     if coll is None or not info.get("world"):
         return {"ok": False, "reason": "场景粗模集合不存在"}
-    remove_inferred()
+    # Previous versions retain their own inferred child collections; never
+    # delete other versions when completing the new one.
     world = Matrix(info["world"])
     winv = world.inverted()
     scene = context.scene
@@ -1639,7 +1661,7 @@ class detail_pass:
     def __enter__(self):
         if self.massing_coll is None:
             return self
-        carrier = find_carrier()
+        carrier = find_carrier(parent=self.massing_coll)
         if carrier is None:
             return self
         try:

@@ -1036,6 +1036,9 @@ class WONDFUL_AISettings(PropertyGroup):
     sb_stage_ids: StringProperty(name="场景粗模阶段列表", default="", options={"SKIP_SAVE"})
     sb_elapsed: IntProperty(name="场景粗模已用秒", default=0, min=0, options={"SKIP_SAVE"})
     sb_failed_stage: StringProperty(name="场景粗模失败阶段", default="", options={"SKIP_SAVE"})
+    sb_active_collection: PointerProperty(
+        name="当前粗模版本", type=bpy.types.Collection,
+        description="最新成功生成的独立粗模版本；旧版本仍保留在大纲视图中")
     # 1.2.0 环境体块 › 从三视图生成建筑体块 (visual hull of a building, into the massing collection)
     ui_show_massing_hull: BoolProperty(name="从三视图生成建筑体块", default=False)
     hull_input: EnumProperty(

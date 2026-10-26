@@ -3,7 +3,7 @@ import unicodedata
 
 INPUT_HEIGHT = 1.2
 ACTION_HEIGHT = 1.35
-PREVIEW_MAX = 10.0
+PREVIEW_MAX = 14.0
 
 HELP = {
     'environment': '\u4f7f\u7528\u5f53\u524d\u76f8\u673a\u548c\u771f\u5b9e\u8f66\u6a21\uff0c\u73af\u5883\u56fe\u4ec5\u63d0\u4f9b\u6750\u8d28\u3001\u5149\u7167\u548c\u6c1b\u56f4\uff0c\u4e0d\u6539\u53d8\u673a\u4f4d\u3002',
@@ -14,7 +14,7 @@ HELP = {
     'PERSON': '\u4eba\u7269\u5916\u89c2\u53c2\u8003\uff0c\u4e0d\u7528\u4e8e\u8f66\u578b\u8eab\u4efd\u6216\u76f8\u673a\u5339\u914d\u3002',
     'preview': '\u5237\u65b0\u4ec5\u6e32\u67d3\u5f53\u524d\u76f8\u673a\u4e0e\u7c97\u6a21\uff0c\u4e0d\u91cd\u65b0\u5206\u6790\u3002\u6309\u610f\u89c1\u4fee\u6539\u4f1a\u8c03\u7528\u5728\u7ebf\u5206\u6790\uff0c\u4ec5\u4fee\u6539\u63d2\u4ef6\u7c97\u6a21\u548c\u76f8\u673a\uff0c\u4e0d\u6539\u8f66\u8eab\u7f51\u683c\u6216\u6750\u8d28\u3002',
     'prompt': '\u5b8c\u6574\u63d0\u793a\u8bcd\u4f18\u5148\uff0c\u672a\u586b\u65f6\u4f7f\u7528\u4e00\u53e5\u8bdd\u9700\u6c42\u3002AI \u6da6\u8272\u53ef\u9009\uff0c\u4e24\u79cd\u6a21\u5f0f\u72ec\u7acb\u4fdd\u5b58\u8349\u7a3f\u3002',
-    'build': '\u6839\u636e\u76ee\u6807\u56fe\u751f\u6210\u76f8\u673a\u548c\u7c97\u6a21\u3002\u518d\u6b21\u751f\u6210\u4f1a\u66ff\u6362\u63d2\u4ef6\u7c97\u6a21\uff1b\u4fdd\u7559\u624b\u52a8\u8c03\u6574\u8bf7\u4f7f\u7528\u5237\u65b0\u9884\u89c8\u6216\u6309\u610f\u89c1\u4fee\u6539\u3002',
+    'build': '\u6839\u636e\u76ee\u6807\u56fe\u751f\u6210\u76f8\u673a\u548c\u7c97\u6a21\u3002\u6bcf\u6b21\u751f\u6210\u4f1a\u65b0\u5efa\u5e26\u7f16\u53f7\u7684\u7c97\u6a21\u96c6\u5408\uff0c\u65e7\u7248\u672c\u53ea\u9690\u85cf\u4e0d\u5220\u9664\uff1b\u4fdd\u7559\u624b\u52a8\u8c03\u6574\u8bf7\u4f7f\u7528\u5237\u65b0\u9884\u89c8\u6216\u6309\u610f\u89c1\u4fee\u6539\u3002',
     'output': '\u4f7f\u7528\u5f53\u524d\u76f8\u673a\u548c\u573a\u666f\u751f\u6210\u6210\u7247\uff1b\u751f\u6210\u524d\u81ea\u52a8\u68c0\u67e5\u5fc5\u586b\u53c2\u8003\u548c\u6765\u6e90\uff0c\u4e0d\u518d\u9700\u8981\u624b\u52a8\u52fe\u9009\u3002',
 }
 
@@ -68,28 +68,50 @@ def text_input(layout, data, name, label, description='', *, rows=3):
 def preview_scale(context):
     width = getattr(getattr(context, 'region', None), 'width', 360) or 360
     ui_scale = getattr(getattr(getattr(context, 'preferences', None), 'system', None), 'ui_scale', 1.0) or 1.0
-    return max(3.0, min(PREVIEW_MAX, (width / max(0.5, ui_scale) - 80) / 20))
+    return max(3.0, min(PREVIEW_MAX, (width / max(0.5, ui_scale) - 70) / 20))
 
 
-def preview(layout, context, image):
-    """One aspect-preserving native thumbnail size for every image slot."""
+def preview_tile_count(image, fit='cover'):
+    """Layout a wide picture as a strip of square native tiles (no letterboxing)."""
+    try:
+        w, h = (int(v) for v in image.size)
+        if not w or not h:
+            return 1
+    except (TypeError, ValueError, AttributeError, ReferenceError):
+        return 1
+    ratio = w / h
+    if fit == 'contain' and ratio >= 1.8:
+        return 3  # Contact sheets: preserve front / side / rear views.
+    return 2 if ratio >= 1.3 else 1
+
+
+def preview(layout, context, image, fit='cover'):
+    """A responsive, edge-to-edge preview strip built from native icon tiles.
+
+    Blender sidebar icons are square, so a 16:9 photo uses two adjacent crops
+    instead of a single square icon with huge blank top/bottom padding.
+    """
     import bpy
     row = layout.row(align=True)
     row.alignment = 'CENTER'
-    icon = 0
     if image is not None:
         from .preview_cache import icon_for_image
-        icon = icon_for_image(image)
-        if not icon:
-            try:
-                icon = bpy.types.UILayout.icon(image)
-            except (RuntimeError, ReferenceError, AttributeError):
-                pass
-    if icon:
-        row.template_icon(icon_value=icon, scale=preview_scale(context))
+        count = preview_tile_count(image, fit)
+        scale = preview_scale(context) / count
+        for index in range(count):
+            tile_fit = 'tile:%d:%d' % (index, count) if count > 1 else 'cover'
+            icon = icon_for_image(image, fit=tile_fit)
+            if not icon:
+                try:
+                    icon = bpy.types.UILayout.icon(image)
+                except (RuntimeError, ReferenceError, AttributeError):
+                    icon = 0
+            if icon:
+                row.template_icon(icon_value=icon, scale=scale)
+            else:
+                row.label(text='', icon='IMAGE_DATA')
     else:
-        # Reserve the same visual well without pretending an image exists.
-        row.scale_y = preview_scale(context)
+        row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')
     return row
 
@@ -103,10 +125,12 @@ def image_slot(layout, context, props, kind, *, item=None, index=0,
     help_icon(header, key=kind)
     target = kind == 'TARGET'
     image = getattr(props, 'sb_reference_image', None) if target else getattr(item, 'image', None)
-    preview(box, context, image)
+    preview(box, context, image, fit='contain' if kind == 'PRODUCT' else 'cover')
     meta = box.row(align=True)
     meta.label(text=short_text(getattr(image, 'name', '') or '\u672a\u9009\u62e9', 40))
     if image:
+        action = meta.operator('wondful.preview_reference', text='', icon='ZOOM_ALL')
+        action.image_name = image.name
         help_icon(meta, getattr(image, 'filepath', '') or getattr(image, 'name', ''))
     actions = box.row(align=True)
     actions.scale_y = ACTION_HEIGHT
@@ -142,22 +166,38 @@ def image_slot(layout, context, props, kind, *, item=None, index=0,
 
 
 def path_preview(layout, context, raw, title, description=''):
-    """Shared read-only image well; thumbnails load in the deferred cache."""
-    from .preview_cache import icon_for_path
+    """The advanced image wells use the same responsive strip as main inputs.
+
+    File dimensions are read by preview_cache's background timer, not during
+    panel drawing. Wide photos display contiguous square tiles after loading.
+    """
+    from .preview_cache import icon_for_path, cached_dimensions_for_path
     box = layout.box()
     head = box.row(align=True)
     head.label(text=title, icon='IMAGE_DATA')
     help_icon(head, description or str(raw or ''))
-    icon = icon_for_path(raw)
+    base = icon_for_path(raw, fit='cover')
+    dims = cached_dimensions_for_path(raw)
+    count = 2 if dims and dims[1] and dims[0] / dims[1] >= 1.3 else 1
+    icons = ([icon_for_path(raw, fit=f'tile:{n}:{count}') for n in range(count)]
+             if count > 1 else [base])
     row = box.row(align=True)
     row.alignment = 'CENTER'
-    if icon:
-        row.template_icon(icon_value=icon, scale=preview_scale(context))
+    if any(icons):
+        for icon in icons:
+            if icon:
+                row.template_icon(icon_value=icon, scale=preview_scale(context) / count)
+            else:
+                row.label(text='', icon='IMAGE_DATA')
     else:
-        row.scale_y = preview_scale(context)
+        row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')
     name = str(raw or '').replace(chr(92), '/').rsplit('/', 1)[-1]
-    box.label(text=short_text(name or '\u672a\u9009\u62e9', 40))
+    foot = box.row(align=True)
+    foot.label(text=short_text(name or '未选择', 38))
+    if any(icons):
+        action = foot.operator('wondful.preview_reference', text='', icon='ZOOM_ALL')
+        action.image_path = str(raw)
     return box
 
 

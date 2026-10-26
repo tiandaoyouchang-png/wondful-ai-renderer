@@ -783,7 +783,7 @@ def _draw_sb_progress(layout, props, running, failed, SP):
         layout.label(text=SP.status_text(stage, elapsed), icon="TIME")
     tip = SP.hint(stage)
     if tip:
-        _hint(layout, tip, _cols(bpy.context, 2))
+        UIC.help_icon(layout, tip)
     bar = layout.column()
     bar.scale_y = 1.2
     pct = max(0, min(100, int(round(float(props.progress) * 100))))
@@ -1076,10 +1076,16 @@ class WONDFUL_PT_main(Panel):
         can_generate = bool(not busy and connected and camera and structure_ready and has_product
                             and imagegen_enabled and (not replica or replica_ready))
         selector = layout.box()
+        heading = selector.row(align=True)
+        heading.label(text="工作模式", icon="MODIFIER")
+        UIC.help_icon(heading, key="reference" if replica else "environment")
         modes = selector.row(align=True); modes.enabled = not busy
         modes.scale_y = UIC.ACTION_HEIGHT
-        modes.prop(props, "workflow_mode", text="", expand=getattr(context.region,"width",380) >= 330)
-        UIC.help_icon(modes, key="reference" if replica else "environment")
+        for value, caption, symbol in (("ENVIRONMENT", "环境渲染", "WORLD"),
+                                       ("REFERENCE", "参考图复刻", "IMAGE_DATA")):
+            action = modes.operator("wondful.set_workflow_mode", text=caption, icon=symbol,
+                                    depress=(props.workflow_mode == value))
+            action.next_mode = value
         _draw_update_banner(layout, context)
         connection = selector.row(align=True)
         connection.label(text=provider_label, icon="LINKED")
@@ -1115,20 +1121,44 @@ class WONDFUL_PT_main(Panel):
 
         reference, tools = _step_card(layout, 2, "目标图与粗模" if replica else "环境参考", done=replica_ready if replica else has_style)
         UIC.help_icon(tools, key="TARGET" if replica else "STYLE")
-        refs = reference.column(); refs.enabled = not busy
+        refs = reference.column()
+        editable_refs = refs.column(); editable_refs.enabled = not busy
         if replica:
-            UIC.image_slot(refs, context, props, "TARGET", title="复刻目标图", required=True)
-            options = refs.column(align=True)
-            UIC.field(options, props, "sb_set_camera", "匹配相机")
-            UIC.field(options, props, "sb_correct", "自动校正")
-            if _disclosure(options.row(align=True), props, "ui_show_replica_advanced", "重建设置", icon="PREFERENCES"):
-                UIC.field(options, props, "sb_precise", "深度测量")
-                UIC.field(options, props, "sb_complete", "场景补全")
-            build = refs.row(align=True); build.scale_y = UIC.ACTION_HEIGHT
-            build.enabled = bool(props.sb_image_path and structure_ready and has_product and connected and not active_is_antigravity)
+            UIC.image_slot(editable_refs, context, props, "TARGET", title="复刻目标图", required=True)
+            settings = editable_refs.box()
+            caption = settings.row(align=True)
+            caption.label(text="粗模设置", icon="MOD_BUILD")
+            UIC.help_icon(caption, key="build")
+            switches = settings.row(align=True)
+            switches.scale_y = UIC.INPUT_HEIGHT
+            switches.prop(props, "sb_set_camera", text="匹配相机", toggle=True)
+            switches.prop(props, "sb_correct", text="自动校正", toggle=True)
+            detail = settings.row(align=True)
+            detail.prop(props, "ui_show_replica_advanced", text="更多选项",
+                        icon="TRIA_DOWN" if props.ui_show_replica_advanced else "TRIA_RIGHT",
+                        toggle=True)
+            if props.ui_show_replica_advanced:
+                extra = settings.row(align=True)
+                extra.scale_y = UIC.INPUT_HEIGHT
+                extra.prop(props, "sb_precise", text="深度测量", toggle=True)
+                extra.prop(props, "sb_complete", text="场景补全", toggle=True)
+            build = editable_refs.row(align=True); build.scale_y = UIC.ACTION_HEIGHT
+            build.enabled = bool(not busy and props.sb_image_path and structure_ready and has_product
+                                 and connected and not active_is_antigravity)
             build.operator_context = "INVOKE_DEFAULT"
-            build.operator("wondful.scene_blockout_build", text="生成相机与粗模", icon="MOD_BUILD")
-            UIC.help_icon(refs, key="build")
+            build.operator("wondful.scene_blockout_build", text="生成新粗模版本", icon="MOD_BUILD")
+            if props.status == "BLOCKOUT":
+                from . import sb_progress as SP
+                _draw_sb_progress(refs, props, True, "", SP)
+                cancel = refs.row(align=True)
+                cancel.operator("wondful.cancel_task", text="取消生成", icon="CANCEL")
+            elif props.sb_failed_stage:
+                from . import sb_progress as SP
+                _draw_sb_progress(refs, props, False, props.sb_failed_stage, SP)
+            if getattr(props, "sb_active_collection", None):
+                version_row = refs.row(align=True)
+                version_row.label(text=f"当前版本：{props.sb_active_collection.name}", icon="OUTLINER_COLLECTION")
+                UIC.help_icon(version_row, "旧版粗模不会删除；在大纲视图中可展开并重新显示。")
             if active_is_antigravity:
                 _note(reference,"粗模分析需要 Codex",cells,"info")
             if props.last_sb_note:
@@ -1159,11 +1189,11 @@ class WONDFUL_PT_main(Panel):
             prompt_card = review
         else:
             if not props.style_images:
-                UIC.image_slot(refs,context,props,"STYLE",title="环境参考")
+                UIC.image_slot(editable_refs,context,props,"STYLE",title="环境参考")
             for index,item in enumerate(props.style_images):
-                UIC.image_slot(refs,context,props,"STYLE",item=item,index=index,
+                UIC.image_slot(editable_refs,context,props,"STYLE",item=item,index=index,
                     title="主环境参考" if index==0 else f"环境参考 {index+1}",movable=len(props.style_images)>1)
-            add = refs.row(align=True); add.scale_y = UIC.ACTION_HEIGHT
+            add = editable_refs.row(align=True); add.scale_y = UIC.ACTION_HEIGHT
             add.enabled = len(props.style_images) < MAX_REFERENCES_PER_KIND
             action = add.operator("wondful.load_reference", text="添加参考图",icon="ADD")
             action.ref_kind = "STYLE"; action.append_to_set = True
@@ -1193,8 +1223,9 @@ class WONDFUL_PT_main(Panel):
             if props.workflow_multiview:
                 _draw_render_views(output,context,props,busy,cells)
         if busy:
-            _draw_task_progress(step5,props,cells)
-            step5.operator("wondful.cancel_task",text="取消任务",icon="CANCEL")
+            if props.status != "BLOCKOUT":
+                _draw_task_progress(step5,props,cells)
+                step5.operator("wondful.cancel_task",text="取消任务",icon="CANCEL")
         else:
             go=step5.row(align=True);go.enabled=can_generate;go.scale_y=UIC.ACTION_HEIGHT
             go.operator("wondful.generate",text="按当前场景渲染" if replica else "生成效果图",icon="RENDER_STILL")

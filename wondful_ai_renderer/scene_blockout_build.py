@@ -109,7 +109,7 @@ def _rect_dist(px, py, p):
 # ------------------------------------------------------------------------------------------- scene helpers
 
 def remove_existing():
-    """Delete the previous 「Wondful 场景粗模」 collection, its objects and their meshes."""
+    """Dangerous legacy manual cleanup; generation never calls this function."""
     removed = 0
     for coll in [c for c in bpy.data.collections if c.name == SB.COLLECTION_NAME or c.get("wondful_scene_blockout")]:
         for ob in list(coll.all_objects):
@@ -326,7 +326,9 @@ class _Builder:
 
     def mat(self, t):
         if t not in self.mats:
-            name = MAT_PREFIX + t
+            # Material identity belongs to this version, not a global reusable
+            # data block: a later build must not recolor preserved old results.
+            name = f"{MAT_PREFIX}{t}_{self.coll.name}"
             m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
             c = self.T.get(t, (0.55, 0.58, 0.62))
             m.diffuse_color = (*c, 1.0)
@@ -349,7 +351,7 @@ class _Builder:
             rgb = tuple(int(value[i:i + 2], 16) / 255 for i in (0, 2, 4))
             if side:
                 rgb = tuple(v * 0.18 for v in rgb)
-            name = f"{MAT_PREFIX}Frame_{value}_{round(emission, 3)}_{'side' if side else 'front'}"
+            name = f"{MAT_PREFIX}Frame_{value}_{round(emission, 3)}_{'side' if side else 'front'}_{self.coll.name}"
             mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
             mat.diffuse_color = (*rgb, 1.0)
             mat.use_nodes = True
@@ -1238,7 +1240,7 @@ def _assemble(b, world):
 
 def build(context, data, *, product_collection=None, parent_collection=None, set_camera=True, frame=None,
           massing_objects=()):
-    """Build (replacing any earlier one) and return an info dict for the panel note / tests."""
+    """Build a new numbered collection, preserving all earlier versions."""
     scene = context.scene
     # 1.2.6 只做场景相关物体: people / other vehicles / animals never become blocks (unless the 一句话需求 asks)
     from . import static_scene as SS
@@ -1249,8 +1251,11 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     data, dropped = SS.strip_dynamic(data, allow)
     S = SB.normalize(data)
     frame = frame or SB.frame_of(data)
-    remove_existing()
-    coll = bpy.data.collections.new(SB.COLLECTION_NAME)
+    from . import blockout_versions as BV
+    version = BV.next_number(scene, SB.COLLECTION_NAME)
+    coll = bpy.data.collections.new(BV.version_name(version, SB.COLLECTION_NAME))
+    coll[BV.VERSION] = version
+    coll[BV.ACTIVE] = 0
     coll["wondful_scene_blockout"] = 1
     coll["wondful_sb_kind"] = "interior" if S.get("scene_kind") == "interior" else "outdoor"   # 1.2.6: 室内/室外 authority
     if S.get("_reference_image_path"):
@@ -1351,15 +1356,13 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
     cam_world = world @ b.cam_local
     cam_obj = None
     if set_camera:
-        # A user-created camera can have our display name; only reuse owned cameras.
-        cam_obj = next((o for o in scene.objects if o.type == "CAMERA" and o.get("wondful_sb_camera")), None)
-        if cam_obj is None:
-            cd = bpy.data.cameras.new(SB.CAMERA_NAME)
-            cam_obj = bpy.data.objects.new(SB.CAMERA_NAME, cd)
-            scene.collection.objects.link(cam_obj)
-        elif cam_obj.name not in scene.objects:
-            scene.collection.objects.link(cam_obj)
-        cd = cam_obj.data
+        # Each generation owns a separate camera. Never move/overwrite a prior
+        # version's camera or a camera deliberately authored by the user.
+        name = f"{SB.CAMERA_NAME} · {version:03d}"
+        cd = bpy.data.cameras.new(name)
+        cam_obj = bpy.data.objects.new(name, cd)
+        coll.objects.link(cam_obj)
+        cam_obj["wondful_sb_version"] = version
         cd.type = "PERSP"
         cd.sensor_fit = "HORIZONTAL"
         cd.sensor_width = 36.0
@@ -1372,11 +1375,14 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
         scene.camera = cam_obj
     stored = dict(S)
     stored["_frame"] = {"w": frame[0], "h": frame[1]}
-    txt = bpy.data.texts.get(SB.TEXT_NAME) or bpy.data.texts.new(SB.TEXT_NAME)
-    txt.clear()
+    # Every version retains its own editable analysis record.
+    txt = bpy.data.texts.new(f"{SB.TEXT_NAME} · {version:03d}")
+    coll["wondful_sb_analysis_text"] = txt.name
     txt.write(json.dumps({k: v for k, v in stored.items() if not str(k).startswith("_graded")}, ensure_ascii=False,
                          indent=1, default=str))
     coll["wondful_sb_yaw_deg"] = round(math.degrees(yaw), 2)
+    # Commit visibility only when this version has actually been built.
+    BV.activate(scene, coll, getattr(scene, "wondful_ai", None))
     context.view_layer.update()
     hw = frame[1] / float(frame[0])
     rx, ry = scene.render.resolution_x, scene.render.resolution_y
@@ -1385,7 +1391,7 @@ def build(context, data, *, product_collection=None, parent_collection=None, set
         notes.append(f"渲染画幅 {rx}x{ry} 与参考图 {frame[0]}x{frame[1]} 不同，上下取景会有差异")
     c = S["camera"]
     hz = SB.horizon_from_pitch(c["pitch_deg"], c["hfov_deg"], hw)
-    return {"collection": coll.name, "blocks": len(roots), "objects": len(coll.all_objects), "kind": S["scene_kind"],
+    return {"collection": coll.name, "version": version, "blocks": len(roots), "objects": len(coll.all_objects), "kind": S["scene_kind"],
             "camera": bool(cam_obj), "camera_name": cam_obj.name if cam_obj else "", "lens": round(b.lens, 3),
             "cam_world": [list(r) for r in cam_world], "yaw_deg": round(math.degrees(yaw), 2), "frame": list(frame),
             "labels": [lab for lab, _o in b.groups], "notes": notes, "scene_note": note,

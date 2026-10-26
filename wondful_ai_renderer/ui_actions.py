@@ -103,4 +103,63 @@ class WONDFUL_OT_target_clear(Operator):
         return {'FINISHED'}
 
 
-CLASSES = (WONDFUL_OT_ui_help, WONDFUL_OT_target_load, WONDFUL_OT_target_paste, WONDFUL_OT_target_clear)
+class WONDFUL_OT_set_workflow_mode(Operator):
+    bl_idname = 'wondful.set_workflow_mode'
+    bl_label = '切换工作模式'
+    bl_description = '切换环境参考渲染与参考图复刻；不会改相机或删除场景'
+    bl_options = {'INTERNAL'}
+    next_mode: StringProperty(default='ENVIRONMENT', options={'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        return _idle(context)
+
+    def execute(self, context):
+        if self.next_mode not in (workflow.ENVIRONMENT, workflow.REFERENCE):
+            self.report({'ERROR'}, '无效的工作模式')
+            return {'CANCELLED'}
+        if not self.poll(context):
+            return {'CANCELLED'}
+        context.scene.wondful_ai.workflow_mode = self.next_mode
+        return {'FINISHED'}
+
+
+class WONDFUL_OT_preview_reference(Operator):
+    bl_idname = 'wondful.preview_reference'
+    bl_label = '查看完整参考图'
+    bl_description = '打开完整图片预览；侧栏缩略图采用填充裁切，原始参考图不会被修改'
+    bl_options = {'INTERNAL'}
+    image_name: StringProperty(default='', options={'SKIP_SAVE'})
+    image_path: StringProperty(default='', options={'SKIP_SAVE'})
+
+    def _image(self):
+        image = bpy.data.images.get(self.image_name) if self.image_name else None
+        if image is None and self.image_path:
+            path = bpy.path.abspath(self.image_path)
+            if Path(path).is_file():
+                image = bpy.data.images.load(path, check_existing=True)
+        return image
+
+    def invoke(self, context, event):
+        if self._image() is None:
+            self.report({'ERROR'}, '未找到图片')
+            return {'CANCELLED'}
+        return context.window_manager.invoke_popup(self, width=560)
+
+    def draw(self, context):
+        image = self._image()
+        if image is None:
+            self.layout.label(text='图片不可用', icon='ERROR')
+            return
+        self.layout.label(text=image.name, icon='IMAGE_DATA')
+        # Blender's native popup preview keeps the entire image (FIT).
+        self.layout.template_preview(image, show_buttons=False)
+        if getattr(image, 'size', None):
+            self.layout.label(text=f'{image.size[0]} × {image.size[1]} px')
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
+CLASSES = (WONDFUL_OT_ui_help, WONDFUL_OT_target_load, WONDFUL_OT_target_paste,
+           WONDFUL_OT_target_clear, WONDFUL_OT_set_workflow_mode, WONDFUL_OT_preview_reference)

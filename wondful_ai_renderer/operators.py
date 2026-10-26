@@ -1504,7 +1504,8 @@ def _render_replica_preview(context, props, directory):
     cam = scene.camera
     if cam is None or cam.data.type != "PERSP":
         raise RuntimeError("请先选择透视相机，再刷新粗模预览")
-    root = find_collection(scene, props)
+    from . import blockout_versions as BV
+    root = BV.active(scene, props) or find_collection(scene, props)
     if root is None:
         raise RuntimeError("请先生成相机与粗模")
     Path(directory).mkdir(parents=True, exist_ok=True)
@@ -1683,8 +1684,7 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
 
     def invoke(self, context, event):
         from .multiview import scene_blockout_exists
-        if scene_blockout_exists(context.scene):
-            return context.window_manager.invoke_confirm(self, event)
+        # Versioned generation never deletes older collections.
         return self.execute(context)
 
     def execute(self, context):
@@ -1704,7 +1704,6 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             self.report({"ERROR"}, "请先选择车模所在的产品集合")
             return {"CANCELLED"}
         props.replica_reviewed = False
-        props.sb_preview_image = None
         prefs = _addon_prefs(context)
         props.sb_failed_stage = ""
         props.sb_stage = ""
@@ -1916,8 +1915,27 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
         except Exception:
             self._sb["analysis"] = data      # 1.2.5 场景补全: road direction / lot widths / poles
         own = [o for o in MS.massing_objects(parent, coll) if not any(c.get("wondful_scene_blockout") for c in o.users_collection)]
-        info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
-                         set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
+        from . import blockout_versions as BV
+        before = set(BV.all_versions(scene))
+        previous_active = BV.active(scene, props)
+        previous_camera = scene.camera
+        try:
+            info = SBB.build(context, data, product_collection=coll, parent_collection=parent,
+                             set_camera=self._sb["set_camera"], frame=self._sb["frame"], massing_objects=own)
+        except Exception:
+            # Preserve previous results, and leave a failed partial build hidden
+            # for diagnosis rather than deleting any existing collection.
+            for created in set(BV.all_versions(scene)) - before:
+                created["wondful_sb_failed"] = 1
+                created.hide_render = True
+                created.hide_viewport = True
+            if scene.camera is not previous_camera:
+                scene.camera = previous_camera
+            if previous_active is not None:
+                # If a late build stage failed after committing visibility,
+                # re-show the previous usable version and restore its objects.
+                BV.activate(scene, previous_active, props)
+            raise
         if props.massing_collection is None and parent is scene.collection:
             props.massing_collection = bpy.data.collections.get(info["collection"])
         return info
@@ -1988,7 +2006,8 @@ class WONDFUL_OT_scene_blockout_build(_BaseAsyncOperator):
             info["precise_fallback"] = self._sb.get("precise_error") or "深度测量没有完成"
         detail_line = ""
         from . import detail_blockout as DB
-        DB.remove_inferred()
+        # Historical inferred geometry belongs to the archived blockout version.
+        # Do not erase it while finishing a new version.
         complete = bool(getattr(props, "sb_complete", False))    # Out-of-frame completion is opt-in.
         detail_done = False
         if self._sb.get("geo") is not None and info.get("world") and bool(getattr(props, "sb_detail_carrier", True)):
@@ -4996,7 +5015,7 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         detail_mode = ""
         if bool(getattr(props, "sb_detail_carrier", True)):
             from .detail_blockout import find_carrier as _find_carrier
-            if _find_carrier() is not None:
+            if _find_carrier(scene) is not None:
                 detail_mode = "clay" if bool(getattr(props, "sb_detail_clay", False)) else "carrier"
                 if bool(getattr(props, "sb_detail_skyline", False)):
                     detail_mode += "+sky"   # 远山剪影: measured far silhouette instead of the LLM 远景带
@@ -5011,8 +5030,8 @@ class WONDFUL_OT_multiview_render(_BaseAsyncOperator):
         has_inferred = False
         try:
             from . import detail_blockout as _DBc
-            has_inferred = _DBc.find_inferred() is not None
-            completion = _DBc.completion_layout()
+            has_inferred = _DBc.find_inferred(scene) is not None
+            completion = _DBc.completion_layout(scene)
         except Exception as exc:
             print(f"[Wondful] 多角度场景一致：读取场景补全失败：{exc}")
         # 1.2.8 地面分带: measured from the 主视角 image + its position pass right after the master pass, built into the
