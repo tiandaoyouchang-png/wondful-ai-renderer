@@ -1131,7 +1131,7 @@ class WONDFUL_PT_main(Panel):
             UIC.help_icon(caption, key="build")
             switches = settings.row(align=True)
             switches.scale_y = UIC.INPUT_HEIGHT
-            switches.prop(props, "sb_set_camera", text="匹配相机", toggle=True)
+            switches.label(text="成功后自动匹配新参考相机", icon="CAMERA_DATA")
             switches.prop(props, "sb_correct", text="自动校正", toggle=True)
             detail = settings.row(align=True)
             detail.prop(props, "ui_show_replica_advanced", text="更多选项",
@@ -1208,6 +1208,7 @@ class WONDFUL_PT_main(Panel):
         polish=editor.row(align=True);polish.scale_y=UIC.ACTION_HEIGHT
         polish.enabled = not busy and connected and has_product
         polish.operator("wondful.polish_prompt",text="AI 润色",icon="TEXT")
+        editor.label(text="点击生成后会自动完成 AI 润色，再开始渲染", icon="INFO")
         if props.prompt_notice:
             UIC.help_icon(editor,props.prompt_notice)
 
@@ -1346,9 +1347,7 @@ class WONDFUL_PT_main(Panel):
 
         elif tab == "OUTPUT":
             flow, _head, _on = _section(adv, "流程", "SEQUENCE")
-            flow.prop(props, "auto_polish_on_generate", text="生成前自动润色（可选）")
-            if props.auto_polish_on_generate:
-                flow.prop(props, "two_step", text="润色后暂停，确认再渲染")
+            flow.label(text="生成流程：自动 AI 润色 → 渲染", icon="TEXT")
             mode_row = flow.row(align=True)
             mode_row.label(text="模式")
             mode_row.prop(props, "render_mode", expand=True)
