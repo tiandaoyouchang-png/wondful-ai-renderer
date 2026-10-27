@@ -4,6 +4,10 @@ import unicodedata
 INPUT_HEIGHT = 1.2
 ACTION_HEIGHT = 1.35
 PREVIEW_MAX = 14.0
+# Blender's template_icon preview adds 0.15 * UI_UNIT_X padding on both
+# sides. One negative 6px separator compensates the two adjacent pads so
+# contiguous square crops form a single continuous image strip.
+PREVIEW_TILE_SEAM_FACTOR = -1.0
 
 HELP = {
     'environment': '\u4f7f\u7528\u5f53\u524d\u76f8\u673a\u548c\u771f\u5b9e\u8f66\u6a21\uff0c\u73af\u5883\u56fe\u4ec5\u63d0\u4f9b\u6750\u8d28\u3001\u5149\u7167\u548c\u6c1b\u56f4\uff0c\u4e0d\u6539\u53d8\u673a\u4f4d\u3002',
@@ -85,12 +89,24 @@ def preview_tile_count(image, fit='cover'):
     return 2 if ratio >= 1.3 else 1
 
 
-def preview(layout, context, image, fit='cover'):
-    """A responsive, edge-to-edge preview strip built from native icon tiles.
+def _draw_preview_tiles(layout, icons, scale):
+    """Draw preview tiles without the visible Blender template-icon seam.
 
-    Blender sidebar icons are square, so a 16:9 photo uses two adjacent crops
-    instead of a single square icon with huge blank top/bottom padding.
+    Blender adds PREVIEW_PAD on both sides of each template icon. The negative
+    separator compensates the two pads between adjacent tiles; the source crops
+    remain contiguous, so the original image is not stretched or re-cropped.
     """
+    for index, icon in enumerate(icons):
+        if index:
+            layout.separator(factor=PREVIEW_TILE_SEAM_FACTOR)
+        if icon:
+            layout.template_icon(icon_value=icon, scale=scale)
+        else:
+            layout.label(text='', icon='IMAGE_DATA')
+
+
+def preview(layout, context, image, fit='cover'):
+    """A responsive preview strip with Blender's built-in tile padding compensated."""
     import bpy
     row = layout.row(align=True)
     row.alignment = 'CENTER'
@@ -98,6 +114,7 @@ def preview(layout, context, image, fit='cover'):
         from .preview_cache import icon_for_image
         count = preview_tile_count(image, fit)
         scale = preview_scale(context) / count
+        icons = []
         for index in range(count):
             tile_fit = 'tile:%d:%d' % (index, count) if count > 1 else 'cover'
             icon = icon_for_image(image, fit=tile_fit)
@@ -106,10 +123,8 @@ def preview(layout, context, image, fit='cover'):
                     icon = bpy.types.UILayout.icon(image)
                 except (RuntimeError, ReferenceError, AttributeError):
                     icon = 0
-            if icon:
-                row.template_icon(icon_value=icon, scale=scale)
-            else:
-                row.label(text='', icon='IMAGE_DATA')
+            icons.append(icon)
+        _draw_preview_tiles(row, icons, scale)
     else:
         row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')
@@ -184,11 +199,7 @@ def path_preview(layout, context, raw, title, description=''):
     row = box.row(align=True)
     row.alignment = 'CENTER'
     if any(icons):
-        for icon in icons:
-            if icon:
-                row.template_icon(icon_value=icon, scale=preview_scale(context) / count)
-            else:
-                row.label(text='', icon='IMAGE_DATA')
+        _draw_preview_tiles(row, icons, preview_scale(context) / count)
     else:
         row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')

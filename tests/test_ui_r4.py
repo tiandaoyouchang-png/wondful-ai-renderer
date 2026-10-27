@@ -240,7 +240,28 @@ class PreviewStripTests(unittest.TestCase):
         thumbnails = [x for x in layout.log if x[0] == 'thumbnail']
         self.assertEqual(len(thumbnails), 2)
         self.assertAlmostEqual(thumbnails[0][1], UIC.preview_scale(c) / 2)
+        self.assertEqual([x[1] for x in layout.log if x[0] == 'separator'], [UIC.PREVIEW_TILE_SEAM_FACTOR])
         self.assertTrue(any(x[:2] == ('operator','wondful.preview_reference') for x in layout.log))
+
+    def test_preview_tiles_compensate_blender_preview_padding(self):
+        c = T.context()
+        image = T.FakeImage(width=2400, height=900)
+        layout = R.RecordingLayout()
+        with patch.object(CACHE, 'icon_for_image', side_effect=[41, 42]):
+            UIC.preview(layout, c, image, fit='cover')
+        thumbnails = [x for x in layout.log if x[0] == 'thumbnail']
+        seams = [x for x in layout.log if x[0] == 'separator']
+        self.assertEqual([x[1] for x in thumbnails], [UIC.preview_scale(c) / 2] * 2)
+        self.assertEqual([x[1] for x in seams], [UIC.PREVIEW_TILE_SEAM_FACTOR])
+
+        layout = R.RecordingLayout()
+        contact = T.FakeImage(width=2400, height=900)
+        with patch.object(CACHE, 'icon_for_image', side_effect=[51, 52, 53]):
+            UIC.preview(layout, c, contact, fit='contain')
+        thumbnails = [x for x in layout.log if x[0] == 'thumbnail']
+        seams = [x for x in layout.log if x[0] == 'separator']
+        self.assertEqual(len(thumbnails), 3)
+        self.assertEqual([x[1] for x in seams], [UIC.PREVIEW_TILE_SEAM_FACTOR] * 2)
 
     def test_path_preview_dimensions_access_is_io_free(self):
         path='/reference.png'

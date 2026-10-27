@@ -372,6 +372,7 @@ class RecordingLayout(T.Layout):
     def child(self,*a,**kw):return RecordingLayout(self.log,self)
     row=column=box=split=grid_flow=child
     def template_icon(self,*a,**kw):self.log.append(('thumbnail',kw.get('scale'),self.effective_enabled()))
+    def separator(self,*a,**kw):self.log.append(('separator',kw.get('factor', a[0] if a else 1.0),self.effective_enabled()))
     def operator(self,idname,**kw):
         op=super().operator(idname,**kw)
         self.log.append(('operator_props',idname,op))

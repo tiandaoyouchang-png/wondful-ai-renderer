@@ -78,3 +78,7 @@ AI 润色为可选按钮，默认直接按当前内容生成；高级设置可�
 本轮没有新的真实 YU7 原生渲染或在线 AI 出图，也未验证 Mac / Windows 的安装与显示。
 不能据此承诺相机匹配、模型细节和光照终稿已全面通过。
 正式发布前仍需使用真实工程完成两条流程的 Blender 实机及在线出图回归。
+
+## UI-r5: seamless image preview strips
+
+The preview cards compensate Blender's built-in `template_icon` padding between adjacent square crops, removing the visible vertical seam while preserving source aspect ratio and full-frame coverage. Offline regression tests cover two- and three-tile previews. Blender-native visual acceptance is still required.
