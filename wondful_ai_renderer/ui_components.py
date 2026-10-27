@@ -72,44 +72,36 @@ def preview_scale(context):
 
 
 def preview_tile_count(image, fit='cover'):
-    """Layout a wide picture as a strip of square native tiles (no letterboxing)."""
-    try:
-        w, h = (int(v) for v in image.size)
-        if not w or not h:
-            return 1
-    except (TypeError, ValueError, AttributeError, ReferenceError):
-        return 1
-    ratio = w / h
-    if fit == 'contain' and ratio >= 1.8:
-        return 3  # Contact sheets: preserve front / side / rear views.
-    return 2 if ratio >= 1.3 else 1
+    """Compatibility helper: each reference image uses ONE Blender icon.
+
+    Adjacent native preview widgets always reserve their own button padding;
+    even zero-gap rows cannot produce a seamless panorama. Do not split.
+    """
+    return 1
 
 
 def preview(layout, context, image, fit='cover'):
-    """A responsive, edge-to-edge preview strip built from native icon tiles.
+    """Show one continuous photo preview without any native-widget seams.
 
-    Blender sidebar icons are square, so a 16:9 photo uses two adjacent crops
-    instead of a single square icon with huge blank top/bottom padding.
+    A single Blender icon has a square UI footprint. preview_cache builds a
+    seam-free, aspect-preserving thumbnail over a softened image backdrop;
+    the source remains completely visible and can be opened via Zoom.
     """
     import bpy
     row = layout.row(align=True)
     row.alignment = 'CENTER'
     if image is not None:
         from .preview_cache import icon_for_image
-        count = preview_tile_count(image, fit)
-        scale = preview_scale(context) / count
-        for index in range(count):
-            tile_fit = 'tile:%d:%d' % (index, count) if count > 1 else 'cover'
-            icon = icon_for_image(image, fit=tile_fit)
-            if not icon:
-                try:
-                    icon = bpy.types.UILayout.icon(image)
-                except (RuntimeError, ReferenceError, AttributeError):
-                    icon = 0
-            if icon:
-                row.template_icon(icon_value=icon, scale=scale)
-            else:
-                row.label(text='', icon='IMAGE_DATA')
+        icon = icon_for_image(image, fit='seamless')
+        if not icon:
+            try:
+                icon = bpy.types.UILayout.icon(image)
+            except (RuntimeError, ReferenceError, AttributeError):
+                icon = 0
+        if icon:
+            row.template_icon(icon_value=icon, scale=preview_scale(context))
+        else:
+            row.label(text='', icon='IMAGE_DATA')
     else:
         row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')
@@ -166,36 +158,28 @@ def image_slot(layout, context, props, kind, *, item=None, index=0,
 
 
 def path_preview(layout, context, raw, title, description=''):
-    """The advanced image wells use the same responsive strip as main inputs.
+    """Advanced file inputs use the same one-piece preview as main images.
 
-    File dimensions are read by preview_cache's background timer, not during
-    panel drawing. Wide photos display contiguous square tiles after loading.
+    Path loading is deferred to preview_cache's timer; Panel.draw does not
+    read files or split thumbnails into independent Blender icon widgets.
     """
-    from .preview_cache import icon_for_path, cached_dimensions_for_path
+    from .preview_cache import icon_for_path
     box = layout.box()
     head = box.row(align=True)
     head.label(text=title, icon='IMAGE_DATA')
     help_icon(head, description or str(raw or ''))
-    base = icon_for_path(raw, fit='cover')
-    dims = cached_dimensions_for_path(raw)
-    count = 2 if dims and dims[1] and dims[0] / dims[1] >= 1.3 else 1
-    icons = ([icon_for_path(raw, fit=f'tile:{n}:{count}') for n in range(count)]
-             if count > 1 else [base])
+    icon = icon_for_path(raw, fit='seamless')
     row = box.row(align=True)
     row.alignment = 'CENTER'
-    if any(icons):
-        for icon in icons:
-            if icon:
-                row.template_icon(icon_value=icon, scale=preview_scale(context) / count)
-            else:
-                row.label(text='', icon='IMAGE_DATA')
+    if icon:
+        row.template_icon(icon_value=icon, scale=preview_scale(context))
     else:
         row.scale_y = 2.0
         row.label(text='', icon='IMAGE_DATA')
     name = str(raw or '').replace(chr(92), '/').rsplit('/', 1)[-1]
     foot = box.row(align=True)
     foot.label(text=short_text(name or '未选择', 38))
-    if any(icons):
+    if icon:
         action = foot.operator('wondful.preview_reference', text='', icon='ZOOM_ALL')
         action.image_path = str(raw)
     return box

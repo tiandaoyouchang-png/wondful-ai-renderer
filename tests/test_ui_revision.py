@@ -421,7 +421,7 @@ class ConsistentUILayoutTests(unittest.TestCase):
             UIC.image_slot(layout,c,p,kind,item=item,title=kind,required=True)
             counts.append((sum(x[0]=='thumbnail' for x in layout.log),sum(x[0]=='prop' for x in layout.log)))
             self.assertTrue(any(x[0]=='label' and x[1].endswith(' *') for x in layout.log))
-        self.assertEqual(counts,[(2,1)]*4)
+        self.assertEqual(counts,[(1,1)]*4)
     def test_empty_cards_keep_note_and_image_well(self):
         p=T.props();c=T.context(p)
         for kind in ('PRODUCT','STYLE','TARGET','PERSON'):

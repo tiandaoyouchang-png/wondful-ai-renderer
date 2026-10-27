@@ -1,9 +1,10 @@
 """Bounded, deferred native image thumbnails; no decoding or stat work in Panel.draw.
 
-Native Blender preview icons have a square footprint. Generate a square FILL
-thumbnail (or a full-image FIT on an image-based background) so wide reference
-photos do not occupy a tiny, letterboxed strip in the sidebar. Original images
-are never cropped, rescaled, saved, or overwritten.
+Native Blender image icons have square widget geometry and reserve padding
+between widgets. Splicing two icons produces an unavoidable dark seam, even
+with row(align=True). Always draw a single preview icon; fit the whole photo
+over a soft, photo-derived cover backdrop to avoid black letterbox borders.
+Original user images are never modified, saved, or overwritten.
 """
 import os
 import time
@@ -25,11 +26,12 @@ def _redraw():
                 area.tag_redraw()
 
 
-def _pixels_thumbnail(image, thumb, fit='cover'):
-    """Sample a fixed-size cover/contain tile without modifying the image.
+def _pixels_thumbnail(image, thumb, fit='seamless'):
+    """Create one seam-free thumbnail without changing the original image.
 
-    In 'contain' mode the entire picture stays legible above a dimmed cover
-    backdrop, useful for wide front/side/rear identity reference sheets.
+    Seamless and contain modes preserve the whole source (including both ends
+    of a vehicle) over a soft, source-colored background. Cover remains for
+    legacy callers which explicitly request a centered square crop.
     """
     import numpy as np
     w, h = (int(v) for v in image.size)
@@ -60,36 +62,60 @@ def _pixels_thumbnail(image, thumb, fit='cover'):
             sampled[i] = row.reshape(w, 4)[xs]
         return sampled
 
-    # Enlarge and center-crop the image to a square rather than scaling it
-    # down inside a 256x256 empty black preview frame.
-    if fit.startswith('tile:'):
-        try:
-            _, index, count = fit.split(':')
-            index, count = int(index), int(count)
-            if not (0 <= index < count <= 3):
-                raise ValueError('Invalid tile')
-        except (TypeError, ValueError) as exc:
-            raise ValueError('Invalid tile selection') from exc
-        slice_width = w / count
-        crop = min(slice_width, h)
-        ox = (index + 0.5) * slice_width - crop * 0.5
-        oy = (h - crop) * 0.5
-    else:
-        crop = min(w, h)
-        ox, oy = (w - crop) * 0.5, (h - crop) * 0.5
+    if fit not in {'cover', 'contain', 'seamless'}:
+        raise ValueError('Unsupported image preview mode: %s' % fit)
+
+    # Single square Blender icon: one widget means there is no vertical UI gap.
+    crop = min(w, h)
+    ox, oy = (w - crop) * 0.5, (h - crop) * 0.5
     xx = ox + (np.arange(side) + 0.5) * crop / side
     yy = oy + (np.arange(side) + 0.5) * crop / side
     out = sample(xx, yy)
-    if fit == 'contain' and w != h:
-        out[:, :, :3] = np.clip(out[:, :, :3] * 0.25 + 0.035, 0, 1)
+
+    if fit in {'contain', 'seamless'} and w != h:
+        if fit == 'seamless':
+            # Blur the photo-derived background so there are no black empty
+            # bars, but its content cannot be mistaken for a second car.
+            # Two separable box filters are fast and bounded at 256x256.
+            def blur(src, radius):
+                pad = np.pad(src, ((radius, radius), (0, 0), (0, 0)), mode='edge')
+                total = np.pad(pad.cumsum(axis=0, dtype=np.float64),
+                               ((1, 0), (0, 0), (0, 0)))
+                window = radius * 2 + 1
+                vertical = (total[window:] - total[:-window]) / window
+                pad = np.pad(vertical, ((0, 0), (radius, radius), (0, 0)), mode='edge')
+                total = np.pad(pad.cumsum(axis=1, dtype=np.float64),
+                               ((0, 0), (1, 0), (0, 0)))
+                return (total[:, window:] - total[:, :-window]) / window
+
+            backdrop = blur(blur(out[:, :, :3], 14), 22)
+            out[:, :, :3] = np.clip(backdrop * 0.78 + 0.015, 0, 1)
+        else:
+            out[:, :, :3] = np.clip(out[:, :, :3] * 0.25 + 0.035, 0, 1)
+
         if w > h:
             fg_w, fg_h = side, max(1, round(side * h / w))
         else:
             fg_w, fg_h = max(1, round(side * w / h)), side
         fg = sample((np.arange(fg_w) + 0.5) * w / fg_w,
                     (np.arange(fg_h) + 0.5) * h / fg_h)
-        left, top = (side - fg_w) // 2, (side - fg_h) // 2
-        out[top:top + fg_h, left:left + fg_w] = fg
+        left, bottom = (side - fg_w) // 2, (side - fg_h) // 2
+        if fit == 'seamless':
+            # Feather only the inset image boundary into the related backdrop.
+            # The middle of the photo, including the vehicle, stays exact.
+            blend = np.ones((fg_h, fg_w, 1), dtype=np.float32)
+            edge = 5
+            if fg_h < side:
+                fade = np.minimum(np.arange(fg_h) + 1, fg_h - np.arange(fg_h))
+                blend *= np.clip(fade / edge, 0, 1)[:, None, None]
+            if fg_w < side:
+                fade = np.minimum(np.arange(fg_w) + 1, fg_w - np.arange(fg_w))
+                blend *= np.clip(fade / edge, 0, 1)[None, :, None]
+            backdrop_region = out[bottom:bottom + fg_h, left:left + fg_w]
+            out[bottom:bottom + fg_h, left:left + fg_w] = (fg * blend +
+                backdrop_region * (1 - blend))
+        else:
+            out[bottom:bottom + fg_h, left:left + fg_w] = fg
     # Blender icon pixels expect straight RGBA, and the tile is opaque.
     out[:, :, 3] = 1.0
     thumb.image_size = (side, side)
@@ -185,7 +211,7 @@ def _queue(key, path, image=None, fit='cover'):
 
 def cached_dimensions_for_path(raw):
     """Read cached dimensions only; never touch disk or decode in UI.draw."""
-    rec = _records.get('path:cover:%s' % raw)
+    rec = _records.get('path:seamless:%s' % raw) or _records.get('path:cover:%s' % raw)
     return rec.get('size') if rec is not None else None
 
 

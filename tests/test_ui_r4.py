@@ -204,52 +204,78 @@ class ModeAndProgressTests(unittest.TestCase):
             self.assertEqual('sb_complete' in names, expanded)
 
 
-class PreviewStripTests(unittest.TestCase):
-    def test_wide_product_identity_uses_three_tiles_and_target_uses_two(self):
-        image = T.FakeImage(width=2400, height=900)
-        self.assertEqual(UIC.preview_tile_count(image, 'contain'), 3)
-        self.assertEqual(UIC.preview_tile_count(image, 'cover'), 2)
-        self.assertEqual(UIC.preview_tile_count(T.FakeImage(width=900, height=1000)),1)
-
-    def test_individual_tiles_are_different_and_original_pixels_unchanged(self):
-        w,h = 120,60
-        pixels=[]
-        for _y in range(h):
-            for x in range(w):
-                pixels += ([1.,0.,0.,1.] if x < 60 else [0.,1.,0.,1.])
-        image=NS(size=(w,h),pixels=pixels)
-        saved=pixels.copy()
-        a,b=NS(),NS()
-        CACHE._pixels_thumbnail(image,a,'tile:0:2')
-        CACHE._pixels_thumbnail(image,b,'tile:1:2')
-        import numpy as np
-        c1=np.asarray(a.image_pixels_float).reshape(-1,4).mean(axis=0)
-        c2=np.asarray(b.image_pixels_float).reshape(-1,4).mean(axis=0)
-        self.assertGreater(c1[0],.95)
-        self.assertGreater(c2[1],.95)
-        self.assertLess(c1[1],.05)
-        self.assertLess(c2[0],.05)
-        self.assertEqual(image.pixels,saved)
-
-    def test_advanced_file_picker_uses_wide_strip_after_deferred_size_detection(self):
+class SeamlessPreviewTests(unittest.TestCase):
+    def test_wide_identity_and_environment_use_one_icon_only(self):
+        for w, h in ((2400, 900), (1920, 1080), (800, 1600)):
+            image = T.FakeImage(width=w, height=h)
+            self.assertEqual(UIC.preview_tile_count(image, 'contain'), 1)
+            self.assertEqual(UIC.preview_tile_count(image, 'cover'), 1)
         c = T.context()
+        for fit in ('contain', 'cover'):
+            layout = R.RecordingLayout()
+            with patch.object(CACHE, 'icon_for_image', return_value=42) as icon_for:
+                UIC.preview(layout, c, T.FakeImage(width=2400, height=900), fit=fit)
+            thumbnails = [x for x in layout.log if x[0] == 'thumbnail']
+            self.assertEqual(len(thumbnails), 1)
+            self.assertEqual(icon_for.call_args.kwargs['fit'], 'seamless')
+            self.assertEqual(thumbnails[0][1], UIC.preview_scale(c))
+
+    def test_original_pixel_range_and_both_vehicle_ends_preserved(self):
+        import numpy as np
+        w, h = 800, 300
+        px = np.empty((h, w, 4), dtype=np.float32)
+        px[:, :, 0] = np.linspace(.1, .9, w)[None, :]
+        px[:, :, 1] = .3
+        px[:, :, 2] = .6
+        px[:, :, 3] = 1
+        before = px.copy()
+        image = NS(size=(w, h), pixels=px.ravel())
+        thumb = NS()
+        CACHE._pixels_thumbnail(image, thumb, 'seamless')
+        actual = np.asarray(thumb.image_pixels_float).reshape(256, 256, 4)
+        self.assertEqual(thumb.image_size, (256, 256))
+        self.assertTrue(np.array_equal(image.pixels.reshape(h, w, 4), before))
+        self.assertTrue(np.all(actual[:, :, 3] == 1.0))
+        # The full source spans the middle row of the one-piece thumbnail.
+        self.assertLess(actual[128, 1, 0], .12)
+        self.assertGreater(actual[128, 254, 0], .88)
+        # No UI divider or blank black band down the image's center.
+        self.assertGreater(actual[128, 127, :3].sum(), .7)
+        self.assertGreater(actual[128, 128, :3].sum(), .7)
+        self.assertLess(abs(actual[128, 127, 0] - actual[128, 128, 0]), .02)
+        # The letterbox area is a blurred extension, not a black frame.
+        self.assertGreater(float(actual[10, 128, :3].sum()), .3)
+
+    def test_single_icon_for_all_upload_and_advanced_path_cards(self):
+        c = T.context()
+        image = T.FakeImage(width=1920, height=1080)
+        p = T.props(sb_reference_image=image)
+        for kind in ('PRODUCT', 'STYLE', 'TARGET', 'PERSON'):
+            layout = R.RecordingLayout()
+            with patch.object(CACHE, 'icon_for_image', return_value=42):
+                UIC.image_slot(layout, c, p, kind, item=NS(image=image, instruction=''), title=kind)
+            self.assertEqual(sum(x[0] == 'thumbnail' for x in layout.log), 1, kind)
         layout = R.RecordingLayout()
-        with patch.object(CACHE, 'icon_for_path', return_value=42), \
-             patch.object(CACHE, 'cached_dimensions_for_path', return_value=(1920,1080)):
+        with patch.object(CACHE, 'icon_for_path', return_value=42) as icon_for:
             UIC.path_preview(layout, c, '/tmp/studio.png', '建筑参考')
-        thumbnails = [x for x in layout.log if x[0] == 'thumbnail']
-        self.assertEqual(len(thumbnails), 2)
-        self.assertAlmostEqual(thumbnails[0][1], UIC.preview_scale(c) / 2)
-        self.assertTrue(any(x[:2] == ('operator','wondful.preview_reference') for x in layout.log))
+        self.assertEqual(sum(x[0] == 'thumbnail' for x in layout.log), 1)
+        self.assertEqual(icon_for.call_args.kwargs['fit'], 'seamless')
+        self.assertTrue(any(x[:2] == ('operator', 'wondful.preview_reference') for x in layout.log))
 
     def test_path_preview_dimensions_access_is_io_free(self):
         path='/reference.png'
         CACHE._records.clear()
         with patch.object(CACHE.os,'stat',side_effect=AssertionError('read in Panel.draw')):
             self.assertIsNone(CACHE.cached_dimensions_for_path(path))
-            CACHE._records['path:cover:'+path]={'size':(1600,900)}
+            CACHE._records['path:seamless:'+path]={'size':(1600,900)}
             self.assertEqual(CACHE.cached_dimensions_for_path(path),(1600,900))
         CACHE._records.clear()
+
+    def test_tiles_are_no_longer_an_accepted_preview_mode(self):
+        import numpy as np
+        image = NS(size=(3, 2), pixels=np.ones(3 * 2 * 4, dtype=np.float32))
+        with self.assertRaises(ValueError):
+            CACHE._pixels_thumbnail(image, NS(), 'tile:0:2')
 
 
 if __name__=='__main__':

@@ -8,7 +8,7 @@ bl_info = {
     "category": "Render",
 }
 
-BUILD_ID = "two-workflows-ui-r4"
+BUILD_ID = "two-workflows-ui-r5-seamless"
 
 import bpy
 
