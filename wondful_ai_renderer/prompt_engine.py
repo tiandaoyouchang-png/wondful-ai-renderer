@@ -92,6 +92,14 @@ BASE_SYSTEM_PROMPT = r"""
 输出只给最终提示词正文，不解释分析过程或参考职责，不输出 Markdown 标题、编号、项目符号或代码块；尽量写成连续自然的一段正文。产品受光描述须来自环境参考的实际光照分析。
 """.strip() + "\n\n" + REFERENCE_LIGHTING_POLICY
 
+REPLICA_POLISH_SYSTEM_PROMPT = r"""
+你是 Wondful AI 渲染器的参考图复刻提示词导演。你会收到：原始目标图、当前白模粗模预览，以及产品身份参考图。
+
+原始目标图定义必须保留的视觉意图：仅限本图实际可见的机位感、静止或运动状态、景深或模糊、环境纵深、照明、色调、材质、氛围和镜头成像语言。不要臆造未出现的运动、低机位、倾斜、尘土、峡谷或日落。白模粗模预览是唯一的几何、相机、构图、透视、遮挡、尺度和产品位置权威；不要用文字覆盖它，也不要为了参考图里的另一辆车而改动真实产品身份。
+
+输出一段可直接用于生图的中文 Appearance Prompt。自然保留原图的视觉意图和摄影语言，保留用户手写需求与产品身份；不要输出坐标、bbox、尺寸或要求改变白模几何的指令。不要解释分析过程、不要标题或列表。
+""".strip() + "\n\n" + REFERENCE_LIGHTING_POLICY
+
 
 
 # 3.1.7: hard markers are unambiguous framing/camera vocabulary. Soft markers
@@ -137,7 +145,7 @@ def _is_structure_clause(clause: str) -> bool:
     return not has_appearance
 
 
-def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
+def sanitize_appearance_prompt_report(text: str, *, preserve_visual_intent: bool = False) -> tuple[str, list[str]]:
     """Return (clean_prompt, removed_fragments) for an Appearance prompt."""
     import re
 
@@ -152,9 +160,29 @@ def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
             continue
         end = sentence[-1] if sentence[-1] in "。！？!?;；" else ""
         body = sentence[:-1] if end else sentence
-        clauses = [c for c in re.split(r"(?<=[，,、])", body) if c.strip()]
-        good = [c for c in clauses if not _is_structure_clause(c)]
-        removed.extend(c.strip("，,、 ") for c in clauses if _is_structure_clause(c))
+        # A bbox list is one control clause, including its internal commas.
+        separator = r"(?<=[，,、])(?![^\[\]]*\])" if preserve_visual_intent else r"(?<=[，,、])"
+        clauses = [c for c in re.split(separator, body) if c.strip()]
+        def keep(clause):
+            if preserve_visual_intent and re.search(
+                r"(?:^|[^a-z])(?:x|y|z)\s*=|bbox|坐标|轮心|重新构图|重新取景|裁切|裁剪|"
+                r"\b(?:move|reposition|reframe|crop|zoom|pan)\b|"
+                r"(?:移动|挪动|调整|改变|重设|切换).{0,8}(?:相机|机位|镜头|构图|焦段|位置|尺度)|"
+                r"(?:相机|机位|镜头).{0,8}(?:移动|挪动|改为|改成|拉近|拉远|抬高|降低)",
+                clause, re.IGNORECASE,
+            ):
+                return False
+            if not _is_structure_clause(clause):
+                return True
+            # Replica prompts legitimately describe the visual language present
+            # in the supplied target.  The white blockout remains the geometry
+            # authority; do not erase that visual intent while cleaning legacy
+            # generic composition instructions.
+            visual = ("机位", "俯拍", "仰拍", "平视", "鸟瞰", "倾斜", "俯仰", "滚转",
+                      "静态", "静止", "跟拍", "运动", "模糊", "焦段", "长焦", "广角", "透视", "景深")
+            return preserve_visual_intent and any(word in clause for word in visual)
+        good = [c for c in clauses if keep(c)]
+        removed.extend(c.strip("，,、 ") for c in clauses if not keep(c))
         if len(good) == len(clauses):
             kept.append(sentence)
         elif good:
@@ -163,14 +191,14 @@ def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
     return "".join(kept).strip(), [r for r in removed if r]
 
 
-def sanitize_appearance_prompt(text: str) -> str:
+def sanitize_appearance_prompt(text: str, *, preserve_visual_intent: bool = False) -> str:
     """Remove structure-control clauses from an Appearance prompt.
 
     Deterministic guard after AI polish and again before final render. Since
     3.1.7 it removes clauses, not whole sentences, and keeps clauses that are
     about light, colour or material even if they mention 位置/透视/地平线.
     """
-    return sanitize_appearance_prompt_report(text)[0]
+    return sanitize_appearance_prompt_report(text, preserve_visual_intent=preserve_visual_intent)[0]
 
 STYLE_ANALYSIS_SYSTEM_PROMPT = r"""
 你是 Wondful AI 渲染器的视觉风格分析器。你只负责读取本轮提供的环境／风格参考图，提取可迁移到其他构图中的视觉语言。必须实际观察当前图片，不得沿用此前会话、首次上传图片或旧提示词中的风格记忆。
@@ -288,13 +316,24 @@ def build_polish_user_text(
     color_source: str = "BLENDER",
     appearance_lock: str = "",
     identity_items: list[str] | None = None,
+    workflow_mode: str = "ENVIRONMENT",
+    replica_target_count: int = 0,
+    replica_preview_count: int = 0,
 ) -> str:
     # width/height are intentionally not translated into the visible prompt.
     # Geometry / framing comes from Camera Base + Structure Packet, not text.
+    reference_mode = workflow_mode == "REFERENCE"
     refs = [
         "Reference 1 = Blender Camera Base：只用于理解当前场景语义；它的 Camera / Composition / Geometry / Position / Scale / Occlusion 全部由后续 Structure Packet 直接控制，不要把这些结构信息写进最终提示词。"
-    ] if include_camera else []
-    idx = 2 if include_camera else 1
+    ] if include_camera and not reference_mode else []
+    idx = 2 if refs else 1
+    if reference_mode:
+        if replica_target_count:
+            refs.append(f"Reference {idx} = 复刻原始目标图：只提取本图实际可见的视觉意图（例如画面确有的机位感、静止或运动状态、环境纵深、光线、气氛与镜头成像语言）；不得臆造未出现的特征、复制其中车辆身份或用文字改写白模决定的几何。")
+            idx += replica_target_count
+        if replica_preview_count:
+            refs.append(f"Reference {idx} = 当前白模粗模预览：唯一的几何、相机、构图、透视、遮挡和产品尺度依据；不得以任何文字指令覆盖它。")
+            idx += replica_preview_count
     idx = _append_reference_group(
         refs,
         idx,
@@ -342,7 +381,8 @@ def build_polish_user_text(
         + (user_prompt.strip() or "生成高品质商业视觉画面。")
         + _lock_note_for_polish(appearance_lock, identity_items)
         + "\n\n" + reference_lighting_policy(color_source)
-        + "\n\n请直接输出最终 Appearance Prompt。不要加入任何构图或几何约束；Structure 全部交给 Blender 参考图与 Structure Packet。"
+        + ("\n\n请直接输出最终复刻 Appearance Prompt。只保留原始目标图实际可见的光线、场景氛围、静止或运动状态与镜头成像语言；白模粗模预览始终是几何权威，不要用文字覆盖它。"
+           if reference_mode else "\n\n请直接输出最终 Appearance Prompt。不要加入任何构图或几何约束；Structure 全部交给 Blender 参考图与 Structure Packet。")
     )
 
 
@@ -363,6 +403,7 @@ def build_render_prompt(
     color_source: str = "BLENDER",
     appearance_lock: str = "",
     identity_items: list[str] | None = None,
+    workflow_mode: str = "ENVIRONMENT",
 ) -> str:
     """Build an appearance-only generation instruction.
 
@@ -416,10 +457,12 @@ def build_render_prompt(
     _append_reference_group(
         mapping,
         idx,
-        "环境／风格参考图",
+        "原始复刻目标图" if workflow_mode == "REFERENCE" else "环境／风格参考图",
         style_count,
-        ENVIRONMENT_REFERENCE_RULE,
-        "辅助环境参考：" + ENVIRONMENT_REFERENCE_RULE,
+        ("只保留该图实际可见的视觉意图与摄影语言；不得替代 Blender Camera Base / Structure Packet 的几何权威。"
+         if workflow_mode == "REFERENCE" else ENVIRONMENT_REFERENCE_RULE),
+        ("辅助原始复刻目标图：只补充本图实际可见的视觉意图；不得改变白模几何。"
+         if workflow_mode == "REFERENCE" else "辅助环境参考：" + ENVIRONMENT_REFERENCE_RULE),
         instructions=style_instructions,
     )
 
@@ -429,6 +472,8 @@ def build_render_prompt(
         "任务：只做 Appearance Re-render。构图与几何完全由已附带的 Blender Camera Base / Structure Packet 决定；"
         "不要从下方文字中寻找或生成任何新的构图方案。下方正文只控制材质、灯光、色调、身份、风格、环境质感与后期。"
     )
+    if workflow_mode == "REFERENCE":
+        appearance_rule += "原始复刻目标图只提供实际可见的视觉意图和摄影语言，不得改写白模控制的几何。"
     control_color_rule = (
         "结构控制图仅用于条件控制：不要把 Mask 的黑白、Depth 的灰度、Normal 的 RGB、Part ID 的伪彩色、Silhouette 的线条复制成最终视觉元素。"
     )
@@ -438,7 +483,7 @@ def build_render_prompt(
         canvas_contract(width, height, target_size),
         "\n".join(mapping),
         appearance_lock.strip(),
-        sanitize_appearance_prompt(polished_prompt),
+        sanitize_appearance_prompt(polished_prompt, preserve_visual_intent=workflow_mode == "REFERENCE"),
         identity_block(list(identity_items or [])),
         control_color_rule,
         reference_lighting_policy(color_source),

@@ -276,8 +276,9 @@ class WiringTests(unittest.TestCase):
         self.assertIn("if replica:", main)
         self.assertEqual(ui.count('"wondful.scene_blockout_build"'), 1)
         self.assertIn('"wondful.scene_blockout_build", text="生成新粗模版本"', ui)
-        for label in ("匹配相机", "自动校正"):
+        for label in ("成功后自动匹配新参考相机", "自动校正"):
             self.assertIn(label, ui)
+        self.assertNotIn('switches.prop(props, "sb_set_camera"', main)
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         self.assertIn("sb_set_camera: BoolProperty(name=\"同时设置相机\", default=True", props)
         self.assertIn("sb_correct: BoolProperty(name=\"自动校正一轮\", default=False", props)

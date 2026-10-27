@@ -198,8 +198,9 @@ class ModeAndProgressTests(unittest.TestCase):
             p = T.props(workflow_mode='REFERENCE', ui_show_replica_advanced=expanded)
             log = self.draw(p)
             names = [x[1] for x in log if x[0]=='prop']
-            self.assertIn('sb_set_camera', names)
+            self.assertNotIn('sb_set_camera', names)
             self.assertIn('sb_correct', names)
+            self.assertTrue(any(x[0]=='label' and '自动匹配新参考相机' in x[1] for x in log))
             self.assertEqual('sb_precise' in names, expanded)
             self.assertEqual('sb_complete' in names, expanded)
 

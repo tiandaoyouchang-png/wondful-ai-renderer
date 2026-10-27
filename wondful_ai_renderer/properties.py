@@ -561,8 +561,10 @@ class WONDFUL_AISettings(PropertyGroup):
         default="ENVIRONMENT", update=workflow.switch_mode)
     workflow_last_mode: StringProperty(default="ENVIRONMENT", options={"HIDDEN"})
     workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
-    auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=False,
-        description="可选；关闭时直接使用手写提示词或一句话需求，不强制调用 AI 润色")
+    # Kept for old .blend files. Generate treats it as mandatory; legacy False is ignored.
+    auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=True,
+        description="每次生成都会自动进行 AI 润色；保留旧属性以兼容已有工程",
+        options={"HIDDEN"})
     replica_reviewed: BoolProperty(default=False, options={"HIDDEN"})  # legacy only
     ui_empty_note: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})
     sb_target_note: StringProperty(name="参考重点", default="",
@@ -588,8 +590,9 @@ class WONDFUL_AISettings(PropertyGroup):
 
     two_step: BoolProperty(
         name="分两步",
-        description="打开后「生成」只写提示词，确认后再点「渲染」",
+        description="旧工程兼容属性；生成流程不再暂停等待确认",
         default=False,
+        options={"HIDDEN"},
     )
     prompt_removed_notice: StringProperty(default="", options={"SKIP_SAVE"})
     # 1.2.2: set when the local Codex CLI rejected the chosen 推理 model and a fallback ran.
@@ -988,8 +991,8 @@ class WONDFUL_AISettings(PropertyGroup):
     sb_image_path: StringProperty(name="参考图", description="独立的复刻目标图；不自动沿用环境参考渲染的图片",
                                   subtype="FILE_PATH", default="", update=workflow.target_changed)
     sb_set_camera: BoolProperty(name="同时设置相机", default=True,
-                                description="按照片估计的机位高度、俯仰、视角新建 / 更新「Wondful 参考相机」并设为场景相机；"
-                                            "不勾选时不动任何相机，体块朝向跟随当前场景相机")
+                                description="旧工程兼容属性；成功的参考图粗模始终启用新建的参考相机",
+                                options={"HIDDEN"})
     sb_correct: BoolProperty(name="自动校正一轮", default=False,
                              description="搭好后从参考机位渲染粗模、和照片比对吻合度，再让 AI 修正一轮；吻合度变高才采用（多 1–2 分钟）")
     # 1.2.5 精确模式: measure camera + depth locally (MoGe-2, CPU) and pin the blocks to it; off = unchanged flow

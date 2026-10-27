@@ -228,10 +228,10 @@ class WorkflowStateTests(unittest.TestCase):
     def test_blank_prompt_has_safe_mode_specific_default(self):
         self.assertIn("当前相机",WF.render_text(props()))
         self.assertIn("已确认",WF.render_text(props(workflow_mode=WF.REFERENCE)))
-    def test_optional_polish_is_off_by_default_even_with_stale_style(self):
+    def test_generate_always_polishes_even_with_legacy_flags_disabled(self):
         p=props(style_prompt_dirty=True,prompt="",style_images=[1])
-        self.assertFalse(OPS["generate_needs_polish"](p,NS()))
-    def test_auto_polish_remains_explicitly_available(self):
+        self.assertTrue(OPS["generate_needs_polish"](p,NS()))
+    def test_legacy_auto_polish_flag_does_not_change_generate_flow(self):
         self.assertTrue(OPS["generate_needs_polish"](props(auto_polish_on_generate=True),NS()))
 
 
@@ -282,6 +282,17 @@ class ReferenceAndGuardTests(unittest.TestCase):
         self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],str(self.target))
         self.target.write_bytes(b"changed")
         self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],"")
+    def test_prepared_snapshot_may_differ_from_valid_original_target(self):
+        p=self.ready();c=context(p);obj=Item("shell")
+        snapshot=Path(self.tmp.name)/"prepared.png";snapshot.write_bytes(b"resized-and-reencoded-png")
+        block=Collection("Owned",[obj],tags={"wondful_scene_blockout":1,
+            "wondful_sb_reference_image":str(snapshot),"wondful_sb_reference_sha256":WF.file_hash(snapshot),
+            "wondful_sb_original_sha256":WF.file_hash(self.target)})
+        c.scene.collection.children_recursive.append(block);p.massing_collection=block
+        self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],str(snapshot))
+        self.assertEqual(OPS["workflow_preflight"](c,p),"")
+        self.target.write_bytes(b"replaced-original")
+        self.assertIn("不一致",OPS["workflow_preflight"](c,p))
     def test_environment_generation_never_uses_replica_view_list(self):
         p=props(workflow_multiview=True);c=context(p)
         other=Item("Other",kind="CAMERA");c.scene.objects.append(other);p.mv_cameras=[NS(camera=other,enabled=True)]
@@ -297,12 +308,12 @@ class ReferenceAndGuardTests(unittest.TestCase):
             self.assertEqual(OPS["generate_views"](c,p),[])
             p.workflow_multiview=True
             self.assertEqual(OPS["generate_views"](c,p),[c.scene.camera])
-    def test_generate_dispatches_without_polish_or_camera_change(self):
+    def test_generate_dispatches_mandatory_polish_without_camera_change(self):
         p=props(prompt="manual",style_prompt_dirty=True);c=context(p);calls=[];original=c.scene.camera
         bpy.ops=NS(wondful=NS(ai_render=lambda *a: calls.append("render") or {"FINISHED"},
                               polish_prompt=lambda *a: calls.append("polish") or {"FINISHED"}))
         op=OPS["WONDFUL_OT_generate"]()
-        self.assertEqual(op.execute(c),{"FINISHED"});self.assertEqual(calls,["render"])
+        self.assertEqual(op.execute(c),{"FINISHED"});self.assertEqual(calls,["polish"])
         self.assertIs(original,c.scene.camera);self.assertEqual(p.prompt,"manual")
     def test_replica_rejection_happens_before_any_provider_call(self):
         p=props(workflow_mode=WF.REFERENCE);c=context(p)
