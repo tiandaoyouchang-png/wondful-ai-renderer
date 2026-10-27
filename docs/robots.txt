@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://tiandaoyouchang-png.github.io/wondful-ai-renderer/sitemap.xml
