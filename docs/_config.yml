@@ -1,0 +1,11 @@
+title: Wondful AI Renderer
+description: Wondful AI Renderer is an open-source Blender AI rendering add-on for product visualization and automotive design. Create commercial-style scenes from real 3D models, a fixed camera, and environment references. | 开源 Blender AI 渲染插件，面向产品可视化与汽车场景图。
+url: "https://tiandaoyouchang-png.github.io"
+baseurl: "/wondful-ai-renderer"
+lang: zh-CN
+markdown: kramdown
+permalink: pretty
+exclude:
+  - testing/
+  - history/
+  - cases/

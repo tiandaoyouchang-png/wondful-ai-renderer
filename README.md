@@ -1,6 +1,10 @@
-# Wondful AI Renderer · 任何产品的 AI 场景渲染（Blender 插件）
+# Wondful AI Renderer — Open-Source Blender AI Rendering Add-on
 
-> **任何有 3D 模型的产品**——鞋、表、灯、相机、家具、汽车——在 Blender 里打好一个机位，一键生成多张商业级场景图，**形状、比例、颜色和位置锁死，AI 不改你的产品**。
+**中文：开源 Blender AI 渲染插件 · 产品可视化与汽车场景图**
+
+> Create AI-assisted commercial-style product scenes from a real Blender 3D model, a fixed camera, and environment reference images. Blender anchors the composition; AI develops the environment and lighting; silhouette checks and detail restoration help preserve product shape, scale, colour, and placement.
+>
+> 使用真实 Blender 3D 模型、固定机位与环境参考图生成商业级产品/汽车场景图。Blender 锚定构图，AI 生成环境与光照，再通过轮廓验收和细节回贴，尽量保留产品造型、比例、颜色与位置。
 
 | 跑鞋 · 城市雨夜 | 腕表 · 黑色大理石 | 单椅 · 北欧客厅 |
 |---|---|---|

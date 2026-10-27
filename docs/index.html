@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wondful AI Renderer | Open-Source Blender AI Rendering Add-on</title>
+  <meta name="description" content="Wondful AI Renderer is an open-source Blender AI rendering add-on for product visualization and automotive design. Create commercial-style scenes from real 3D models, a fixed camera, and environment references. 开源 Blender AI 渲染插件，适用于产品可视化与汽车场景图。">
+  <meta name="keywords" content="Blender AI rendering, Blender add-on, Blender plugin, AI product visualization, automotive design, 3D rendering, product visualization, 开源 Blender 插件, AI 产品渲染, 汽车设计">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <link rel="canonical" href="https://tiandaoyouchang-png.github.io/wondful-ai-renderer/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Wondful AI Renderer">
+  <meta property="og:title" content="Wondful AI Renderer — Open-Source Blender AI Rendering Add-on">
+  <meta property="og:description" content="AI-assisted product and automotive visualization from real Blender models, a fixed camera, and environment references.">
+  <meta property="og:url" content="https://tiandaoyouchang-png.github.io/wondful-ai-renderer/">
+  <meta property="og:image" content="https://tiandaoyouchang-png.github.io/wondful-ai-renderer/showcase/yu7_grass.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Wondful AI Renderer | Blender AI Rendering Add-on">
+  <meta name="twitter:description" content="Open-source Blender add-on for AI-assisted product visualization and automotive rendering.">
+  <meta name="twitter:image" content="https://tiandaoyouchang-png.github.io/wondful-ai-renderer/showcase/yu7_grass.jpg">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Wondful AI Renderer",
+    "description": "Open-source Blender AI rendering add-on for product visualization and automotive design, using real 3D models, a fixed camera, and environment references.",
+    "applicationCategory": "DesignApplication",
+    "license": "https://opensource.org/license/mit",
+    "codeRepository": "https://github.com/tiandaoyouchang-png/wondful-ai-renderer",
+    "url": "https://tiandaoyouchang-png.github.io/wondful-ai-renderer/"
+  }
+  </script>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1018;--panel:#111a26;--line:#263548;--text:#eef4fb;--muted:#a8b7c9;--blue:#8fc5ff;--cyan:#8ce5e5;--max:1160px}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(ellipse at 75% 0%,#1c3852 0,transparent 38%),var(--bg);color:var(--text);font:16px/1.65 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    a{color:var(--blue);text-underline-offset:4px}
+    .wrap{width:min(var(--max),calc(100% - 40px));margin:auto}
+    header{border-bottom:1px solid #243244;background:#0b1018d9}
+    .nav{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 0}
+    .brand{font-weight:750;letter-spacing:.02em;color:var(--text);text-decoration:none}
+    nav{display:flex;gap:20px;flex-wrap:wrap;font-size:14px}
+    .hero{padding:74px 0 56px;display:grid;grid-template-columns:1.02fr .98fr;gap:48px;align-items:center}
+    .eyebrow{color:var(--cyan);font-size:12px;font-weight:750;letter-spacing:.16em;text-transform:uppercase}
+    h1{font-size:clamp(38px,5.5vw,66px);line-height:1.06;letter-spacing:-.045em;margin:16px 0 22px}
+    h2{font-size:clamp(27px,3.4vw,38px);line-height:1.18;letter-spacing:-.025em;margin:0 0 16px}
+    h3{font-size:19px;margin:0 0 8px}
+    p{margin:0 0 16px;color:var(--muted)}
+    .lead{font-size:19px;color:#d5e1ef}
+    .cn{border-left:2px solid #47769b;padding-left:14px;margin-top:22px}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 17px;border:1px solid #46637f;border-radius:10px;text-decoration:none;color:var(--text);font-weight:650}
+    .btn.primary{background:#d7edff;color:#0b1724;border-color:#d7edff}
+    .hero-img{border:1px solid #34475b;border-radius:18px;overflow:hidden;background:#111a26;box-shadow:0 28px 90px #0008}
+    .hero-img img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover}
+    .hero-img figcaption{padding:12px 16px;color:var(--muted);font-size:13px}
+    section{padding:60px 0;border-top:1px solid #1f2b3b}
+    .section-lead{max-width:760px;margin-bottom:28px}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+    .card{background:linear-gradient(145deg,#141e2b,#0e151f);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+    .card img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:#111a26}
+    .card .body{padding:17px}
+    .card p{font-size:14px;margin:0}
+    .steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;counter-reset:step}
+    .step{padding:20px;border:1px solid var(--line);border-radius:13px;background:#101823}
+    .step:before{counter-increment:step;content:"0" counter(step);display:block;color:var(--cyan);font-size:13px;font-weight:800;margin-bottom:15px}
+    .tags{display:flex;gap:9px;flex-wrap:wrap}
+    .tag{padding:7px 11px;border:1px solid #30455c;border-radius:999px;color:#cfdeee;font-size:14px}
+    .note{padding:18px 20px;border:1px solid #34465a;border-radius:12px;background:#0e1621;font-size:14px}
+    footer{padding:28px 0 42px;color:var(--muted);font-size:13px}
+    @media(max-width:800px){.hero{grid-template-columns:1fr;padding-top:48px;gap:28px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.steps{grid-template-columns:repeat(2,minmax(0,1fr))}.nav{align-items:flex-start;flex-direction:column}}
+    @media(max-width:520px){.wrap{width:min(var(--max),calc(100% - 28px))}.grid,.steps{grid-template-columns:1fr}nav{gap:12px}.hero{padding:42px 0}.lead{font-size:17px}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="./">WONDFUL AI RENDERER</a>
+    <nav aria-label="Main navigation">
+      <a href="#features">Features</a>
+      <a href="#workflow">Workflow</a>
+      <a href="CASES.en.html">Case studies</a>
+      <a href="https://github.com/tiandaoyouchang-png/wondful-ai-renderer">Source</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="wrap hero">
+    <div>
+      <div class="eyebrow">Open-source Blender add-on</div>
+      <h1>AI product rendering, grounded in your real 3D model.</h1>
+      <p class="lead">Turn a Blender camera setup, a real product model, and environment reference images into polished product and automotive scenes.</p>
+      <p>Wondful combines Blender's composition and product masks with AI-assisted environment and lighting generation. Silhouette checks and detail restoration help keep the product aligned with the source model.</p>
+      <div class="cn">
+        <h3>开源 Blender AI 渲染插件</h3>
+        <p>用真实 3D 模型、固定机位与环境参考图生成产品和汽车场景效果图。Blender 锚定构图，AI 负责环境与光照，再通过轮廓检查和细节回贴，尽量保留产品造型、比例、颜色与位置。</p>
+      </div>
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/tiandaoyouchang-png/wondful-ai-renderer">View source on GitHub</a>
+        <a class="btn" href="https://tiandao1.gumroad.com/l/wondful">Get packaged installer</a>
+      </div>
+    </div>
+    <figure class="hero-img">
+      <img src="showcase/yu7_grass.jpg" alt="AI-assisted automotive visualization of a Xiaomi YU7 in a natural outdoor scene" fetchpriority="high">
+      <figcaption>Real Blender model · camera-anchored composition · AI-assisted environment</figcaption>
+    </figure>
+  </div>
+  <section id="features">
+    <div class="wrap">
+      <h2>Built for product visualization</h2>
+      <p class="section-lead">Keep the 3D model as the source of truth while exploring different commercial-style environments. Wondful is designed for automotive design, e-commerce visuals, industrial design reviews, and 3D artists.</p>
+      <div class="grid">
+        <article class="card"><img src="showcase/shoe_rain.jpg" alt="Running shoe visualized in a rainy city environment" loading="lazy"><div class="body"><h3>Environment references</h3><p>Guide atmosphere, materials, and lighting with reference images.</p></div></article>
+        <article class="card"><img src="showcase/watch_marble.jpg" alt="Watch product visualization on dark marble" loading="lazy"><div class="body"><h3>Product identity</h3><p>Use the real 3D model and product references to anchor shape, scale, and placement.</p></div></article>
+        <article class="card"><img src="showcase/camera_street.jpg" alt="Retro camera in a cinematic street scene" loading="lazy"><div class="body"><h3>Product range</h3><p>Explore product scenes for footwear, watches, lighting, cameras, furniture, and cars.</p></div></article>
+        <article class="card"><img src="showcase/lamp_cafe.jpg" alt="Table lamp in a cafe interior" loading="lazy"><div class="body"><h3>Commercial art direction</h3><p>Develop scene mood, light, reflections, and overall visual style.</p></div></article>
+        <article class="card"><img src="showcase/chair_nordic.jpg" alt="Chair product scene in a Nordic interior" loading="lazy"><div class="body"><h3>Blender-based workflow</h3><p>Use a camera and real geometry as the foundation of each render.</p></div></article>
+        <article class="card"><img src="showcase/yu7_snow.jpg" alt="Automotive visualization of a vehicle in a snowy setting" loading="lazy"><div class="body"><h3>Automotive visualization</h3><p>Create varied vehicle scenes while checking the product silhouette against Blender output.</p></div></article>
+      </div>
+    </div>
+  </section>
+  <section id="workflow">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="section-lead">A camera-anchored workflow designed to reduce product drift during AI-assisted rendering.</p>
+      <div class="steps">
+        <article class="step"><h3>Set up the model</h3><p>Choose the product collection and compose the camera in Blender.</p></article>
+        <article class="step"><h3>Add references</h3><p>Provide product identity references and the target environment style.</p></article>
+        <article class="step"><h3>Generate scenes</h3><p>Use AI to develop the environment, atmosphere, and lighting.</p></article>
+        <article class="step"><h3>Check and restore</h3><p>Compare silhouettes and restore selected real details where supported.</p></article>
+      </div>
+    </div>
+  </section>
+  <section>
+    <div class="wrap">
+      <h2>Use cases</h2>
+      <div class="tags">
+        <span class="tag">Blender AI rendering</span><span class="tag">Product visualization</span><span class="tag">Automotive design</span><span class="tag">3D rendering</span><span class="tag">E-commerce imagery</span><span class="tag">Industrial design</span><span class="tag">AI 产品渲染</span><span class="tag">汽车场景图</span>
+      </div>
+    </div>
+  </section>
+  <section>
+    <div class="wrap">
+      <h2>Open source, with honest limits</h2>
+      <p class="section-lead">The source code is released under the MIT License. AI image editing can still alter details; the workflow uses silhouette checks and correction steps to reduce these errors, but it does not guarantee pixel-perfect preservation for every generation.</p>
+      <div class="note">For reproducible comparisons, see the <a href="CASES.en.html">case studies</a>, which document prompts, references, settings, and silhouette measurements, including cases that did not meet the target.</div>
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/tiandaoyouchang-png/wondful-ai-renderer">Browse source and issues</a>
+        <a class="btn" href="https://tiandao1.gumroad.com/l/wondful">Packaged installer &amp; updates</a>
+      </div>
+    </div>
+  </section>
+</main>
+<footer><div class="wrap">© Wondful AI Renderer · MIT License · <a href="https://github.com/tiandaoyouchang-png/wondful-ai-renderer">GitHub repository</a></div></footer>
+</body>
+</html>
