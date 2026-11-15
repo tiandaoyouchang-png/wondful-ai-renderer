@@ -249,15 +249,19 @@ def identity_checklist(
 
 
 def appearance_lock_block(color_source: str, material_text: str, product_look: str) -> str:
-    """Product appearance block that is passed verbatim (never sanitised away)."""
+    """Lock Blender paint/geometry while allowing reference material properties.
+
+    ``PRODUCT_REF`` remains a legacy UI value: it never authorizes a body repaint.
+    """
     lines = []
     look = (product_look or "").strip()
     if look:
         lines.append("产品外观（锁定，所有场景保持一致，只随环境受光变化）：" + look)
     if color_source == "BLENDER" and (material_text or "").strip():
-        lines.append("产品配色与材质以 Blender 材质为准：" + material_text.strip())
+        lines.append("Blender 当前材质提供车身车漆色相与基础材质基线：" + material_text.strip()
+                     + "；三视图可在不冲突时补充其他部件材质属性，不得重涂车漆或改几何。")
     elif color_source == "PRODUCT_REF":
-        lines.append("产品配色与材质以产品参考图为准（只取颜色和表面材质，不取其打光、阴影与背景）。")
+        lines.append("产品参考图仅用于各部件材质属性；车身车漆色相仍以 Blender 当前模型为准，不取参考图颜色、打光、阴影或背景。")
     if not lines:
         return ""
     return "【产品外观锁定】\n" + "\n".join(lines)

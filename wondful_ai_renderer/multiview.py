@@ -1859,33 +1859,67 @@ def cache_key(*parts) -> str:
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def scene_geometry_key(context) -> str:
-    """Main-thread snapshot, including evaluated modifiers and off-camera geometry."""
-    h = hashlib.sha256()
-    dg = context.evaluated_depsgraph_get()
-    for obj in sorted(context.scene.objects, key=lambda ob: ob.name):
-        if obj.hide_render:
-            continue
-        h.update(cache_key(obj.name, obj.type, [list(row) for row in obj.matrix_world]).encode())
-        if obj.type == "CAMERA":
-            data = obj.data
-            h.update(cache_key(data.type, data.lens, data.sensor_width, data.sensor_height,
-                               data.sensor_fit, data.shift_x, data.shift_y).encode())
-        elif obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}:
-            evaluated = obj.evaluated_get(dg)
-            mesh = evaluated.to_mesh()
-            try:
-                if mesh is not None:
-                    coords = np.empty(len(mesh.vertices) * 3, np.float32)
-                    indices = np.empty(len(mesh.loops), np.int32)
-                    mesh.vertices.foreach_get("co", coords)
-                    mesh.loops.foreach_get("vertex_index", indices)
-                    h.update(coords.tobytes())
-                    h.update(indices.tobytes())
-                    h.update(cache_key([p.loop_total for p in mesh.polygons]).encode())
-            finally:
-                evaluated.to_mesh_clear()
-    return h.hexdigest()
+def scene_geometry_key(context, objects=None, render_modifiers=False) -> str:
+    """Main-thread snapshot; optional product filter avoids unrelated scene meshes."""
+    selected = list(context.scene.objects if objects is None else objects)
+    restore = []
+    try:
+        if render_modifiers:
+            for obj in selected:
+                for modifier in getattr(obj, "modifiers", ()):
+                    settings = [("show_viewport", modifier.show_render)]
+                    if modifier.show_render and modifier.type in {"SUBSURF", "MULTIRES"}:
+                        settings.append(("levels", modifier.render_levels))
+                    for attr, value in settings:
+                        old = getattr(modifier, attr)
+                        if old != value:
+                            setattr(modifier, attr, value)
+                            restore.append((modifier, attr, old))
+            if restore:
+                context.view_layer.update()
+        h = hashlib.sha256()
+        dg = context.evaluated_depsgraph_get()
+        for obj in sorted(selected, key=lambda ob: ob.name):
+            if obj.hide_render:
+                continue
+            h.update(cache_key(obj.name, obj.type, [list(row) for row in obj.matrix_world]).encode())
+            if obj.type == "CAMERA":
+                data = obj.data
+                h.update(cache_key(data.type, data.lens, data.sensor_width, data.sensor_height,
+                                   data.sensor_fit, data.shift_x, data.shift_y).encode())
+            elif obj.type in {"MESH", "CURVE", "SURFACE", "FONT", "META"}:
+                evaluated = obj.evaluated_get(dg)
+                if objects is not None:
+                    h.update(cache_key([list(row) for row in evaluated.matrix_world]).encode())
+                mesh = evaluated.to_mesh()
+                try:
+                    if mesh is None and render_modifiers:
+                        raise ValueError(f"无法求值产品几何：{obj.name}")
+                    if mesh is not None:
+                        coords = np.empty(len(mesh.vertices) * 3, np.float32)
+                        indices = np.empty(len(mesh.loops), np.int32)
+                        mesh.vertices.foreach_get("co", coords)
+                        mesh.loops.foreach_get("vertex_index", indices)
+                        h.update(coords.tobytes())
+                        h.update(indices.tobytes())
+                        h.update(cache_key([p.loop_total for p in mesh.polygons]).encode())
+                        if render_modifiers:
+                            # Product-projection helpers also depend on material
+                            # assignment and render-evaluated UVs (e.g. plate text).
+                            h.update(cache_key([p.material_index for p in mesh.polygons]).encode())
+                            uv=getattr(getattr(mesh,'uv_layers',None),'active',None)
+                            if uv is not None:
+                                values=np.empty(len(uv.data)*2,np.float32)
+                                uv.data.foreach_get('uv',values)
+                                h.update(values.tobytes())
+                finally:
+                    evaluated.to_mesh_clear()
+        return h.hexdigest()
+    finally:
+        for modifier, attr, old in reversed(restore):
+            setattr(modifier, attr, old)
+        if restore:
+            context.view_layer.update()
 
 
 def reusable_views(data, key, pool, current_names, geometry):

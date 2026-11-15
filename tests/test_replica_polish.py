@@ -39,6 +39,23 @@ OPERATORS = (PKG / "operators.py").read_text(encoding="utf-8")
 
 
 class ReplicaPromptTests(unittest.TestCase):
+    def test_replica_polish_and_render_share_observed_atmosphere_contract(self):
+        observed = "白天静止，产品比背景暗，暗区大于亮区，保留负补光，无扬尘。"
+        polish = PE.build_polish_user_text(
+            observed, 1, 0, 0, 1600, 900, workflow_mode="REFERENCE",
+            replica_target_count=1, replica_preview_count=1)
+        render = PE.build_render_prompt(observed, 1600, 900, 1, 0, 1, workflow_mode="REFERENCE")
+        for prompt in (PE.REPLICA_POLISH_SYSTEM_PROMPT, polish, render):
+            self.assertIn(PE.REFERENCE_ATMOSPHERE_POLICY, prompt)
+            for feature in ("面积占比", "负补光", "主观强度", "景深虚化", "浓度", "摄影光学",
+                            "白天保持白天，静止保持静止"):
+                self.assertIn(feature, prompt)
+        self.assertIn(observed, polish)
+        self.assertIn(observed, render)
+        environment = PE.build_render_prompt(observed, 1600, 900, 1, 0, 1)
+        self.assertNotIn(PE.REFERENCE_ATMOSPHERE_POLICY, environment)
+        self.assertNotIn(PE.REFERENCE_ATMOSPHERE_POLICY, PE.BASE_SYSTEM_PROMPT)
+
     def test_reference_polish_numbers_target_then_fresh_white_preview(self):
         text = PE.build_polish_user_text(
             "保留我的产品身份", 1, 0, 0, 1600, 900,
@@ -102,7 +119,8 @@ class OperatorWiringTests(unittest.TestCase):
         self.assertIn("return True", body)
         self.assertNotIn("auto_polish_on_generate", body)
         polish = OPERATORS[OPERATORS.index("class WONDFUL_OT_polish_prompt"):OPERATORS.index("class WONDFUL_OT_ai_render")]
-        self.assertIn('if chain_render:\n                    props.task_phase', polish)
+        self.assertIn('if chain_render:', polish)
+        self.assertIn('_schedule_operator("wondful.ai_render", self._origin_scene)', polish)
         self.assertNotIn('chain_render and not getattr(props, "two_step", False)', polish)
 
     def test_reference_pair_is_fresh_and_has_distinct_final_role(self):
@@ -115,7 +133,13 @@ class OperatorWiringTests(unittest.TestCase):
         self.assertTrue(all([ast.unparse(arg) for arg in node.args] == ["context.scene.camera", "context.scene"]
                             for node in signatures))
         render = OPERATORS[OPERATORS.index("class WONDFUL_OT_ai_render"):]
-        self.assertIn('copy_references([source_reference], self._session, "scene_reference")', render)
+        render_tree = ast.parse(render)
+        copies = [n for n in ast.walk(render_tree) if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Name) and n.func.id == "copy_verified"
+                  and n.args and isinstance(n.args[0], ast.Name) and n.args[0].id == "selected"]
+        self.assertTrue(copies)
+        self.assertIn('scene_reference = [original_copy]', render)
+        self.assertIn('original_snapshot["sha256"]', render)
         self.assertIn('("scene_reference" if workflow.is_reference(props) else "environment", style_upload)', render)
 
     def test_reference_polish_bypasses_old_style_summary_cache(self):

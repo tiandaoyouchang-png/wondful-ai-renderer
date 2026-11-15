@@ -1,4 +1,5 @@
 """1.2.3 ⑥ 渲染视角: the shared 「相机 N」 list as a multi-select of views to render (drag-in, order, checked filter)."""
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -97,7 +98,28 @@ class Wiring(unittest.TestCase):
         self.assertIn('"WONDFUL_UL_render_views", "", props, "mv_cameras"', ui)
         # The list is shown only after the user explicitly enables multiview in
         # reference workflow; environment renders never inherit it.
-        self.assertIn('if props.workflow_multiview:\n                _draw_render_views(output,context,props,busy,cells)', ui)
+        panel = next(n for n in ast.parse(ui).body if isinstance(n, ast.ClassDef) and n.name == "WONDFUL_PT_main")
+        draw = next(n for n in panel.body if isinstance(n, ast.FunctionDef) and n.name == "_draw_main")
+        replicas = [n for n in ast.walk(draw) if isinstance(n, ast.If)
+                    and isinstance(n.test, ast.Name) and n.test.id == "replica"
+                    and any(isinstance(child, ast.If) and ast.unparse(child.test) == "props.workflow_multiview"
+                            for child in n.body)]
+        self.assertEqual(len(replicas), 1)
+        replica = replicas[0]
+        switch = next(n for n in replica.body if isinstance(n, ast.If)
+                      and ast.unparse(n.test) == "props.workflow_multiview")
+        def view_calls(nodes):
+            return [n for root in nodes for n in ast.walk(root) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "_draw_render_views"]
+        self.assertEqual(len(view_calls(switch.body)), 1)
+        self.assertEqual(view_calls(switch.orelse), [])
+        self.assertEqual(len(view_calls([draw])), 1)
+        self.assertEqual([ast.unparse(arg) for arg in view_calls(switch.body)[0].args],
+                         ["output", "context", "props", "busy", "cells"])
+        self.assertTrue(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                            and n.func.attr == "field" and len(n.args) >= 3
+                            and isinstance(n.args[2], ast.Constant) and n.args[2].value == "workflow_multiview"
+                            for n in ast.walk(replica)))
         init = (PKG / "__init__.py").read_text(encoding="utf-8")
         for name in ("WONDFUL_UL_render_views", "WONDFUL_OT_mv_camera_move", "WONDFUL_OT_view_result_step"):
             self.assertEqual(init.count(name), 2, name)

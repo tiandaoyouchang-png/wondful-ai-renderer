@@ -19,7 +19,7 @@ SS = load_package_module("static_scene")
 class ReferenceLightingPayloadTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="wondful136_")
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.calls = []
         self.stack = ExitStack()
         self.addCleanup(self.tmp.cleanup)
@@ -83,16 +83,101 @@ class ReferenceLightingPayloadTests(unittest.TestCase):
         self.assertNotIn("约 50mm", text)
         self.assertNotIn("地平线反射线", text)
 
-    def test_scene_source_is_standalone_and_described_once(self):
+    def test_scene_source_is_standalone_without_generic_redescription(self):
         result = self.edit(scene_reference_path=self.env)
         body = self.image_payload()
         self.assertEqual(result["image_roles"], ["camera", "scene_reference", "product"])
         self.assertEqual(self.payload_bytes(body)[:2], [Path(self.camera).read_bytes(), Path(self.env).read_bytes()])
-        self.assertEqual(sum(want == "text" for _body, want in self.calls), 1)
+        self.assertEqual(sum(want == "text" for _body, want in self.calls), 0)
         text = body["input"][0]["content"][0]["text"]
         self.assertIn("连续曲面的类型、连接、开口与遮挡关系", text)
         self.assertIn("不复制来源图中的车型、车漆颜色或固定高光形状", text)
         self.assertIn("保持 Blender 底图已匹配的相机与产品投影", text)
+
+    def test_full_replica_request_keeps_polished_exposure_motion_and_cinematic_optics(self):
+        polished = ("主体比背景暗，暗部覆盖大半，强负补光；横向快门拖影强烈，"
+                    "主体追随清楚而近景拖曳，非景深虚化；浓密扬尘受背光照亮。" + "连续正文。" * 180
+                    + "末尾仍须保留原始亮暗面积与动感强度。")
+        style = "体素几何，画风锁定：不要画成写实照片或普通写实建筑。"
+        lock = "【产品外观锁定】保持固有色和身份。"
+        fallback = "旧结构化请求：Reference 2 = 产品 Mask，Reference 3 = Silhouette。/bundle/stale-mask.png"
+        with mock.patch.object(CD, "describe_environment") as describe, mock.patch.object(CD, "PHOTO_PROMPT", True):
+            self.edit(prompt=fallback, simple_brief=polished, scene_reference_path=self.env,
+                      style_text=style, identity_text=lock, massing_text="灰蓝色体块：连续曲面")
+        describe.assert_not_called()
+        body = self.image_payload()
+        text = body["input"][0]["content"][0]["text"]
+        self.assertIn(polished, text)
+        self.assertEqual(text.count(polished), 1)
+        self.assertNotIn(fallback, text)
+        self.assertNotIn("stale-mask.png", text)
+        self.assertNotIn("Reference 2 = 产品 Mask", text)
+        self.assertIn(lock, text)
+        self.assertIn("主体产品运动", text)
+        for expected in ("面积占比", "负补光", "主观强度", "景深虚化", "浓度", "摄影光学"):
+            self.assertIn(expected, text)
+        for contradiction in ("不是写实照片", "不要画成写实照片", "不要做得比描述更戏剧化",
+                              "show only the static scene", "只保留场景本身的静态物体",
+                              "色彩是克制的相机直出"):
+            self.assertNotIn(contradiction, text)
+        self.assertIn("位置、大小、角度、透视、轮廓", text)
+        self.assertEqual(self.payload_bytes(body), [Path(p).read_bytes() for p in (self.camera, self.env, self.product)])
+
+    def test_empty_replica_brief_keeps_entire_current_prompt(self):
+        current = "Reference 2 = 产品 Mask，Reference 3 = Silhouette。" + "保持静止明亮白天。" * 100 + "完整正文末尾。"
+        self.edit(prompt=current, simple_brief="", scene_reference_path=self.env)
+        text = self.image_payload()["input"][0]["content"][0]["text"]
+        self.assertIn(current, text)
+        self.assertIn("图 2：场景粗模来源图", text)
+        self.assertIn("图 3：产品三视图", text)
+        self.assertIn("该清单优先于正文的旧编号与角色映射", text)
+        self.assertGreater(text.index("该清单优先于正文的旧编号与角色映射"), text.index(current))
+
+    def test_daytime_static_replica_retains_absence_of_motion_and_dust(self):
+        observed = "明亮白天，静止主体，均匀漫射光，没有快门拖影，没有尘雾。"
+        self.edit(prompt=observed, simple_brief=observed, scene_reference_path=self.env)
+        text = self.image_payload()["input"][0]["content"][0]["text"]
+        self.assertIn(observed, text)
+        self.assertIn("白天保持白天，静止保持静止", text)
+        self.assertIn("没有的运动、尘雾或光效不要添加", text)
+        self.assertFalse(any(want == "text" for _body, want in self.calls))
+
+    def test_ordinary_environment_keeps_generic_summary_and_style_behavior(self):
+        self.edit(style_text="体素几何")
+        text = self.image_payload()["input"][0]["content"][0]["text"]
+        self.assertEqual(sum(want == "text" for _body, want in self.calls), 1)
+        self.assertIn("晴天混凝土建筑", text)
+        self.assertIn("不要做得比描述更戏剧化", text)
+        self.assertIn("不要画成写实照片", text)
+        self.assertNotIn("【原始目标图外观优先】", text)
+
+    def test_non_simple_and_repair_retain_standalone_source_and_policy(self):
+        for repair in (False, True):
+            with self.subTest(repair=repair):
+                base = self.png("candidate.png") if repair else self.camera
+                self.edit(prompt="白天静止，产品曝光低于背景。", simple_brief=None,
+                          edit_base_path=base, repair=repair, scene_reference_path=self.env)
+                body = self.image_payload()
+                text = body["input"][0]["content"][0]["text"]
+                self.assertIn(CD.SCENE_REFERENCE_POLICY, text)
+                self.assertIn(Path(self.env).read_bytes(), self.payload_bytes(body))
+                self.assertIn(Path(self.camera).read_bytes(), self.payload_bytes(body))
+                self.assertNotIn("show only the static scene", text)
+
+    def test_non_simple_fallback_retains_reference_contract(self):
+        fallback = mock.Mock(return_value={"engine": "captured_agent"})
+        with mock.patch.object(CD, "edit_image", side_effect=CD.DirectEditError("test failure", kind="request")) as edit:
+            CD.generate_with_fallback(
+                {"prompt": "白天静止，完整上层请求。", "reference_paths": [self.camera, self.product],
+                 "edit_base_path": self.camera, "output_path": str(self.root / "fallback_full.png")},
+                fallback=fallback, state={}, size="1536x864", manifest=self.manifest,
+                scene_reference_path=self.env)
+        self.assertEqual(edit.call_args.kwargs["scene_reference_path"], self.env)
+        args = fallback.call_args.kwargs
+        self.assertIn(CD.SCENE_REFERENCE_POLICY, args["prompt"])
+        self.assertIn("白天静止，完整上层请求。", args["prompt"])
+        self.assertEqual(args["reference_roles"][self.env][0], "scene_reference")
+        self.assertEqual(args["reference_paths"], [self.camera, self.product, self.env])
 
     def test_packed_reference_is_unwrapped_by_member_role(self):
         sheet = self.png("mixed_sheet.png", (10, 20, 200))

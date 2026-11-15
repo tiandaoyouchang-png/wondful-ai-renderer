@@ -8,7 +8,7 @@ from . import workflow
 
 
 MAX_REFERENCES_PER_KIND = 8
-# 3.1.8: the product-shape reference is a single image (ideally a three-view sheet).
+# One product material reference (ideally a three-view sheet) is retained for protocol compatibility.
 MAX_PRODUCT_REFERENCES = 1
 
 
@@ -182,14 +182,14 @@ class WONDFUL_AddonPreferences(AddonPreferences):
     )
     codex_direct_edit: BoolProperty(
         name="Codex 图像编辑（直连）",
-        description="在 Blender 白模画布上直接调用 Codex 图像编辑（复用 Codex 的 ChatGPT 登录，无需 API Key），"
-                    "产品形状、位置和尺度更稳；失败时自动改用 Codex 代理生成",
+        description="根据当前流程使用目标原图或捕获的相机画面，直接调用 Codex 图像编辑（复用 Codex 的 ChatGPT 登录，无需 API Key）；"
+                    "可回退的失败会转用 Codex 代理",
         default=True,
     )
     codex_direct_simple: BoolProperty(
-        name="简洁输入（只发白模底图）",
-        description="直连编辑时先渲一张带地面和灯光的白模底图，只发这一张图和一段短提示词；"
-                    "不附结构图、三视图和环境照，车的位置和大小最稳",
+        name="简洁输入（环境渲染）",
+        description="仅影响环境渲染的 Codex 直连，使用捕获的相机画面及简洁提示词，不自动生成白模；"
+                    "单图复刻和多角度使用各自固定的输入流程，不受此设置影响",
         default=True,
     )
     codex_polish_timeout: IntProperty(
@@ -369,7 +369,7 @@ class WONDFUL_ReferenceItem(PropertyGroup):
     source_path: StringProperty(name="原始路径", subtype="FILE_PATH", default="")
     instruction: StringProperty(
         name="参考什么",
-        description="告诉 AI 这张图具体参考什么，产品图仅填写造型细节（如前脸、轮毂）；环境／风格图可填写灯光、色调、材质表现",
+        description="告诉 AI 这张图具体参考什么：产品三视图仅填写部件材质；环境／风格图可填写整图灯光、色调与氛围",
         default="",
         update=_reference_instruction_update,
     )
@@ -468,11 +468,11 @@ class WONDFUL_AISettings(PropertyGroup):
     # 3.1.7 product appearance lock
     color_source: EnumProperty(
         name="配色来源",
-        description="产品固有色与材质从哪里来；任何来源都不会采用产品照片的打光",
+        description="车身车漆色相始终来自当前 Blender 模型（除非明确填写具体车漆颜色）；三视图只补充部件材质",
         items=[
-            ("BLENDER", "Blender 材质", "读取产品集合的材质颜色、金属度、粗糙度，写入外观锁定"),
-            ("PRODUCT_REF", "产品参考图", "允许从产品参考图提取配色与表面材质（仍不取其打光）"),
-            ("TEXT", "仅文字", "旧行为：配色与材质只来自提示词文字"),
+            ("BLENDER", "Blender 车漆", "当前模型决定车漆色相与几何；三视图仅补充部件材质"),
+            ("PRODUCT_REF", "三视图材质", "兼容旧设置：仅从三视图核对部件材质，不改变车漆颜色或几何"),
+            ("TEXT", "明确文字车漆", "仅用户明确指定具体车漆颜色时覆盖；否则仍保留 Blender 车漆"),
         ],
         default="BLENDER",
     )
@@ -486,8 +486,9 @@ class WONDFUL_AISettings(PropertyGroup):
         description="用逗号分隔，例如“车标，前车牌，日行灯”。会写进生图指令，并在验收时逐项检查",
         default="",
     )
-    # 3.1.8: auto-fill of the two fields above from the product reference.
+    # Material-only auto-fill from the product reference; never geometry or paint authority.
     product_autofill_key: StringProperty(default="", options={"HIDDEN"})
+    product_autofill_policy_version: IntProperty(default=0, min=0, options={"HIDDEN"})
     product_look_auto: StringProperty(default="", options={"HIDDEN"})
     identity_details_auto: StringProperty(default="", options={"HIDDEN"})
     product_autofill_message: StringProperty(default="", options={"SKIP_SAVE"})
@@ -556,8 +557,8 @@ class WONDFUL_AISettings(PropertyGroup):
         default="4",
     )
     workflow_mode: EnumProperty(
-        name="工作模式", items=[("ENVIRONMENT", "环境参考渲染", "当前相机 + 车模 + 环境参考"),
-                                  ("REFERENCE", "参考图复刻", "目标图 → 相机与粗模 → 检查 → 渲染")],
+        name="工作模式", items=[("ENVIRONMENT", "环境参考渲染", "当前相机画面 + 车模 + 环境参考"),
+                                  ("REFERENCE", "参考图复刻", "单图：目标原图 + 当前相机真实产品投影 + 身份图 → 自动润色 → 编辑；无需场景粗模")],
         default="ENVIRONMENT", update=workflow.switch_mode)
     workflow_last_mode: StringProperty(default="ENVIRONMENT", options={"HIDDEN"})
     workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
@@ -579,7 +580,7 @@ class WONDFUL_AISettings(PropertyGroup):
     sb_reference_image: PointerProperty(name="复刻目标图", type=bpy.types.Image)
     sb_preview_image: PointerProperty(name="粗模预览", type=bpy.types.Image)
     workflow_multiview: BoolProperty(name="使用多视角列表", default=False,
-        description="仅参考图复刻：第一个勾选的视角作为主视角；关闭时只渲染当前相机")
+        description="仅参考图复刻：启用时第一个勾选的视角作为主视角；关闭时用真实产品投影约束目标原图编辑")
     result_workflow: StringProperty(default="", options={"HIDDEN"})
     compare_pair: EnumProperty(name="对比对象", items=[
         ("CAMERA_RESULT", "底图 / 成片", "检查车辆和相机构图"),
@@ -615,6 +616,7 @@ class WONDFUL_AISettings(PropertyGroup):
     prompt_notice: StringProperty(default="", options={"SKIP_SAVE"})
     prompt_source: StringProperty(name="原始创意需求", default="", options={"HIDDEN"})
     last_ai_prompt: StringProperty(name="上次AI提示词", default="", options={"HIDDEN"})
+    prompt_reference_input_key: StringProperty(default="", options={"HIDDEN"})
     prompt_reference_policy_version: IntProperty(default=0, min=0, options={"HIDDEN"})
     prompt_style_fingerprint: StringProperty(name="已同步风格指纹", default="", options={"HIDDEN"})
     prompt_expanded: BoolProperty(name="展开提示词", description="展开自动换行全文或收起为 6 行；完整编辑按钮支持多行输入", default=False)
@@ -748,7 +750,7 @@ class WONDFUL_AISettings(PropertyGroup):
     )
     typesafe_auto_classify: BoolProperty(
         name="TypeSafe 智能识别分类",
-        description="使用 TypeSafe 语义原语自动推断参考图角色（产品造型、环境风格或人物）",
+        description="使用 TypeSafe 语义原语自动推断参考图角色（部件材质、整图氛围或人物）",
         default=True,
     )
     typesafe_aesthetic_theme: EnumProperty(
@@ -875,7 +877,7 @@ class WONDFUL_AISettings(PropertyGroup):
     iou_gate: BoolProperty(
         name="轮廓验收",
         description="每次生成后用 Blender 产品遮罩在固定坐标上验收轮廓（IoU ≥ 0.95，不平移不缩放）："
-                    "通过即停；不通过就从原始白模底图重新生成，最多 3 次；额度用完或登录失效立即停止。"
+                    "通过即停；不通过就从本轮原始底图重新生成，最多 3 次；额度用完或登录失效立即停止。"
                     "都没通过时保留全部候选，显示 IoU 最高的一张并标为「未通过」",
         default=True,
     )
@@ -1090,7 +1092,7 @@ class WONDFUL_AISettings(PropertyGroup):
     last_hull_note: StringProperty(name="建筑体块状态", default="", options={"SKIP_SAVE"})
     last_canvas_fit: BoolProperty(
         name="比例已适配",
-        description="结果已按比例缩放并留边到白模画布，未裁切、未拉伸",
+        description="结果已按比例缩放并留边到底图画布，未裁切、未拉伸",
         default=False,
         options={"SKIP_SAVE"},
     )
@@ -1124,14 +1126,14 @@ class WONDFUL_AISettings(PropertyGroup):
     # 1.2.3 UI tidy: 高级 shows one group at a time; level-3 tools that had no disclosure yet
     ui_adv_tab: EnumProperty(
         name="高级分组",
-        description="高级设置分组，一次只显示一组；正在运行的任务进度始终显示在 ⑥",
+        description="高级设置分组，一次只显示一组；任务进度显示在生成区域或对应的高级分组",
         items=[
             ("MODEL", "模型", "AI 服务、推理模型、生图方式与登录"),
             ("OUTPUT", "输出", "两步流程、渲染模式、输出目录与分层输出"),
             ("FINISH", "成片", "照片质感：成片最后一步的相机感后期"),
             ("PRODUCT", "产品", "轮廓验收、细节修复与产品外观锁定"),
-            ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在主流程 ④）"),
-            ("MULTIVIEW", "多角度", "多角度场景一致"),
+            ("SCENE", "场景", "地面 / 地形、环境体块、环境分析与人物参考（场景粗模在高级→多角度）"),
+            ("MULTIVIEW", "多角度", "场景粗模、预览与多角度场景一致"),
             ("DIAG", "诊断", "上次渲染、产品还原度、诊断信息与偏好设置"),
         ],
         default="MODEL",

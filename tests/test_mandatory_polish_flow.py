@@ -9,7 +9,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import test_two_workflows as T
 
@@ -47,6 +47,9 @@ def extract():
         "CodexNotLoggedInError": type("CodexNotLoggedInError", (Exception,), {}),
         "CodexNotInstalledError": type("CodexNotInstalledError", (Exception,), {}),
         "REFERENCE_POLICY_VERSION": 1,
+        "_SOURCE_POLISH_APPROVAL": {},
+        "_MULTIVIEW_POLISH_APPROVAL": {},
+        "_scene_token": lambda scene: id(scene),
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(PKG / "operators.py"), "exec"), env)
     return env
@@ -56,7 +59,7 @@ OPS = extract()
 
 
 def make_props(mode, quality, prompt):
-    props = T.props(workflow_mode=mode, render_mode=quality, prompt=prompt,
+    props = T.props(workflow_mode=mode, workflow_multiview=(mode == T.WF.REFERENCE), render_mode=quality, prompt=prompt,
                     scene_brief="brief", scene_brief_used="brief",
                     auto_polish_on_generate=False, two_step=True,
                     pending_generate=False, views_plan="plan", status="IDLE")
@@ -108,6 +111,21 @@ class MandatoryGenerateTests(unittest.TestCase):
         self.assertEqual(calls, ["polish"])
         self.assertFalse(context.scene.wondful_ai.pending_generate)
 
+    def test_unsupported_multiview_provider_stops_before_polish_or_camera_plan(self):
+        for provider, direct in (('ANTIGRAVITY', True), ('CODEX', False)):
+            with self.subTest(provider=provider, direct=direct):
+                calls=[]
+                setup_generate_env(calls)
+                OPS['_addon_prefs']=lambda context:NS(codex_direct_edit=direct)
+                props=make_props(T.WF.REFERENCE,'NORMAL','manual')
+                props.analysis_provider=provider
+                context=T.context(props)
+                op=OPS['WONDFUL_OT_generate']()
+                op._plan_views=lambda *_args:self.fail('must not change camera')
+                self.assertEqual(op.execute(context),{'CANCELLED'})
+                self.assertFalse(calls)
+                self.assertIn('Codex',props.last_error)
+
 
 class PolishModalTests(unittest.TestCase):
     def setUp(self):
@@ -148,6 +166,11 @@ class PolishModalTests(unittest.TestCase):
         op._provider_label = "Codex"
         op._workflow_mode_at_start = mode
         op._reference_mode_at_start = mode == T.WF.REFERENCE
+        op._source_only_at_start = False
+        if mode == T.WF.REFERENCE:
+            source_reference = T.load("source_reference")
+            op._replica_identity_snapshot = source_reference.fingerprint(props.product_images[0].source_path)
+            op._replica_identity_slot = T.WF.source_slots(props)[1]
         op._prompt_at_start = prompt
         op._prompt_profile = {"target_key": "test"}
         op._session = NS(directory=Path(self.tmp.name), prompt_file=Path(self.tmp.name) / "prompt.txt")
@@ -247,6 +270,90 @@ class PolishModalTests(unittest.TestCase):
         self.assertEqual(self.sanitize_flags, [True])
         self.assertFalse(props.pending_generate)
 
+    def test_multiview_identity_change_during_polish_stops_render(self):
+        op, context, props = self.modal_op(mode=T.WF.REFERENCE)
+        props.pending_generate = True
+        target = Path(self.tmp.name) / "target.png"
+        snapshot = Path(self.tmp.name) / "snapshot.png"
+        identity = Path(self.tmp.name) / "identity.png"
+        for path, data in ((target,b"target"), (snapshot,b"snapshot"), (identity,b"identity")):
+            path.write_bytes(data)
+        item=props.product_images[0]
+        item.source_path=str(identity)
+        item.image.filepath=str(identity)
+        sr=T.load('source_reference')
+        op._replica_identity_snapshot=sr.fingerprint(identity)
+        op._replica_identity_slot=T.WF.source_slots(props)[1]
+        op._replica_target_hash_at_start=T.WF.file_hash(target)
+        op._replica_snapshot_hash_at_start=T.WF.file_hash(snapshot)
+        op._replica_preview_source_at_start=str(snapshot.resolve())
+        op._replica_camera_at_start=OPS['_camera_signature'](context.scene.camera,context.scene)
+        OPS.update(_sb_reference=lambda props:(str(target),''),
+                   _sb_generation_reference=lambda context,props:(str(snapshot),''))
+        autofill = Mock()
+        OPS['_apply_product_autofill'] = autofill
+        op._autofill_result = ('旧产品外观', ['旧产品细节'])
+        op._autofill_key = 'old identity'
+        identity.write_bytes(b'replaced identity')
+        self.assertEqual(op._modal(context,NS(type='TIMER')),{'FINISHED'})
+        self.assertEqual(self.scheduled,[])
+        self.assertIn('身份图',props.last_error)
+        autofill.assert_not_called()
+
+    def test_multiview_identity_slot_replacement_with_same_bytes_stops_render(self):
+        op, context, props = self.modal_op(mode=T.WF.REFERENCE)
+        props.pending_generate = True
+        target = Path(self.tmp.name) / "target.png"
+        snapshot = Path(self.tmp.name) / "snapshot.png"
+        identity = Path(self.tmp.name) / "identity.png"
+        for path, data in ((target,b"target"), (snapshot,b"snapshot"), (identity,b"identity")):
+            path.write_bytes(data)
+        item=props.product_images[0]
+        item.source_path=str(identity)
+        item.image.filepath=str(identity)
+        op._replica_identity_snapshot=T.load('source_reference').fingerprint(identity)
+        op._replica_identity_slot=T.WF.source_slots(props)[1]
+        op._replica_target_hash_at_start=T.WF.file_hash(target)
+        op._replica_snapshot_hash_at_start=T.WF.file_hash(snapshot)
+        op._replica_preview_source_at_start=str(snapshot.resolve())
+        op._replica_camera_at_start=OPS['_camera_signature'](context.scene.camera,context.scene)
+        OPS.update(_sb_reference=lambda props:(str(target),''),
+                   _sb_generation_reference=lambda context,props:(str(snapshot),''))
+        props.product_images[0]=NS(source_path=str(identity),image=NS(filepath=str(identity),size=(160,90)))
+        self.assertEqual(op._modal(context,NS(type='TIMER')),{'FINISHED'})
+        self.assertEqual(self.scheduled,[])
+        self.assertIn('身份图',props.last_error)
+
+    def test_multiview_identity_change_after_polish_stops_before_render(self):
+        op, context, props = self.modal_op(mode=T.WF.REFERENCE)
+        props.pending_generate = True
+        target = Path(self.tmp.name) / "target.png"
+        snapshot = Path(self.tmp.name) / "snapshot.png"
+        identity = Path(self.tmp.name) / "identity.png"
+        for path, data in ((target,b"target"), (snapshot,b"snapshot"), (identity,b"identity")):
+            path.write_bytes(data)
+        item=props.product_images[0]
+        item.source_path=str(identity)
+        item.image.filepath=str(identity)
+        sr=T.load('source_reference')
+        op._replica_identity_snapshot=sr.fingerprint(identity)
+        op._replica_identity_slot=T.WF.source_slots(props)[1]
+        op._replica_target_hash_at_start=T.WF.file_hash(target)
+        op._replica_snapshot_hash_at_start=T.WF.file_hash(snapshot)
+        op._replica_preview_source_at_start=str(snapshot.resolve())
+        op._replica_camera_at_start=OPS['_camera_signature'](context.scene.camera,context.scene)
+        OPS.update(_sb_reference=lambda props:(str(target),''),
+                   _sb_generation_reference=lambda context,props:(str(snapshot),''))
+        self.assertEqual(op._modal(context,NS(type='TIMER')),{'FINISHED'})
+        identity.write_bytes(b'replaced identity')
+        with patch.dict(T.OPS, {'_MULTIVIEW_POLISH_APPROVAL':OPS['_MULTIVIEW_POLISH_APPROVAL'],
+                                '_sb_reference':OPS['_sb_reference'], '_sb_generation_reference':OPS['_sb_generation_reference'],
+                                '_camera_signature':OPS['_camera_signature'],
+                                '_addon_prefs':lambda *_:self.fail('must stop before provider')}):
+            render=T.OPS['WONDFUL_OT_ai_render']()
+            self.assertEqual(render.execute(context),{'CANCELLED'})
+        self.assertIn('身份图',props.last_error)
+
 
 class ReplicaExecuteProvenanceTests(unittest.TestCase):
     """The uploaded target is the original, not a resized blockout snapshot."""
@@ -278,7 +385,7 @@ class ReplicaExecuteProvenanceTests(unittest.TestCase):
             _analysis_provider=lambda props, prefs: provider,
             cleanup_old_sessions=lambda: None,
             create_session=lambda: NS(directory=Path(self.tmp.name), session_id="session"),
-            _reference_paths=lambda props: {"product": [str(Path(__file__))], "person": [], "style": []},
+            _reference_paths=lambda props: {"product": [props.product_images[0].source_path], "person": [], "style": []},
             _reference_instructions=lambda props: {"product": ["keep YU7"], "person": [], "style": []},
             copy_references=lambda paths, session, role: list(paths),
             _render_replica_preview=render_preview,
@@ -304,7 +411,7 @@ class ReplicaExecuteProvenanceTests(unittest.TestCase):
         self.original, self.snapshot = original, snapshot
 
     def _context(self):
-        props = T.props(workflow_mode=T.WF.REFERENCE, prompt="low canted tracking shot",
+        props = T.props(workflow_mode=T.WF.REFERENCE, workflow_multiview=True, prompt="low canted tracking shot",
                         sb_image_path=str(self.original), sb_built_target_hash=T.WF.file_hash(self.original))
         context = T.context(props)
         block = T.Collection("Owned", [T.Item("shell")], tags={"wondful_scene_blockout": 1,
@@ -328,7 +435,7 @@ class ReplicaExecuteProvenanceTests(unittest.TestCase):
         self.assertEqual(op.execute(context), {"RUNNING_MODAL"})
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["image_paths"], [
-            "upload:original-target.png", "upload:fresh-white-preview.png", "upload:test_mandatory_polish_flow.py",
+            "upload:original-target.png", "upload:fresh-white-preview.png", "upload:test_two_workflows.py",
         ])
 
     def test_original_upload_stays_in_session_and_provider_reads_stable_copy(self):
@@ -360,7 +467,7 @@ class ReplicaExecuteProvenanceTests(unittest.TestCase):
 
         OPS.update(create_session=lambda: NS(directory=session_dir, session_id="session"),
                    copy_references=copy_refs, prepare_reference_for_upload=prepare_upload,
-                   _reference_paths=lambda props: {"product": [__file__], "person": [], "style": [str(original)]},
+                   _reference_paths=lambda props: {"product": [props.product_images[0].source_path], "person": [], "style": [str(original)]},
                    _reference_manifest=lambda paths: list(paths),
                    _reference_fingerprint=lambda paths: "|".join(T.WF.file_hash(path) for path in paths))
         context, props = self._context()

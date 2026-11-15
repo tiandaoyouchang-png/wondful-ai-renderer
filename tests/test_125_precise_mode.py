@@ -356,9 +356,14 @@ class BlenderPreciseTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         out = Path(cls.tmp) / "precise.json"
+        env = os.environ.copy()
+        for kind in ("SCRIPTS", "CONFIG", "EXTENSIONS"):
+            directory = Path(cls.tmp) / kind.lower()
+            directory.mkdir()
+            env["BLENDER_USER_" + kind] = str(directory)
         subprocess.run([BLENDER, "-b", "--factory-startup", "--python", str(ROOT / "tools" / "e2e_precise_bg.py"), "--",
                         "repo", str(HERE / "fixtures" / "scene_blockout" / "desert_v3.json"), str(out)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600, env=env)
         cls.rep = json.loads(out.read_text(encoding="utf-8"))
 
     def _stages(self, run):

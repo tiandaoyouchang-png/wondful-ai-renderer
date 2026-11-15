@@ -195,14 +195,26 @@ class ModeAndProgressTests(unittest.TestCase):
 
     def test_compact_toggle_row_and_optional_advanced_settings(self):
         for expanded in (False, True):
-            p = T.props(workflow_mode='REFERENCE', ui_show_replica_advanced=expanded)
-            log = self.draw(p)
-            names = [x[1] for x in log if x[0]=='prop']
-            self.assertNotIn('sb_set_camera', names)
-            self.assertIn('sb_correct', names)
-            self.assertTrue(any(x[0]=='label' and '自动匹配新参考相机' in x[1] for x in log))
-            self.assertEqual('sb_precise' in names, expanded)
-            self.assertEqual('sb_complete' in names, expanded)
+            for status in ('IDLE', 'RENDERING'):
+                with self.subTest(expanded=expanded, status=status):
+                    p = T.props(workflow_mode='REFERENCE', workflow_multiview=True, ui_show_advanced=True,
+                                ui_adv_tab='MULTIVIEW', ui_show_replica_advanced=expanded, status=status,
+                                sb_image_path='/tmp/reference.png', codex_account_state='LOGGED_IN')
+                    log = self.draw(p)
+                    names = [x[1] for x in log if x[0]=='prop']
+                    self.assertNotIn('sb_set_camera', names)
+                    self.assertEqual(names.count('sb_correct'), 1)
+                    self.assertTrue(any(x[0]=='label' and '自动匹配新参考相机' in x[1] for x in log))
+                    self.assertEqual(names.count('sb_precise'), int(expanded))
+                    self.assertEqual(names.count('sb_complete'), int(expanded))
+                    for field in ('sb_correct', 'ui_show_replica_advanced') + (('sb_precise', 'sb_complete') if expanded else ()):
+                        self.assertEqual(next(x[2] for x in log if x[:2]==('prop', field)), status == 'IDLE')
+                    build = [x for x in log if x[:2]==('operator', 'wondful.scene_blockout_build')]
+                    self.assertEqual(len(build), 1)
+                    self.assertEqual(build[0][2], status == 'IDLE')
+        for mode, tab in (('REFERENCE', 'OUTPUT'), ('ENVIRONMENT', 'MULTIVIEW')):
+            log = self.draw(T.props(workflow_mode=mode, ui_show_advanced=True, ui_adv_tab=tab))
+            self.assertFalse(any(x[:2]==('prop', 'sb_correct') for x in log))
 
 
 class SeamlessPreviewTests(unittest.TestCase):

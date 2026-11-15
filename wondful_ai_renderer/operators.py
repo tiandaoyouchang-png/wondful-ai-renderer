@@ -89,6 +89,8 @@ def render_variant_count(provider_id: str, props=None) -> int:
 
 _ACTIVE_LOCK = threading.Lock()
 _ACTIVE_OPERATOR = None
+_SOURCE_POLISH_APPROVAL = {}
+_MULTIVIEW_POLISH_APPROVAL = {}
 _AGY_AUTH = None
 _AGY_AUTH_OWNER = None
 _ASYNC_STATUSES = frozenset({"AUTHENTICATING", "REFRESHING_MODELS", "CLASSIFYING", "POLISHING", "RENDERING", "BLOCKOUT"})
@@ -255,12 +257,9 @@ def _product_autofill_key(props, provider):
     if not paths:
         return ""
     notes = _reference_instructions(props)["product"]
-    return "|".join([
-        _reference_fingerprint(paths),
-        (notes[0] if notes else ""),
-        str(getattr(props, "color_source", "BLENDER")),
-        str(provider.get("id", "")),
-    ])
+    from .prompt_engine import product_analysis_cache_key
+    return '|'.join([product_analysis_cache_key(_reference_fingerprint(paths),notes[0] if notes else ''),
+                     str(provider.get('id','')),str(provider.get('model',''))])
 
 
 def _product_fields_untouched(props):
@@ -274,7 +273,8 @@ def _product_fields_untouched(props):
 def _product_autofill_needed(props, key):
     if not key or not _product_fields_untouched(props):
         return False
-    return key != getattr(props, "product_autofill_key", "") or not (props.product_look_prompt or props.identity_details)
+    return (key != getattr(props, "product_autofill_key", "") or not (props.product_look_prompt or props.identity_details)
+            or int(getattr(props,'product_autofill_policy_version',0))!=REFERENCE_POLICY_VERSION)
 
 
 def _apply_product_autofill(props, key, look, details):
@@ -288,6 +288,7 @@ def _apply_product_autofill(props, key, look, details):
     props.product_look_auto = look
     props.identity_details_auto = details_text
     props.product_autofill_key = key
+    props.product_autofill_policy_version=REFERENCE_POLICY_VERSION
     props.product_autofill_message = "已根据产品参考图自动填写，可直接修改。"
     return True
 
@@ -337,13 +338,64 @@ def _appearance_context(props):
             material_text = appearance_lock.material_summary(appearance_lock.collect_product_materials(objects))
         except Exception:
             material_text = ""
-    lock = appearance_lock.appearance_lock_block(source, material_text, getattr(props, "product_look_prompt", ""))
+    look=str(getattr(props,'product_look_prompt','') or '').strip()
+    details=str(getattr(props,'identity_details','') or '').strip()
+    if int(getattr(props,'product_autofill_policy_version',0))!=REFERENCE_POLICY_VERSION:
+        if look==str(getattr(props,'product_look_auto','') or '').strip():look=''
+        if details==str(getattr(props,'identity_details_auto','') or '').strip():details=''
+    lock = appearance_lock.appearance_lock_block(source, material_text, look)
     items = appearance_lock.identity_checklist(
         _reference_instructions(props)["product"],
         getattr(props, "jev_identity_assets", ""),
-        getattr(props, "identity_details", ""),
+        details,
     )
     return source, lock, items
+
+
+def _source_user_info(props):
+    """Use explicit notes, never auto-filled identity descriptions."""
+    items = []
+    for field, auto_field in (("product_look_prompt", "product_look_auto"),
+                              ("identity_details", "identity_details_auto")):
+        text = str(getattr(props, field, "") or "").strip()
+        automatic = str(getattr(props, auto_field, "") or "").strip()
+        if text and text != automatic:
+            items.append(text)
+    notes = _reference_instructions(props)["product"]
+    if notes and notes[0].strip():
+        items.append(notes[0].strip())
+    return "\n".join(items)
+
+
+def _source_paint_lock(props):
+    """Main-thread model paint baseline, independent of legacy colour preferences."""
+    import re
+    from . import appearance_lock
+    collection=getattr(props,'product_collection',None)
+    objects=[o for o in getattr(collection,'all_objects',()) if getattr(o,'type','')=='MESH' and not getattr(o,'hide_render',False)]
+    materials=appearance_lock.collect_product_materials(objects)
+    paint=[m for m in materials if re.search(r'paint|body|车漆|车身',m.get('name',''),re.I)
+           and not re.search(r'int_|interior|内饰',m.get('name',''),re.I)]
+    rows = [m for m in (paint or materials or []) if isinstance(m, dict)]
+    rows.sort(key=lambda m: -float(m.get('weight', 0) or 0))
+    parts = []
+    for m in rows[:8]:
+        name = str(m.get('name', '') or '材质').strip()
+        base = m.get('base_color')
+        cn = appearance_lock.color_name(base, linear=True) if base is not None else ''
+        parts.append(f"{name}：{cn}" if cn else name)
+    summary = "；".join(parts)
+    return ('【当前 Blender 车漆基线｜优先于旧 AI 文本及身份图颜色】\n'
+            + ('模型材质观察：' + summary + '。\n' if summary else '以图 2 当前模型的原始材质与固有色为基线。\n')
+            + '这些模型材质观察只用于锁定车身基础色相（以十六进制为准，非单调统一像素 RGB），不锁定其他部件材质；'
+              '其他部件材质由图 3 身份图提供。Blender 预览默认值不能决定车漆是高光还是哑光，应由可见身份图证据或用户明确要求的车漆工艺决定表面光泽；'
+              '真实曲面反射与局部明暗变化由所处环境决定。保持当前模型车漆固有色相，环境仅改变受光与反射。只有用户亲自明确指定的具体车漆颜色可以覆盖；'
+              '“采用身份图颜色”等泛化要求、旧 AI 描述及自动外观填充均不能授权重涂车漆。')
+
+
+def _source_style_key(snapshot, note, provider):
+    return prompt_profiles.style_cache_key(snapshot['sha256'],['SOURCE_ORIGINAL_STYLE_ONLY',note],
+                                           provider['id'],provider['model'])
 
 
 def _reference_paths(props):
@@ -465,6 +517,10 @@ def _reference_manifest(paths):
     return rows
 
 
+def _scene_token(scene):
+    return scene.as_pointer() if hasattr(scene, "as_pointer") else id(scene)
+
+
 def _collection_and_index(props, ref_kind):
     mapping = {
         "PRODUCT": (props.product_images, "product_image_index"),
@@ -505,6 +561,19 @@ def _load_reference_image(filepath):
     if min(image.size) <= 0:
         raise RuntimeError("图片无法解码")
     return image
+
+
+def _validate_source_image(filepath):
+    """Decode a temporary datablock without reloading the user's open images."""
+    path = Path(bpy.path.abspath(str(filepath))).expanduser()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError("图片文件不可用")
+    image = bpy.data.images.load(str(path), check_existing=False)
+    try:
+        if min(image.size) <= 0:
+            raise RuntimeError("图片无法解码")
+    finally:
+        bpy.data.images.remove(image)
 
 
 def _append_reference_from_path(props, ref_kind, filepath):
@@ -900,16 +969,26 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
     from . import op_chain, layered_output
     from .op_chain import ChainRunner, OperatorRefused
     module, name = idname.split(".")
-    scene_name = getattr(scene, "name", "") if scene is not None else ""
+    scene_id = _scene_token(scene) if scene is not None else None
 
     def target_scene():
-        sc = bpy.data.scenes.get(scene_name) if scene_name else None
-        return sc or getattr(bpy.context, "scene", None)
+        if scene is None:
+            return getattr(bpy.context, "scene", None)
+        try:
+            return next((sc for sc in bpy.data.scenes if _scene_token(sc) == scene_id and sc == scene), None)
+        except (ReferenceError, TypeError):
+            return None
 
     def invoke(ctx):
         _LAST_REPORT.pop(idname, None)
         try:
+            if scene is not None:
+                window_scene = getattr(ctx.get("window"), "scene", None)
+                if target_scene() is None or window_scene is None or _scene_token(window_scene) != scene_id:
+                    raise OperatorRefused("原始场景已关闭或当前窗口已切换场景，已停止自动生图")
             with bpy.context.temp_override(**ctx):
+                if scene is not None and _scene_token(getattr(bpy.context, "scene", None)) != scene_id:
+                    raise OperatorRefused("当前上下文与原始场景不一致，已停止自动生图")
                 return getattr(getattr(bpy.ops, module), name)("INVOKE_DEFAULT", **(op_kwargs or {}))
         except RuntimeError as exc:
             # bpy.ops raises RuntimeError when the operator reports an ERROR.  Before
@@ -921,10 +1000,22 @@ def _schedule_operator(idname, scene=None, *, label="AI 渲染", op_kwargs=None)
             raise
 
     def contexts():
-        return op_chain.candidate_contexts(list(getattr(bpy.context.window_manager, "windows", []) or []), target_scene())
+        target = target_scene()
+        if scene is not None and target is None:
+            raise OperatorRefused("原始场景已关闭，已停止自动生图")
+        windows = list(getattr(bpy.context.window_manager, "windows", []) or [])
+        if scene is not None:
+            windows = [w for w in windows if getattr(w, "scene", None) is not None
+                       and _scene_token(w.scene) == scene_id]
+            if not windows:
+                raise OperatorRefused("原始场景当前没有可用窗口，已停止自动生图")
+        return op_chain.candidate_contexts(windows, target)
 
     def on_fail(message):
         sc = target_scene()
+        if scene_id is not None:
+            _SOURCE_POLISH_APPROVAL.pop(scene_id, None)
+            _MULTIVIEW_POLISH_APPROVAL.pop(scene_id, None)
         props = getattr(sc, "wondful_ai", None) if sc is not None else None
         text = f"提示词已写好，但没能自动开始{label}：{message}。处理后点「生成」即可继续。"
         print(f"[Wondful] {text}")
@@ -952,11 +1043,12 @@ def generate_needs_polish(props, prefs):
 def identity_preflight(props):
     if not workflow.identity_available(props):
         return "请先添加有效的产品身份参考图"
-    path = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath)
+    path = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath,
+                                  strict_source=workflow.source_only(props))
     if not path:
         return "产品身份参考文件不可用，请重新选择"
     try:
-        _load_reference_image(path)
+        (_validate_source_image if workflow.source_only(props) else _load_reference_image)(path)
     except Exception:
         return "产品身份参考无法解码，请替换图片"
     # Packed references are materialized once at the action boundary, never in draw.
@@ -968,8 +1060,24 @@ def workflow_preflight(context, props):
     identity_error = identity_preflight(props)
     if identity_error:
         return identity_error
-    from .multiview import scene_blockout_exists
     target, _source = _sb_reference(props)
+    if workflow.source_only(props):
+        error = workflow.preflight(props, has_camera=context.scene.camera is not None,
+                                   has_product=getattr(props, "product_collection", None) is not None, has_blockout=False,
+                                   target_path=target, identity_ok=True)
+        if error:
+            return error
+        try:
+            _validate_source_image(target)
+            from .product_projection import product_objects, require_matching_aspect
+            product_objects(context, props)
+            require_matching_aspect(image_dimensions(target), camera_output_dimensions(context))
+        except ValueError as exc:
+            return str(exc)
+        except Exception:
+            return "复刻目标图或产品几何不可用，请检查目标图和所选产品集合"
+        return ""
+    from .multiview import scene_blockout_exists
     source_ok = True
     if workflow.is_reference(props):
         source, _note = _sb_generation_reference(context, props)
@@ -1002,6 +1110,8 @@ class WONDFUL_OT_generate(Operator):
 
     def execute(self, context):
         props = context.scene.wondful_ai
+        _SOURCE_POLISH_APPROVAL.pop(_scene_token(context.scene), None)
+        _MULTIVIEW_POLISH_APPROVAL.pop(_scene_token(context.scene), None)
         error = workflow_preflight(context, props)
         if error:
             _status(props, "ERROR", error)
@@ -1009,12 +1119,19 @@ class WONDFUL_OT_generate(Operator):
             return {"CANCELLED"}
         self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
+        if (workflow.is_reference(props) and getattr(props, "workflow_multiview", False)
+                and (getattr(props, "analysis_provider", "CODEX") != "CODEX"
+                     or not bool(getattr(prefs, "codex_direct_edit", True)))):
+            message = "多视角原图复刻需要 Codex 图像编辑直连；请启用直连并使用 Codex。"
+            _status(props, "ERROR", message)
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
         props.model_notice = ""
         brief = (props.scene_brief or "").strip()
         if not self._plan_views(context, props, prefs):
             return {"CANCELLED"}
         if generate_needs_polish(props, prefs):
-            if brief != (props.scene_brief_used or "").strip() or not (props.prompt or "").strip():
+            if not workflow.source_only(props) and (brief != (props.scene_brief_used or "").strip() or not (props.prompt or "").strip()):
                 # A new brief replaces the old prompt as the polish source.
                 props.prompt = brief
                 props.last_ai_prompt = ""
@@ -2733,7 +2850,7 @@ class WONDFUL_OT_copy_diagnostics(Operator):
 class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
     bl_idname = "wondful.polish_prompt"
     bl_label = "AI润色"
-    bl_description = "根据你输入的提示词和产品／人物／环境参考图润色，写回同一个输入框；无需先设置相机"
+    bl_description = "根据需求与参考图润色并写回输入框；单图复刻需现有相机与产品集合，先捕获真实产品结构"
 
     _session = None
     _width = 0
@@ -2743,6 +2860,8 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         props = context.scene.wondful_ai
         self._workflow_mode_at_start = workflow.mode(props)
         self._reference_mode_at_start = self._workflow_mode_at_start == workflow.REFERENCE
+        self._source_only_at_start = workflow.source_only(props)
+        if self._source_only_at_start:_SOURCE_POLISH_APPROVAL.pop(_scene_token(context.scene),None)
         identity_error = identity_preflight(props)
         if identity_error:
             self.report({"ERROR"}, identity_error)
@@ -2768,13 +2887,56 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         cleanup_old_sessions()
         self._session = create_session()
         # Appearance polish needs the user's words and references, not camera geometry.
-        self._width, self._height, method = 0, 0, "TEXT_AND_REFERENCES"
+        self._width, self._height, method = 0, 0, ("SOURCE_IMAGE" if self._source_only_at_start else "TEXT_AND_REFERENCES")
         refs = _reference_paths(props)
         ref_instructions = _reference_instructions(props)
-        product = copy_references(refs["product"], self._session, "product_reference")
-        person = copy_references(refs["person"], self._session, "person_reference")
+        if self._reference_mode_at_start and not self._source_only_at_start:
+            from .source_reference import fingerprint, matches
+            try:
+                identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+                self._replica_identity_snapshot = fingerprint(identity)
+                self._replica_identity_slot = workflow.source_slots(props)[1]
+            except (OSError, ValueError, TypeError) as exc:
+                self.report({"ERROR"}, f"产品身份参考不可用：{exc}")
+                return {"CANCELLED"}
+        product = copy_references(refs["product"], self._session, "product_reference") if not self._source_only_at_start else []
+        if self._reference_mode_at_start and not self._source_only_at_start:
+            if (not product or workflow.file_hash(product[0]) != self._replica_identity_snapshot["sha256"]
+                    or not matches(self._replica_identity_snapshot, identity)):
+                self.report({"ERROR"}, "复制期间产品身份参考已变化，请重新生成。")
+                return {"CANCELLED"}
+        person = copy_references(refs["person"], self._session, "person_reference") if not self._source_only_at_start else []
         replica_target, replica_preview = [], []
-        if self._reference_mode_at_start:
+        if self._source_only_at_start:
+            from .source_reference import copy_verified, input_key, validate_inputs, fingerprint
+            from . import product_projection
+            try:
+                selected, _ = _sb_reference(props)
+                identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+                target_copy, self._source_snapshot, self._source_dimensions = copy_verified(
+                    selected, self._session.directory, "replica_original")
+                identity_copy, self._identity_snapshot, _ = copy_verified(
+                    identity, self._session.directory, "product_reference")
+                _validate_source_image(target_copy)
+                _validate_source_image(identity_copy)
+                self._product_projection = product_projection.capture(context, props, self._session.directory, self._source_dimensions)
+                from . import reference_material_plan
+                self._material_catalog = reference_material_plan.catalog(context, props)
+                validate_inputs(target_copy, identity_copy, provider.get("reference_limit", MAX_IMAGE_PATHS),
+                                projection=self._product_projection["path"])
+            except Exception as exc:
+                self.report({"ERROR"}, f"参考图复制或校验失败：{exc}")
+                return {"CANCELLED"}
+            replica_target = [target_copy]
+            replica_preview = [self._product_projection["path"]]
+            product = [identity_copy]
+            self._source_slots_at_start = workflow.source_slots(props)
+            self._target_note_at_start = str(getattr(props, "sb_target_note", "") or "").strip()
+            self._source_input_key_at_start = (input_key(self._source_snapshot, self._identity_snapshot, self._target_note_at_start)
+                                               + ":" + self._product_projection["signature"]
+                                               + ":" + self._product_projection["snapshot"]["sha256"])
+            method = "SOURCE_PRODUCT_PROJECTION"
+        elif self._reference_mode_at_start:
             # Both pictures are created/validated on Blender's main thread.
             # The target must still be the source of the active blockout; the
             # preview is rendered from its current camera, never a cached panel image.
@@ -2803,13 +2965,14 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         style = ([] if self._reference_mode_at_start
                  else copy_references(refs["style"], self._session, "style_reference"))
         self._reference_counts = {"product": len(product), "person": len(person), "style": len(style)}
-        product_upload = [prepare_reference_for_upload(p) for p in product]
+        product_upload = list(product) if self._source_only_at_start else [prepare_reference_for_upload(p) for p in product]
         person_upload = [prepare_reference_for_upload(p) for p in person]
         style_upload = [prepare_reference_for_upload(p) for p in style]
         # Keep attachment order aligned with build_polish_user_text. Replica
         # turns begin with the verified original and fresh white blockout.
         image_paths = [*replica_target, *replica_preview, *product_upload, *person_upload, *style_upload]
-        camera_w, camera_h = camera_output_dimensions(context)
+        if self._source_only_at_start:self._polish_copy_snapshots=[fingerprint(p) for p in image_paths]
+        camera_w, camera_h = self._source_dimensions if self._source_only_at_start else camera_output_dimensions(context)
         self._camera_output_size = (camera_w, camera_h)
         self._camera_name_at_start = context.scene.camera.name if context.scene.camera else ""
         self._reference_sources_at_start = {kind: _reference_manifest(paths) for kind, paths in refs.items()}
@@ -2829,9 +2992,31 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         visible_prompt = _get_prompt_text(props)
         self._prompt_at_start = visible_prompt
         props.prompt_notice = ""
-        source_prompt = select_polish_source(props, visible_prompt, self._style_refresh_requested)
+        last_ai = str(getattr(props, "last_ai_prompt", "") or "").strip()
+        if self._source_only_at_start and last_ai and visible_prompt == last_ai:
+            source_prompt = str(getattr(props, "prompt_source", "") or "").strip()
+            if source_prompt == last_ai:
+                source_prompt = ""
+        else:
+            source_prompt = select_polish_source(props, visible_prompt, self._style_refresh_requested)
+        if (not self._reference_mode_at_start and last_ai and visible_prompt==last_ai
+                and (int(getattr(props,'prompt_reference_policy_version',0))<REFERENCE_POLICY_VERSION
+                     or int(getattr(props,'product_autofill_policy_version',0))!=REFERENCE_POLICY_VERSION
+                     and bool(getattr(props,'product_look_auto','') or getattr(props,'identity_details_auto','')))):
+            stored=str(getattr(props,'prompt_source','') or '').strip()
+            source_prompt=stored if stored and stored!=last_ai else str(getattr(props,'scene_brief','') or '').strip()
+        self._brief_at_start = str(getattr(props, "scene_brief", "") or "").strip()
+        if self._source_only_at_start and self._brief_at_start and self._brief_at_start not in source_prompt:
+            source_prompt = "\n".join(x for x in (source_prompt, self._brief_at_start) if x)
+        if self._source_only_at_start:self._source_request_at_start=source_prompt
         self._prompt_profile = prompt_profiles.metadata(provider["id"], provider["model"])
-        if self._reference_mode_at_start:
+        if self._source_only_at_start:
+            self._source_policy_version=prompt_profiles.REFERENCE_ROLE_POLICY_VERSION
+            self._style_cache_key=_source_style_key(self._source_snapshot,self._target_note_at_start,provider)
+            self._cached_style_summary=(str(getattr(props,'style_summary_cache','') or '').strip()
+                if getattr(props,'style_summary_cache_key','')==self._style_cache_key else '')
+            self._style_cache_hit=bool(self._cached_style_summary)
+        elif self._reference_mode_at_start:
             # A white preview is a new geometry/camera observation every time;
             # never reuse an old appearance-only environment summary here.
             self._style_cache_key = ""
@@ -2846,18 +3031,35 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         self._phase = "准备参考图"
 
 
-        color_source, appearance_lock_text, identity_items = _appearance_context(props)
+        if self._source_only_at_start:
+            self._source_paint_lock=_source_paint_lock(props)
+            self._source_user_info_at_start=_source_user_info(props)
+            color_source, appearance_lock_text, identity_items = "BLENDER_PAINT_IDENTITY_MATERIALS", self._source_user_info_at_start, []
+        else:
+            color_source, appearance_lock_text, identity_items = _appearance_context(props)
         self._appearance_meta = {"color_source": color_source, "appearance_lock": appearance_lock_text,
                                  "identity_items": identity_items}
+        if self._source_only_at_start:self._appearance_meta['paint_baseline']=self._source_paint_lock
         # 3.1.8: fill 产品外观 / 保留细节 from the product reference when the user
         # has not typed their own. The material summary is captured on the main thread.
         self._autofill_key = _product_autofill_key(props, _analysis_provider(props, prefs))
-        self._autofill_needed = bool(product_upload) and _product_autofill_needed(props, self._autofill_key)
+        self._autofill_needed = (not self._source_only_at_start and bool(product_upload)
+                                 and _product_autofill_needed(props, self._autofill_key))
         self._autofill_result = None
         _material_text = appearance_lock_material_text(props) if self._autofill_needed else ""
         _jev_assets = getattr(props, "jev_identity_assets", "")
 
         def _build_user_text(lock_text, items):
+            if self._source_only_at_start:
+                from .source_reference import PROJECTED_IDENTITY_POLICY
+                text = (PROJECTED_IDENTITY_POLICY + "\n用户需求：\n" + (source_prompt or "按原图替换目标产品。")
+                        + '\n只有用户明确指定的具体车漆颜色可以覆盖模型基线；泛指跟随参考图颜色无效。'
+                        + (("\n产品信息：" + lock_text) if lock_text else "")
+                        + (("\n身份细节：" + "、".join(items)) if items else "")
+                        + '\n'+self._source_paint_lock)
+                if self._target_note_at_start and self._target_note_at_start not in text:
+                    text += "\n目标图参考重点：" + self._target_note_at_start
+                return text
             return build_polish_user_text(
                 source_prompt, len(product), len(person), len(style), camera_w, camera_h,
                 style_refresh=self._style_refresh_requested,
@@ -2886,7 +3088,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         self._provider_label = provider["label"]
         self._timing_key = timing_key
         self._estimated_total = average_timing(timing_key, 30.0)
-        if style_upload and not self._style_cache_hit:
+        if (style_upload or self._source_only_at_start) and not self._style_cache_hit:
             # Style refresh deliberately performs a dedicated first pass that sees
             # only the CURRENT style references. This mirrors the product spec:
             # "first analyze the style image, then merge those visual features into
@@ -2897,6 +3099,20 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
         polish_fn = provider["polish"]
 
         def job():
+            # The worker must import its pure parser contract itself; it never
+            # reaches back into Blender/RNA through a main-thread local.
+            from . import reference_material_plan
+
+            def check_source_files():
+                if not self._source_only_at_start:return
+                from .source_reference import matches
+                record=self._product_projection
+                if (not matches(self._source_snapshot,selected) or not matches(self._identity_snapshot,identity)
+                        or not all(matches(row,row['path']) for row in self._polish_copy_snapshots)
+                        or not matches(record['snapshot'],record['path'])
+                        or not all(matches(row['snapshot'],row['path']) for row in record['helpers'].values())):
+                    raise ValueError('原图、身份或产品投影辅助文件在风格分析期间变化，已停止后续润色和生图。')
+            check_source_files()
             final_user_text = user_text
             if self._autofill_needed:
                 self._phase = "读取产品参考图外观"
@@ -2925,10 +3141,8 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             # identity preservation and appearance parameters before the heavier
             # provider polish. This does not replace Codex/AGY generation.
             from . import jev_semantics
-            self._jev_appearance_meta = jev_semantics.analyze_appearance(
-                source_prompt,
-                list(ref_instructions.get("style", [])),
-            )
+            self._jev_appearance_meta = ({} if self._source_only_at_start else jev_semantics.analyze_appearance(
+                source_prompt, list(ref_instructions.get("style", []))))
             jev_synthesized = str(self._jev_appearance_meta.get("synthesized", "") or "").strip()
             if jev_synthesized:
                 final_user_text += (
@@ -2936,7 +3150,16 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                     + jev_synthesized
                 )
             self._style_summary = self._cached_style_summary
-            if style_upload and not self._style_cache_hit:
+            if self._source_only_at_start and not self._style_cache_hit:
+                from .prompt_engine import SOURCE_STYLE_ANALYSIS_SYSTEM_PROMPT
+                self._phase='独立分析原图氛围 (1/2)'
+                self._style_summary=(polish_fn(system_prompt=SOURCE_STYLE_ANALYSIS_SYSTEM_PROMPT,
+                    user_text=('只分析本轮原始来源图的整图环境、照明、曝光、氛围和摄影后期；不提取旧产品的造型、材质或车漆。'
+                               + ('\n原图参考重点：'+self._target_note_at_start if self._target_note_at_start else '')),
+                    image_paths=replica_target,cwd=str(self._session.directory),explicit_path=cli_path,
+                    model=model,timeout=int(provider['polish_timeout'])) or '').strip()
+                if not self._style_summary:raise ValueError('原图独立风格分析未返回有效内容，已停止自动润色和生图。')
+            elif style_upload and not self._style_cache_hit:
                 self._phase = "分析当前风格 (1/2)"
                 style_summary = polish_fn(
                     system_prompt=STYLE_ANALYSIS_SYSTEM_PROMPT,
@@ -2957,16 +3180,20 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 final_user_text += (
                     "\n\n【当前风格参考图独立分析结果｜本轮唯一风格依据】\n"
                     + self._style_summary
-                    + "\n请用这段当前风格摘要彻底替换旧提示词中的色调、材质、布光、摄影、氛围和后期描述；"
-                      "旧风格与本摘要冲突时必须丢弃旧风格。"
+                    + ('\n该摘要只决定整图环境、布光、摄影与后期，不能改变模型几何、车漆固有色或身份图负责的部件材质。'
+                       if self._source_only_at_start else
+                       "\n请用这段当前风格摘要彻底替换旧提示词中的色调、材质、布光、摄影、氛围和后期描述；旧风格与本摘要冲突时必须丢弃旧风格。")
                 )
 
+            check_source_files()
+
             self._phase = "适配生图模型提示词"
+            from .source_reference import PROJECTED_POLISH_SYSTEM
             kwargs = dict(
-                system_prompt=prompt_profiles.system_prompt(
-                    REPLICA_POLISH_SYSTEM_PROMPT if self._reference_mode_at_start else BASE_SYSTEM_PROMPT,
-                    provider["id"],
-                ),
+                system_prompt=((PROJECTED_POLISH_SYSTEM + reference_material_plan.polish_contract(self._material_catalog))
+                               if self._source_only_at_start else prompt_profiles.system_prompt(
+                                   REPLICA_POLISH_SYSTEM_PROMPT if self._reference_mode_at_start else BASE_SYSTEM_PROMPT,
+                                   provider["id"])),
                 user_text=final_user_text,
                 image_paths=image_paths,
                 cwd=str(self._session.directory),
@@ -2974,6 +3201,8 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 model=model,
             )
             kwargs["timeout"] = int(provider["polish_timeout"])
+            if self._source_only_at_start:
+                kwargs["response_format"] = "json"
             return polish_fn(**kwargs)
 
         if not self._start_thread(context, job):
@@ -3012,14 +3241,26 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 props.antigravity_account_state = "LOGGED_IN"
             else:
                 props.codex_account_state = "LOGGED_IN"
-            if getattr(self, "_autofill_result", None):
-                _apply_product_autofill(props, self._autofill_key, *self._autofill_result)
             chain_render = bool(getattr(props, "pending_generate", False))
             props.pending_generate = False
             if not chain_render:      # two-step: the plan is made again by the next 「渲染」 click
                 props.views_plan = ""
-            polished, removed_fragments = sanitize_appearance_prompt_report(
-                self._result or "", preserve_visual_intent=self._reference_mode_at_start)
+            if self._source_only_at_start:
+                from . import reference_material_plan
+                try:
+                    polished, self._material_plan = reference_material_plan.parse_reply(
+                        self._result, self._material_catalog)
+                except ValueError as exc:
+                    props.pending_generate = False
+                    props.views_plan = ""
+                    _status(props, "ERROR", f"AI 润色材料计划无效，未自动生图：{exc}")
+                    props.progress = 0.0
+                    self.report({"ERROR"}, props.last_error)
+                    return {"CANCELLED"}
+                removed_fragments = []
+            else:
+                polished, removed_fragments = sanitize_appearance_prompt_report(
+                    self._result or "", preserve_visual_intent=self._reference_mode_at_start)
             props.prompt_removed_notice = (
                 "已移除构图类描述（由 Blender 控制）：" + "；".join(removed_fragments)[:240]
                 if removed_fragments else ""
@@ -3045,22 +3286,48 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 _status(props, "ERROR", "润色期间工作模式已变化；已保留场景且没有自动生图。")
                 self.report({"WARNING"}, props.last_error)
                 return {"FINISHED"}
-            if self._reference_mode_at_start:
+            if self._source_only_at_start:
+                from .source_reference import matches
+                from . import product_projection, reference_material_plan
+                current_target, _ = _sb_reference(props)
+                identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+                stale_replica = (not workflow.source_only(props) or workflow.source_slots(props) != self._source_slots_at_start
+                                 or str(getattr(props, "sb_target_note", "") or "").strip() != self._target_note_at_start
+                                 or not matches(self._source_snapshot, current_target)
+                                 or not matches(self._identity_snapshot, identity)
+                                 or not product_projection.current(context, props, self._product_projection)
+                                 or reference_material_plan.catalog(context, props) != self._material_catalog
+                                 or _source_user_info(props)!=self._source_user_info_at_start
+                                 or prompt_profiles.REFERENCE_ROLE_POLICY_VERSION!=self._source_policy_version
+                                 or _source_style_key(self._source_snapshot,self._target_note_at_start,_analysis_provider(props,_addon_prefs(context)))!=self._style_cache_key)
+                if stale_replica:
+                    props.views_plan = ""
+                    _status(props, "ERROR", "润色期间原图、备注、身份、相机、模型材质/结构、投影、参考策略或服务商已变化；没有自动生图。")
+                    self.report({"WARNING"}, props.last_error)
+                    return {"FINISHED"}
+            elif self._reference_mode_at_start:
+                from .source_reference import matches
                 current_target, _ = _sb_reference(props)
                 source, source_note = _sb_generation_reference(context, props)
+                identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
                 stale_replica = (
-                    not current_target or not source
+                    not getattr(props, "workflow_multiview", False) or not current_target or not source
                     or workflow.file_hash(current_target) != getattr(self, "_replica_target_hash_at_start", "")
                     or str(Path(source).resolve()) != getattr(self, "_replica_preview_source_at_start", "")
                     or workflow.file_hash(source) != getattr(self, "_replica_snapshot_hash_at_start", "")
                     or _camera_signature(context.scene.camera, context.scene) != getattr(self, "_replica_camera_at_start", ())
+                    or workflow.source_slots(props)[1] != self._replica_identity_slot
+                    or not matches(self._replica_identity_snapshot, identity)
                 )
                 if stale_replica:
                     props.views_plan = ""
-                    _status(props, "ERROR", source_note or "润色期间目标图、粗模来源或相机已变化；已保留场景且没有自动生图。")
+                    _status(props, "ERROR", source_note or "润色期间目标图、身份图、粗模来源或相机已变化；没有自动生图。")
                     self.report({"WARNING"}, props.last_error)
                     return {"FINISHED"}
-            if _get_prompt_text(props) != self._prompt_at_start:
+            if getattr(self, "_autofill_result", None):
+                _apply_product_autofill(props, self._autofill_key, *self._autofill_result)
+            if (_get_prompt_text(props) != self._prompt_at_start or
+                    (self._source_only_at_start and str(getattr(props, "scene_brief", "") or "").strip() != self._brief_at_start)):
                 suggestion = self._session.directory / "prompt_ai_suggestion.txt"
                 suggestion.write_text(polished, encoding="utf-8")
                 draft = bpy.data.texts.new("Wondful Prompt · AI 润色建议")
@@ -3078,6 +3345,7 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             _set_prompt_text(props, polished)
             final_prompt_now = _get_prompt_text(props)
             props.last_ai_prompt = final_prompt_now
+            props.prompt_reference_input_key = self._source_input_key_at_start if self._source_only_at_start else ""
             props.prompt_target_key = self._prompt_profile["target_key"]
             current_style_revision = workflow.reference_revision(props)
             current_style_fingerprint = _reference_fingerprint(_reference_paths(props)["style"])
@@ -3085,13 +3353,14 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                 current_style_revision == int(getattr(self, "_style_revision_at_start", current_style_revision))
                 and current_style_fingerprint == str(getattr(self, "_style_fingerprint_at_start", current_style_fingerprint))
             )
+            if self._source_only_at_start:same_style_set=True
             if same_style_set:
                 props.prompt_style_revision = current_style_revision
                 props.prompt_style_fingerprint = current_style_fingerprint
                 props.style_prompt_dirty = False
                 props.style_sync_initialized = True
                 props.prompt_reference_policy_version = REFERENCE_POLICY_VERSION
-                if not self._reference_mode_at_start:
+                if self._source_only_at_start or not self._reference_mode_at_start:
                     props.style_summary_cache_key = self._style_cache_key
                     props.style_summary_cache = self._style_summary
             else:
@@ -3112,6 +3381,9 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                     "prompt_profile": self._prompt_profile,
                     "appearance": getattr(self, "_appearance_meta", {}),
                     "style_cache_hit": self._style_cache_hit,
+                    "style_cache_key":self._style_cache_key,
+                    "source_style_role_policy_version":getattr(self,'_source_policy_version',None),
+                    "source_style_analysis_inputs":getattr(self,'_polish_copy_snapshots',[])[:1],
                     "engine": f"{getattr(self, '_provider_id', 'codex')}_oauth",
                     "analysis_provider": getattr(self, "_provider_id", "codex"),
                     "camera_reference_size": [self._width, self._height],
@@ -3119,6 +3391,9 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                     "camera_name": self._camera_name_at_start,
                     "reference_bundle": getattr(self, "_reference_bundle", {}),
                     "reference_counts": dict(self._reference_counts or {}),
+                    "product_projection": getattr(self, "_product_projection", None),
+                    "material_catalog": getattr(self, "_material_catalog", None),
+                    "material_plan": getattr(self, "_material_plan", None),
                     "reference_sources": self._reference_sources_at_start,
                     "reference_instructions": self._reference_instructions_at_start,
                     "style_fingerprint": str(getattr(self, "_style_fingerprint_at_start", "")),
@@ -3137,6 +3412,26 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
             else:
                 self.report({"INFO"}, f"{getattr(self, '_provider_label', 'Codex')} 提示词生成完成，可以开始 AI 渲染。")
                 if chain_render:
+                    if self._source_only_at_start:
+                        _SOURCE_POLISH_APPROVAL[_scene_token(self._origin_scene)] = {
+                            "target": self._source_snapshot, "identity": self._identity_snapshot,
+                            "slots": self._source_slots_at_start, "prompt": final_prompt, "brief": self._brief_at_start,
+                            "target_note": self._target_note_at_start,
+                            "projection": self._product_projection,
+                            "material_catalog": self._material_catalog,
+                            "material_plan": self._material_plan,
+                            "paint_lock":self._source_paint_lock,"product_info":self._source_user_info_at_start,
+                            "user_request":self._source_request_at_start,
+                            "role_policy_version":self._source_policy_version,"style_key":self._style_cache_key,
+                        }
+                    elif self._reference_mode_at_start:
+                        _MULTIVIEW_POLISH_APPROVAL[_scene_token(self._origin_scene)] = {
+                            "identity": self._replica_identity_snapshot, "identity_slot": self._replica_identity_slot,
+                            "target_hash": self._replica_target_hash_at_start,
+                            "source": self._replica_preview_source_at_start,
+                            "source_hash": self._replica_snapshot_hash_at_start,
+                            "camera": self._replica_camera_at_start,
+                        }
                     props.task_phase = "提示词已完成，正在开始生图…"
                     _schedule_operator("wondful.ai_render", self._origin_scene)
             return {"FINISHED"}
@@ -3315,6 +3610,40 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             props.last_detail_note = f"细节修复失败（已保留原图）：{str(exc)[:80]}"
             return variant_final, None
 
+    def _apply_source_detail_repair(self, context, props, image, variant_index, raw_source):
+        """Main-thread natural-fusion finalization of a source-only image; preserves fitted AI pixels and raw provider source."""
+        spec=self._source_repair
+        from .source_reference import matches, fingerprint
+        from . import product_projection, reference_material_plan
+        for key,snapshot in spec['path_snapshots'].items():
+            if not matches(snapshot,spec[key]):
+                raise ValueError('产品细节辅助文件已变化或丢失；已保留原始生图，请重新生成并润色。')
+        if (context.scene != self._origin_scene
+                or not product_projection.current(context, props, spec['projection_record'])
+                or reference_material_plan.catalog(context, props) != spec['material_catalog']):
+            raise ValueError('原图编辑期间产品投影、相机、模型或材质已变化；已保留原始生图，未导出未验收结果。')
+        directory=self._session.directory/f'natural_finish_{variant_index:02d}'
+        directory.mkdir(exist_ok=True)
+        raw_fp = fingerprint(raw_source)
+        fitted_fp = fingerprint(image)
+        note = '自然融合完成：保留 AI 生成的整体光影和环境融合；车灯、轮毂与标识细节待人工目视核验。'
+        report = {
+            'method': 'natural_fusion',
+            'native_replacement': False,
+            'geometry_audit': False,
+            'detail_review_required': True,
+            'raw_provider_image': raw_fp,
+            'raw_fitted_canvas': fitted_fp,
+            'material_plan': spec.get('material_plan', []),
+            'material_plan_applied': False,
+            'helpers_frozen': True,
+            'summary': note,
+        }
+        (directory/'natural-finish-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+        self._source_repair_reports[variant_index]=report
+        props.last_detail_note=note
+        return Path(image),Path(raw_source)
+
     def _identity_score(self, props, image, spec, matid, raw=None, variant_index=None):
         """1.2.1 识别分: score the raw AI image (raw=None) or the pasted one (raw given: writes the
         panel line under 高级 › 上次渲染 and score_XX.json in the session). Never raises."""
@@ -3388,7 +3717,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             print(f"[Wondful] 分层输出未启动：{exc}")
             props.last_layers_note = f"分层输出失败：{exc}"
 
-    def _drain_completed_variants(self, props) -> None:
+    def _drain_completed_variants(self, context, props) -> None:
         """Aspect-fit and export every finished variant as soon as it is available."""
         queue = getattr(self, "_completed_variants", None)
         if queue is None:
@@ -3436,7 +3765,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             identity_meta.get("path", ""),
                             restored_path,
                         ))
-                    variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
+                    if getattr(self,'_source_only_at_start',False) and getattr(self,'_source_repair',None):
+                        variant_final,variant_raw=self._apply_source_detail_repair(context,props,variant_final,variant_index,source)
+                    else:
+                        variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
                     from .result_worker import photo_finish_step
                     processed = photo_finish_step(
                         str(variant_final), self._session.directory / f"output_variant_{variant_index:02d}_finish.png",
@@ -3499,6 +3831,30 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
     def execute(self, context):
         self._request_started_at = time.perf_counter()
         props = context.scene.wondful_ai
+        self._source_only_at_start = workflow.source_only(props)
+        multi_approval = _MULTIVIEW_POLISH_APPROVAL.pop(_scene_token(context.scene), None)
+        if multi_approval:
+            from .source_reference import matches
+            target, _ = _sb_reference(props)
+            identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+            source, _note = _sb_generation_reference(context, props) if workflow.is_reference(props) else ("", "")
+            if (not workflow.is_reference(props) or not getattr(props, "workflow_multiview", False)
+                    or not source or workflow.file_hash(target) != multi_approval["target_hash"]
+                    or str(Path(source).resolve()) != multi_approval["source"]
+                    or workflow.file_hash(source) != multi_approval["source_hash"]
+                    or _camera_signature(context.scene.camera, context.scene) != multi_approval["camera"]
+                    or workflow.source_slots(props)[1] != multi_approval["identity_slot"]
+                    or not matches(multi_approval["identity"], identity)):
+                props.views_plan = ""
+                _status(props, "ERROR", "润色后目标图、身份图、粗模来源或相机已变化；请重新生成。")
+                self.report({"ERROR"}, props.last_error)
+                return {"CANCELLED"}
+        if not self._source_only_at_start and _SOURCE_POLISH_APPROVAL.pop(_scene_token(context.scene), None):
+            _status(props, "ERROR", "润色后工作模式或多视角设置已变化；请重新点击生成。")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        if self._source_only_at_start:
+            return self._execute_source_only(context, props)
         error = workflow_preflight(context, props)
         if error:
             _status(props, "ERROR", error)
@@ -3507,6 +3863,19 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         self._workflow_mode_at_start = workflow.mode(props)
         prefs = _addon_prefs(context)
         provider = _analysis_provider(props, prefs)
+        if workflow.is_reference(props) and (provider["id"] != "codex" or not bool(getattr(prefs, "codex_direct_edit", True))):
+            _status(props, "ERROR", "多视角原图复刻需要 Codex 图像编辑直连；请启用直连并使用 Codex。")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        if workflow.is_reference(props):
+            from .source_reference import fingerprint, matches
+            try:
+                identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+                render_identity_snapshot = fingerprint(identity)
+                render_identity_slot = workflow.source_slots(props)[1]
+            except (OSError, ValueError, TypeError) as exc:
+                self.report({"ERROR"}, f"产品身份参考不可用：{exc}")
+                return {"CANCELLED"}
         planned_variant_count = render_variant_count(provider["id"], props)
         if not provider["imagegen_enabled"]:
             self.report({"ERROR"}, f"{provider['label']} 生图已在插件偏好设置中关闭。")
@@ -3537,6 +3906,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             or (bool(_reference_paths(props)["style"]) and not bool(getattr(props, "style_sync_initialized", False)))
         )
         current_prompt = workflow.render_text(props, references_changed=style_needs_refresh)
+        polished_render_brief = current_prompt
         current_prompt += "\n\n" + workflow.contract(props)
         if style_needs_refresh:
             props.prompt_notice = "使用当前参考图；旧 AI 风格文案不会沿用，手写提示词保留。AI 润色可选。"
@@ -3568,6 +3938,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         refs = _reference_paths(props)
         ref_instructions = _reference_instructions(props)
         product = copy_references(refs["product"], self._session, "product_reference")
+        if workflow.is_reference(props) and (not product or workflow.file_hash(product[0]) != render_identity_snapshot["sha256"]
+                or not matches(render_identity_snapshot, identity) or workflow.source_slots(props)[1] != render_identity_slot):
+            self.report({"ERROR"}, "相机捕获或复制期间产品身份参考已变化，请重新生成。")
+            return {"CANCELLED"}
         person = copy_references(refs["person"], self._session, "person_reference")
         scene_reference = []
         if workflow.is_reference(props):
@@ -3575,9 +3949,17 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             if not source_reference:
                 self.report({"ERROR"}, source_note or "当前粗模没有可验证的原始目标图")
                 return {"CANCELLED"}
-            scene_reference = copy_references([source_reference], self._session, "scene_reference")
-            if not scene_reference:
-                self.report({"ERROR"}, "无法复制当前粗模的原始目标图")
+            from .source_reference import copy_verified
+            selected, _ = _sb_reference(props)
+            try:
+                original_copy, original_snapshot, _dimensions = copy_verified(
+                    selected, self._session.directory, "scene_reference_original")
+                if original_snapshot["sha256"] != str(getattr(props, "sb_built_target_hash", "") or ""):
+                    raise ValueError("原始目标图与当前粗模来源不一致")
+                _validate_source_image(original_copy)
+                scene_reference = [original_copy]
+            except (OSError, RuntimeError, ValueError, TypeError) as exc:
+                self.report({"ERROR"}, f"无法验证原始目标图：{exc}")
                 return {"CANCELLED"}
         style = ([] if workflow.is_reference(props)
                  else copy_references(refs["style"], self._session, "style_reference"))
@@ -3618,9 +4000,9 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             context, props, structure.get("part_id_manifest", {}) if structure.get("enabled") else {}
         )
         props.last_structure_note = (
-            "结构图：原生相机数据，已统一白模画布。" if structure.get("native_passes") else
+            "结构图：原生相机数据，已统一相机画布。" if structure.get("native_passes") else
             "结构图已降级为投影近似；遮挡和深度需人工检查。" if structure.get("enabled") else
-            "未启用结构图，仅使用白模参考。"
+            "未启用结构图，使用相机画面。"
         )
         effective_long_edge = min(int(prefs.long_edge), 1280) if render_mode == "FAST" else int(prefs.long_edge)
         self._render_mode = render_mode
@@ -3731,6 +4113,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         self._detail = self._detail_spec(context, props)
         self._attach_detail_edit(props, prefs, provider)
         product_mask_path = (self._layers or {}).get("mask", "") or (self._detail or {}).get("mask", "")
+        direct_original_first = False
         if provider["id"] == "codex" and bool(getattr(prefs, "codex_direct_edit", True)):
             from . import codex_direct
             from .cli_transport import is_cancellation_requested as _cancel_requested
@@ -3758,48 +4141,50 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 from .detail_paste import keep_prompt
                 direct_keep_text = keep_prompt(direct_vehicle, self._detail.get("keep_texts") or ())
             direct_state["vehicle"] = direct_vehicle
-            if bool(getattr(prefs, "codex_direct_simple", True)):
-                if not direct_scene_reference:
-                    source_reference, scene_reference_note = _sb_generation_reference(context, props)
-                    try:
-                        if source_reference:
-                            copied_reference = copy_references(
-                                [source_reference], self._session, "scene_layout_reference")
-                            if not copied_reference:
-                                raise OSError("已记录的参考副本不可用")
-                            direct_scene_reference = str(copied_reference[0])
-                    except OSError as exc:
-                        scene_reference_note = f"场景参考复制失败：{exc}"
-                clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
-                try:
-                    from .viewport_capture import render_clay_base, LAST_CLAY_INFO
-                    from .terrain import settings_from_props
-                    from .massing import find_collection as _find_massing
-                    massing_coll = _find_massing(context.scene, props)
-                    if render_clay_base(context, clay_path, getattr(props, "product_collection", None),
-                                        ground=getattr(props, "clay_ground", "AUTO"),
-                                        crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
-                                        terrain=settings_from_props(props),
-                                        mask_path=product_mask_path,
-                                        massing=massing_coll,
-                                        detail_path=(self._detail or {}).get("detail", ""),
-                                        keep_path=(self._detail or {}).get("keep", ""),
-                                        matid_path=(self._detail or {}).get("matid", "")):
-                        direct_simple_base = clay_path
-                        direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
-                        direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
-                        blocks = len(LAST_CLAY_INFO.get("massing") or [])
-                        if direct_massing_text:
-                            direct_building_refs = self._building_refs(LAST_CLAY_INFO.get("massing") or [])
-                        props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面"
-                                                   + (f" · 建筑参考 {len(direct_building_refs)} 张" if direct_building_refs else "")
-                                                   if massing_coll else "")
-                        direct_simple_brief = current_prompt
-                except Exception as exc:
-                    print(f"[Wondful] 白模底图渲染失败，改用相机截图：{exc}")
-                if direct_simple_brief is None and Path(self._session.viewport_reference).is_file():
+            if bool(getattr(prefs, "codex_direct_simple", True)) or workflow.is_reference(props):
+                if not workflow.is_reference(props):
+                    # Environment single-view edits use the actual captured camera frame.
                     direct_simple_base = str(self._session.viewport_reference)
                     direct_simple_brief = current_prompt
+                else:
+                    clay_path = str(Path(self._session.viewport_reference).parent / "01_clay_base.png")
+                    try:
+                        from .viewport_capture import render_clay_base, LAST_CLAY_INFO
+                        from .terrain import settings_from_props
+                        from .massing import find_collection as _find_massing
+                        massing_coll = _find_massing(context.scene, props)
+                        if render_clay_base(context, clay_path, getattr(props, "product_collection", None),
+                                            ground=getattr(props, "clay_ground", "AUTO"),
+                                            crest_angle=float(getattr(props, "clay_crest_angle", 18.0)),
+                                            terrain=settings_from_props(props),
+                                            mask_path=product_mask_path,
+                                            massing=massing_coll,
+                                            detail_path=(self._detail or {}).get("detail", ""),
+                                            keep_path=(self._detail or {}).get("keep", ""),
+                                            matid_path=(self._detail or {}).get("matid", "")):
+                            direct_simple_base = clay_path
+                            direct_terrain_text = str(LAST_CLAY_INFO.get("terrain_text", "") or "")
+                            direct_massing_text = str(LAST_CLAY_INFO.get("massing_text", "") or "")
+                            blocks = len(LAST_CLAY_INFO.get("massing") or [])
+                            if direct_massing_text:
+                                direct_building_refs = self._building_refs(LAST_CLAY_INFO.get("massing") or [])
+                            props.last_massing_note = (f"环境体块：{massing_coll.name} · {blocks} 个体块进入画面"
+                                                       + (f" · 建筑参考 {len(direct_building_refs)} 张" if direct_building_refs else "")
+                                                       if massing_coll else "")
+                            direct_simple_brief = current_prompt
+                            direct_original_first = bool(workflow.is_reference(props) and direct_scene_reference)
+                            if direct_original_first:
+                                direct_simple_brief = polished_render_brief
+                                direct_terrain_text = direct_massing_text = ""
+                                direct_building_refs = []
+                    except Exception as exc:
+                        print(f"[Wondful] 产品投影渲染失败，已停止原图复刻：{exc}")
+            if workflow.is_reference(props):
+                projection_size = image_dimensions(direct_simple_base)
+                if not direct_original_first or not projection_size or min(projection_size) <= 0:
+                    _status(props, "ERROR", "多视角原图复刻无法生成有效的产品投影，已停止而未切换到其他底图。")
+                    self.report({"ERROR"}, props.last_error)
+                    return {"CANCELLED"}
             # 1.2.6 风格与光线锁定: the ④ analysis' 画风 (voxel, cartoon…) / night lighting also locks the 主视角
             direct_style_text = ""
             if direct_simple_brief is not None:
@@ -3817,6 +4202,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             direct_state["style_lock"] = direct_style_text[:200]
             direct_state["ground_bands"] = bool(sb_band_line)
             direct_state["simple_base"] = Path(direct_simple_base).name if direct_simple_base else ""
+            direct_state["original_first"] = direct_original_first
             direct_state["building_refs"] = [{"block": r["block"], "file": Path(r["path"]).name}
                                              for r in direct_building_refs]
             direct_state["scene_reference"] = Path(direct_scene_reference).name if direct_scene_reference else ""
@@ -3829,6 +4215,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 self._phase = text
 
             def generate_fn(**kwargs):
+                camera_capture = bool(kwargs.pop("camera_capture", False))
                 return codex_direct.generate_with_fallback(
                     kwargs, fallback=exec_generate, state=direct_state, size=direct_size,
                     manifest=direct_manifest, bundle_note=direct_note, client_version=direct_version,
@@ -3841,6 +4228,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     style_text=direct_style_text,
                     identity_text=direct_identity_text,
                     scene_reference_path=direct_scene_reference,
+                    original_first=direct_original_first,
+                    camera_capture=camera_capture,
                 )
         if self._detail and not Path(self._detail["detail"]).is_file():
             # no clay base this run (other canvas / provider): render the detail pass on its own
@@ -3907,6 +4296,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         provider_cli_path = provider["cli_path"]
         provider_model = provider["model"]
         provider_id = provider["id"]
+        camera_capture_mode = not workflow.is_reference(props)
         provider_label = provider["label"]
         render_timeout = int(provider["render_timeout"])
         audit_timeout = int(provider["audit_timeout"])
@@ -4028,13 +4418,16 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                     )
                     if correction:
                         attempt_prompt += (
-                            "\n\n上一轮构图未通过白模对齐校验。保持用户指定的外观和环境打光，"
-                            "按本轮提供的底图和修复范围恢复白模构图。具体纠偏：" + correction
+                            ("\n\n上一轮构图未通过相机画面对齐校验。保持用户指定的外观和环境打光，"
+                             "按本轮提供的底图和修复范围恢复相机构图。具体纠偏：" if camera_capture_mode else
+                             "\n\n上一轮构图未通过白模对齐校验。保持用户指定的外观和环境打光，"
+                             "按本轮提供的底图和修复范围恢复白模构图。具体纠偏：") + correction
                         )
 
                     edit_base, edit_mask = camera_base, identity_full_edit_mask
                     repair_strategy = ("IDENTITY_PRESERVE_MASK" if identity_full_edit_mask else
-                                       ("WHITE_MODEL_REBASE" if correction else "WHITE_MODEL"))
+                                       (("CAMERA_REBASE" if correction else "CAMERA_BASE") if camera_capture_mode else
+                                        ("WHITE_MODEL_REBASE" if correction else "WHITE_MODEL")))
                     region = None
                     if correction and variant_attempts and masked_repair:
                         previous = variant_attempts[-1]
@@ -4059,9 +4452,12 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                                 repair_strategy = "UNION_MASK"
                     if correction:
                         attempt_prompt += (
-                            "\n本轮 Mask 同时覆盖偏移主体与目标位置；先清除旧位置残影，再在白模位置恢复主体。"
+                            ("\n本轮 Mask 同时覆盖偏移主体与目标位置；先清除旧位置残影，再在相机画面位置恢复主体。"
+                             if camera_capture_mode else
+                             "\n本轮 Mask 同时覆盖偏移主体与目标位置；先清除旧位置残影，再在白模位置恢复主体。")
                             if region is not None else
-                            "\n本轮重新使用原始白模整幅画布，不继承上一轮错误的比例、裁切或视角。"
+                            ("\n本轮重新使用原始相机画面，不继承上一轮错误的比例、裁切或视角。"
+                             if camera_capture_mode else "\n本轮重新使用原始白模整幅画布，不继承上一轮错误的比例、裁切或视角。")
                         )
                     generation_started = time.time()
                     self._phase = f"生成第 {variant_index}/{variant_count} 张 · 尝试 {attempt_index}/{planned_attempts}"
@@ -4072,18 +4468,14 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                         # and let the previous candidate carry the appearance state.
                         generation_references = [camera_base]
                     try:
-                        generation = generate_fn(
-                            prompt=attempt_prompt,
-                            reference_paths=generation_references,
-                            output_path=str(candidate),
-                            cwd=str(self._session.directory),
-                            explicit_path=provider_cli_path,
-                            model=provider_model,
-                            edit_base_path=edit_base,
-                            edit_mask_path=edit_mask,
-                            structure_control=structure if structure.get("enabled") else None,
-                            timeout=render_timeout,
-                        )
+                        generation_args = dict(prompt=attempt_prompt, reference_paths=generation_references,
+                            output_path=str(candidate), cwd=str(self._session.directory),
+                            explicit_path=provider_cli_path, model=provider_model, edit_base_path=edit_base,
+                            edit_mask_path=edit_mask, structure_control=structure if structure.get("enabled") else None,
+                            timeout=render_timeout)
+                        if camera_capture_mode:
+                            generation_args["camera_capture"] = True
+                        generation = generate_fn(**generation_args)
                     except Exception:
                         # If a later strict repair is rate-limited (or the quota ran out), the
                         # previous candidate for this variant is still a completed output.
@@ -4288,10 +4680,201 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             return {"CANCELLED"}
         return {"RUNNING_MODAL"}
 
+    def _execute_source_only(self, context, props):
+        """Edit the original with the exact product projection seen by mandatory polish."""
+        from .source_reference import copy_verified, edit_prompt, matches, validate_inputs
+        from . import product_projection, reference_material_plan
+        approval = _SOURCE_POLISH_APPROVAL.pop(_scene_token(context.scene), None)
+        target, _ = _sb_reference(props)
+        identity = workflow.identity_path(props, resolve=bpy.path.abspath, packed_export=image_filepath, strict_source=True)
+        if (not approval or workflow.source_slots(props) != approval["slots"]
+                or not matches(approval["target"], target) or not matches(approval["identity"], identity)
+                or _get_prompt_text(props) != approval["prompt"]
+                or str(getattr(props, "scene_brief", "") or "").strip() != approval["brief"]
+                or str(getattr(props, "sb_target_note", "") or "").strip() != approval["target_note"]
+                or not product_projection.current(context, props, approval.get("projection", {}))
+                or reference_material_plan.catalog(context, props) != approval.get("material_catalog")
+                or _source_user_info(props)!=approval.get('product_info')
+                or approval.get('role_policy_version')!=prompt_profiles.REFERENCE_ROLE_POLICY_VERSION):
+            _status(props, "ERROR", "原图、备注、身份、相机、模型材质/结构、投影、提示词、参考策略或服务商已变化；请重新点击生成并完成 AI 润色。")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        error = workflow_preflight(context, props)
+        if error:
+            _status(props, "ERROR", error)
+            self.report({"ERROR"}, error)
+            return {"CANCELLED"}
+        prefs=_addon_prefs(context)
+        provider=_analysis_provider(props,prefs)
+        if approval.get('style_key')!=_source_style_key(approval['target'],approval['target_note'],provider):
+            _status(props,'ERROR','润色后参考策略或服务商/模型已变化；请重新点击生成并完成 AI 润色。')
+            self.report({'ERROR'},props.last_error)
+            return {'CANCELLED'}
+        if not provider["imagegen_enabled"] or not provider["discover"]():
+            _status(props, "ERROR", f"{provider['label']} 生图未启用或 CLI 不可用。")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        try:
+            configured_output = (props.output_directory or "").strip() or (prefs.output_directory or "").strip()
+            self._output_dir_at_start = resolve_output_directory(context, configured_output)
+            preflight_output_directory(self._output_dir_at_start)
+            self._session = create_session()
+            source, source_snapshot, dimensions = copy_verified(target, self._session.directory, "source_canvas")
+            product, identity_snapshot, _ = copy_verified(identity, self._session.directory, "product_identity")
+            if source_snapshot != approval["target"] or identity_snapshot != approval["identity"]:
+                raise ValueError("参考图在润色后发生变化，请重新生成。")
+            _validate_source_image(source)
+            _validate_source_image(product)
+            projection, projection_snapshot, _ = copy_verified(
+                approval["projection"]["path"], self._session.directory, "product_projection")
+            if projection_snapshot != approval["projection"]["snapshot"]:
+                raise ValueError("产品投影在润色后发生变化，请重新生成。")
+            helper_paths=product_projection.freeze_helpers(approval['projection'],self._session.directory)
+            from .source_reference import fingerprint
+            self._source_repair={'projection':projection,**helper_paths}
+            self._source_repair['path_snapshots']={key:fingerprint(path) for key,path in self._source_repair.items()}
+            self._source_repair['projection_record']=approval['projection']
+            self._source_repair['material_plan']=approval['material_plan']
+            self._source_repair['material_catalog']=approval['material_catalog']
+            self._source_repair_reports={}
+            images = validate_inputs(source, product, provider.get("reference_limit", MAX_IMAGE_PATHS), projection=projection)
+            user_info = _source_user_info(props)
+            original_request=approval.get('user_request','')
+            if original_request and original_request not in approval['prompt'] and original_request not in user_info:
+                user_info+='\n本轮原始用户需求（仅明确具体车漆颜色可覆盖模型基线）：\n'+original_request
+            prompt = edit_prompt(approval["prompt"], user_info, approval["target_note"], projection=True)
+            prompt+='\n'+approval['paint_lock']
+        except Exception as exc:
+            _status(props, "ERROR", f"原图编辑准备失败：{exc}")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+
+        self._session.viewport_reference = Path(source)
+        self._session.prompt_file.write_text(prompt, encoding="utf-8")
+        self._workflow_mode_at_start = workflow.REFERENCE
+        self._scene_name_at_start = context.scene.name
+        self._camera_name_at_start = "原图"
+        self._camera_output_size = dimensions
+        self._width, self._height = dimensions
+        self._source_inputs = {"target": source_snapshot, "identity": identity_snapshot,
+                               "projection": approval["projection"], "projection_copy": projection,
+                               "detail_helpers":self._source_repair,"role_policy_version":approval['role_policy_version'],
+                               "style_cache_key":approval['style_key'],"paint_baseline":approval['paint_lock'],
+                               "material_catalog":approval['material_catalog'],"material_plan":approval['material_plan']}
+        self._provider_id, self._provider_label = provider["id"], provider["label"]
+        self._variant_count = render_variant_count(provider["id"], props)
+        self._completed_variants = Queue()
+        self._exported_by_variant, self._exported_variant_records, self._export_errors = {}, {}, []
+        self._layers = self._detail = self._finish = None
+        self._identity_hard_restore = False
+        self._identity_meta = {}
+        self._direct_state = {} if provider["id"] == "codex" and bool(getattr(prefs, "codex_direct_edit", True)) else None
+        self._estimated_total = average_timing(f"{provider['id']}_render_standard_x{self._variant_count}", 180.0 * self._variant_count)
+        self._phase = "正在编辑原图"
+        props.last_structure_note = "单图原图编辑：使用同相机真实产品 RGBA 结构参考；未使用场景粗模"
+        props.last_iou_note = "单图未执行三维轮廓验收"
+        props.last_score_note = "单图未执行基于三维模型的身份评分"
+        props.last_detail_note = props.last_layers_note = ""
+        props.last_finish_note = props.last_massing_note = ""
+        props.last_engine_note = props.last_canvas_warning = ""
+        props.last_canvas_fit = False
+        props.last_generation_seconds = props.last_audit_seconds = 0.0
+        props.alignment_score = -1.0
+        props.alignment_attempts = 0
+        props.last_export_path = props.last_export_paths = ""
+        props.last_capture_method = "SOURCE_PRODUCT_PROJECTION"
+        props.last_session_id = self._session.session_id
+        props.progress, props.eta_seconds = 0.05, int(self._estimated_total)
+        _status(props, "RENDERING")
+
+        def job():
+            from .cli_transport import is_cancellation_requested
+            results = []
+            for index in range(1, self._variant_count + 1):
+                if is_cancellation_requested():
+                    raise RuntimeError("任务已取消")
+                output = str(self._session.directory / f"source_edit_{index:02d}.png")
+                args = dict(prompt=prompt, reference_paths=[p for p, _role, _label in images],
+                            output_path=output, cwd=str(self._session.directory),
+                            explicit_path=provider["cli_path"], model=provider["model"],
+                            timeout=int(provider["render_timeout"]), edit_base_path=source,
+                            edit_mask_path="", structure_control=None, product_projection_path=projection)
+                if self._direct_state is not None:
+                    from . import codex_direct
+                    result = codex_direct.generate_with_fallback(
+                        args, fallback=provider["generate"], state=self._direct_state,
+                        size=codex_direct.choose_edit_size(*dimensions, int(prefs.long_edge)),
+                        cancel_check=is_cancellation_requested, source_only=True)
+                else:
+                    result = provider["generate"](**args, source_only=True)
+                if is_cancellation_requested():
+                    raise RuntimeError("任务已取消")
+                if not Path(output).is_file() or not image_dimensions(output):
+                    raise RuntimeError("服务商没有返回可读取的图片。")
+                canvas = assess_canvas(image_dimensions(output), dimensions)
+                canvas["message"] = "" if canvas.get("exact_size") else "结果将按原图比例适配，未裁切。"
+                variant = {"variant": index, "best_path": output, "best_canvas": canvas, "best_score": -1}
+                results.append(result)
+                self._completed_variants.put(variant)
+            return results
+
+        if not self._start_thread(context, job):
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def _modal_source_only(self, context, event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        props = self._origin_scene.wondful_ai
+        self._drain_completed_variants(context, props)
+        props.last_score_note = "单图未执行基于三维模型的身份评分"
+        if self._thread and self._thread.is_alive():
+            self._progress_update(props, 0.10, 0.90)
+            return {"RUNNING_MODAL"}
+        self._drain_completed_variants(context, props)
+        props.last_score_note = "单图未执行基于三维模型的身份评分"
+        self._cleanup(context)
+        if self._error or self._export_errors or len(self._exported_by_variant) != self._variant_count:
+            detail = str(self._error[0]) if self._error else "；".join(self._export_errors) or "结果数量不足"
+            _status(props, "ERROR", safe_diagnostic(detail))
+            props.progress = 0.0
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        paths = [str(self._exported_by_variant[i]) for i in sorted(self._exported_by_variant)]
+        try:
+            props.result_image = load_image(paths[0], "Wondful_Result")
+            props.viewport_image = load_image(str(self._session.viewport_reference), "Wondful_Source")
+        except Exception as exc:
+            _status(props, "ERROR", f"结果已导出，但无法加载预览：{exc}")
+            self.report({"ERROR"}, props.last_error)
+            return {"CANCELLED"}
+        props.result_workflow = workflow.REFERENCE
+        props.compare_pair = "TARGET_RESULT"
+        props.last_viewport_path = str(self._session.viewport_reference)
+        props.last_result_path = props.last_export_path = paths[0]
+        props.last_export_paths = json.dumps(paths, ensure_ascii=False)
+        props.variant_count = len(paths)
+        props.progress, props.eta_seconds = 1.0, 0
+        props.last_total_seconds = time.perf_counter() - self._request_started_at
+        props.alignment_message = "单图未执行三维构图、轮廓或身份一致性自动验收。"
+        if self._direct_state is not None:
+            from .codex_direct import engine_note
+            props.last_engine_note = engine_note(self._direct_state)
+        save_metadata(self._session, {"type": "source_reference_edit", "inputs": self._source_inputs,
+            "image_roles": ["source_canvas", "product_projection", "product"], "source_size": list(self._camera_output_size),
+            "results": paths, "provider": self._provider_id, "provider_response": self._result,
+            "product_finish":self._source_repair_reports,
+            "capture_method": "SOURCE_PRODUCT_PROJECTION", "geometry_audit": False})
+        _status(props, "SUCCESS")
+        self.report({"INFO"}, f"原图编辑完成（自然融合，车灯/轮毂/标识待目视核验），已导出 {len(paths)} 张。")
+        return {"FINISHED"}
+
     def _on_cancelled(self, props):
         props.views_plan = ""
 
     def _modal(self, context, event):
+        if getattr(self, "_source_only_at_start", False):
+            return self._modal_source_only(context, event)
         result = self._modal_render(context, event)
         if "FINISHED" in result or "CANCELLED" in result:
             try:
@@ -4331,7 +4914,7 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         if event.type == "TIMER":
             # Finished variants are exported on the main thread while the next
             # remote request is still running; a later 429 must not discard them.
-            self._drain_completed_variants(props)
+            self._drain_completed_variants(context, props)
             if self._thread and self._thread.is_alive():
                 self._progress_update(props, 0.10, 0.88)
                 return {"RUNNING_MODAL"}

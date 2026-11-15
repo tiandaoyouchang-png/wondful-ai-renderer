@@ -128,9 +128,12 @@ class Brief(unittest.TestCase):
 class Prompts(unittest.TestCase):
     def test_negative_line_zh_en(self):
         t = SS.negative_text(allow=())
-        for w in ("行人", "人群", "其他车辆", "自行车", "动物", "静态物体", "pedestrians", "people", "other vehicles",
-                  "bicycles", "animals", "static scene", "the product itself excepted"):
+        for w in ("行人", "人群", "其他车辆", "自行车", "动物", "主体产品运动", "pedestrians", "people", "other vehicles",
+                  "bicycles", "animals", "shutter blur", "the product itself excepted"):
             self.assertIn(w, t)
+        self.assertNotIn("show only the static scene", t)
+        self.assertNotIn("只保留场景本身的静态物体", t)
+        self.assertIn("do not invent them for a still reference", t)
         self.assertEqual(SS.negative_text(allow={"person", "vehicle", "animal"}), "")
         t2 = SS.negative_text(allow={"person"})
         self.assertNotIn("行人", t2)

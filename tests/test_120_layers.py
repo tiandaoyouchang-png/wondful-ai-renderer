@@ -298,8 +298,39 @@ class WiringTest(unittest.TestCase):
         self.assertIn('"主体 + 投影"', props)
         self.assertIn('"完整（含干净背景）"', props)
         ui = (PKG / "ui.py").read_text(encoding="utf-8")
-        adv = ui.index('"ui_show_advanced", "高级"')
-        self.assertGreater(ui.index('_section(adv, "分层输出", "RENDERLAYERS", props, "layered_output")'), adv)
+        panel = next(n for n in ast.parse(ui).body if isinstance(n, ast.ClassDef) and n.name == "WONDFUL_PT_main")
+        draw = next(n for n in panel.body if isinstance(n, ast.FunctionDef) and n.name == "_draw_main")
+        disclosure = next(n for n in ast.walk(draw) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id == "_disclosure"
+                          and len(n.args) >= 4 and isinstance(n.args[2], ast.Constant)
+                          and n.args[2].value == "ui_show_advanced" and isinstance(n.args[3], ast.Constant)
+                          and n.args[3].value == "高级")
+        self.assertTrue(any(isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "adv"
+                            for t in n.targets) and isinstance(n.value, ast.Call)
+                            and ast.unparse(n.value) == "advanced.column()" for n in ast.walk(draw)))
+        output = next(n for n in ast.walk(draw) if isinstance(n, ast.If)
+                      and isinstance(n.test, ast.Compare) and ast.unparse(n.test) == "tab == 'OUTPUT'")
+        sections = [n for n in ast.walk(output) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "_section"
+                    and len(n.args) >= 5 and isinstance(n.args[1], ast.Constant)
+                    and n.args[1].value == "分层输出"]
+        self.assertEqual(len(sections), 1)
+        section = sections[0]
+        self.assertGreater(section.lineno, disclosure.lineno)
+        self.assertEqual([ast.literal_eval(section.args[i]) for i in (2, 4)], ["RENDERLAYERS", "layered_output"])
+        self.assertIsInstance(section.args[0], ast.Name)
+        container = section.args[0].id
+        assignments = [n for n in ast.walk(output) if isinstance(n, ast.Assign)]
+        self.assertTrue(any(any(isinstance(t, ast.Name) and t.id == container for t in n.targets)
+                            and isinstance(n.value, ast.Call) and ast.unparse(n.value) == "adv.column()"
+                            for n in assignments))
+        enabled = next(n.value for n in assignments if any(isinstance(t, ast.Attribute)
+                       and isinstance(t.value, ast.Name) and t.value.id == container and t.attr == "enabled"
+                       for t in n.targets))
+        self.assertEqual(ast.unparse(enabled), "not source_only")
+        self.assertTrue(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "prop"
+                            and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+                            and n.args[1].value == "layered_mode" for n in ast.walk(output)))
         ops = (PKG / "operators.py").read_text(encoding="utf-8")
         self.assertIn('product_mask_path = (self._layers or {}).get("mask", "")', ops)
         self.assertIn("mask_path=product_mask_path", ops)

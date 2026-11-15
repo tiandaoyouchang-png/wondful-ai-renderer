@@ -32,8 +32,8 @@ class ProductSingleTests(unittest.TestCase):
         look, det = pe.parse_product_analysis("产品外观：拉丝铝\n保留细节：表冠，刻度，表耳")
         self.assertEqual((look, det), ("拉丝铝", ["表冠", "刻度", "表耳"]))
         self.assertEqual(pe.parse_product_analysis("无法识别"), ("", []))
-        self.assertIn("不写任何颜色", pe.product_analysis_user_text("BLENDER"))
-        self.assertIn("固有色", pe.product_analysis_user_text("PRODUCT_REF"))
+        self.assertIn("不写或推断车身车漆颜色", pe.product_analysis_user_text("BLENDER"))
+        self.assertIn("当前 Blender 模型", pe.product_analysis_user_text("PRODUCT_REF"))
 
     def test_ui_hint_and_label(self):
         src = (PKG / "ui.py").read_text()

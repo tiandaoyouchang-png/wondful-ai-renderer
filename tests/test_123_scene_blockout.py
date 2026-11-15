@@ -272,7 +272,8 @@ class WiringTests(unittest.TestCase):
         massing = ui[ui.index("def _draw_massing("):ui.index("def _draw_block_refs")]
         self.assertNotIn("scene_blockout", massing)
         main = ui.split("class WONDFUL_PT_main")[1]
-        self.assertIn('reference, tools = _step_card(layout, 2, "目标图与粗模" if replica else "环境参考"', main)
+        self.assertIn('reference, tools = _step_card(layout, 2, "复刻目标图" if replica else "环境参考"', main)
+        self.assertIn('_draw_replica_blockout(adv, context, props, busy)', main)
         self.assertIn("if replica:", main)
         self.assertEqual(ui.count('"wondful.scene_blockout_build"'), 1)
         self.assertIn('"wondful.scene_blockout_build", text="生成新粗模版本"', ui)

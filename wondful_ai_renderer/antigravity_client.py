@@ -602,6 +602,9 @@ def generate_image(
     edit_base_path: str = "",
     edit_mask_path: str = "",
     structure_control: dict | None = None,
+    source_only: bool = False,
+    camera_capture: bool = False,
+    product_projection_path: str = "",
 ) -> dict:
     """Generate/edit one image through Antigravity CLI's built-in generate_image tool.
 
@@ -609,7 +612,20 @@ def generate_image(
     isolated render workspace and asks the agent to call generate_image with ImagePaths.
     """
     from . import static_scene as _SS
-    prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
+    if not source_only:
+        prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体
+    if source_only:
+        from .source_reference import validate_inputs
+        refs = list(reference_paths)
+        if len(refs) != (3 if product_projection_path else 2) or not edit_base_path or Path(edit_base_path).resolve() != Path(refs[0]).resolve() or edit_mask_path:
+            raise AntigravityError("单图编辑需要原图和产品身份图，不能使用遮罩。")
+        try:
+            primary = validate_inputs(refs[0], refs[-1], 3, projection=product_projection_path)
+            if [p for p, _r, _l in primary] != [str(Path(p).resolve()) for p in refs]:
+                raise ValueError("原图、产品投影和身份图顺序不正确。")
+        except (ValueError, OSError) as exc:
+            raise AntigravityError(str(exc)) from exc
+        reference_paths = refs
     cli = discover_antigravity_cli(explicit_path)
     if not cli:
         raise AntigravityNotInstalledError("未找到 Antigravity CLI（agy）。请先安装官方 Antigravity CLI。")
@@ -710,8 +726,9 @@ def generate_image(
     check_image_capacity(staged_refs, limit=MAX_ANTIGRAVITY_IMAGE_PATHS)
     # A bundled prompt names source paths; AGY uses staged paths. Do not let the
     # agent attach both copies or re-add the original cells of a sheet.
-    for src, rel in sorted(staged_by_source.items(), key=lambda item: len(str(item[0])), reverse=True):
-        prompt = prompt.replace(str(src), rel)
+    if not source_only:
+        for src, rel in sorted(staged_by_source.items(), key=lambda item: len(str(item[0])), reverse=True):
+            prompt = prompt.replace(str(src), rel)
 
     structure_note = ""
     if structure_control and structure_control.get("enabled"):
@@ -750,12 +767,12 @@ Mask/Depth/Normal/Silhouette/Part-ID 都是确定性控制数据，不是最终�
 
 核心规则：Blender 负责 Structure，Antigravity 生图（image-generator / generate_image）只负责 Appearance。
 Reference 1（若存在）是 Blender Camera Base，是原位编辑底图/构图基准；必须保持 Camera / Composition / Geometry / Position / Scale / Rotation / Perspective / Spatial Relationship。
-Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / Normal / Silhouette / Part-ID 分工提供确定性约束；产品图只补充身份与造型识别；环境／风格图决定产品受光；人物图只补充人物身份，均不能改写 Blender 构图。
+Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / Normal / Silhouette / Part-ID 分工提供确定性约束；产品图／三视图只补充各部件材质属性；当前 Blender 模型决定产品几何、灯组、轮辐和车漆色相；环境／风格图决定整图受光；人物图只补充人物身份，均不能改写 Blender 构图或重涂车漆。
 
 {REFERENCE_LIGHTING_POLICY}
 {structure_note}
 
-如果存在 Edit Base：必须使用本轮指定的图像编辑底图。它与 Reference 1 相同时，直接从原始白模重渲染；否则在候选结果上按修复范围纠偏。不能沿用其他轮次的底图或错误视角。
+如果存在 Edit Base：必须使用本轮指定的图像编辑底图。它与 Reference 1 相同时，{'直接编辑捕获的相机画面' if camera_capture else '直接从原始白模重渲染'}；否则在候选结果上按修复范围纠偏。不能沿用其他轮次的底图或错误视角。
 如果存在 Edit Mask：只在 Mask 对应的产品区域纠正位置、尺度、轮廓、接地点和视角，外部区域尽量不变。
 
 最终生成要求：
@@ -764,6 +781,22 @@ Reference 1 之后若存在 Structure Packet 图片，它们按 Mask / Depth / N
 禁止：zoom、pan、crop、reframe、换机位、改变焦段观感、改变主体数量、重新安排产品位置。
 完成后请确保真正产生一个位图文件。不要只回复文字描述。
 成功时回复 `WONDFUL_ANTIGRAVITY_IMAGEGEN_OK`，并在同一条回复里写出生成图片的绝对路径；如果 image-generator 与 generate_image 都不可用/被策略拒绝/失败，则以 `WONDFUL_ANTIGRAVITY_IMAGEGEN_UNAVAILABLE:` 开头说明原因。
+""".strip()
+    if source_only:
+        from .source_reference import PROJECTED_IDENTITY_POLICY
+        role_text = (PROJECTED_IDENTITY_POLICY if product_projection_path else
+                     "第一张是原始目标图及编辑画布，保留原有整图氛围；第二张是目标产品身份图，只核对部件材质。\n"
+                     "当前 Blender 模型决定替换产品的几何与车漆色相；按用户要求自然融合，除明确具体用户车漆请求外不得重涂。")
+        projection_note = "不得丢弃产品投影；" if product_projection_path else ""
+        task = f"""
+你是 Wondful 原图编辑执行器。优先使用 image-generator 子代理，或直接调用 generate_image，恰好编辑一张图片。
+ImageName = {target.name!r}
+ImagePaths = {image_paths_literal}
+{role_text}
+严格保留以上 {len(primary)} 张原始输入的顺序；{projection_note}不要添加其他输入或遮罩。
+完整生成要求：
+{prompt.strip()}
+不要用 Python、SVG、HTML、Blender 或外部 API 伪造图片。成功回复 WONDFUL_ANTIGRAVITY_IMAGEGEN_OK 和图片绝对路径；工具不可用或失败时回复 WONDFUL_ANTIGRAVITY_IMAGEGEN_UNAVAILABLE: 和原因。
 """.strip()
 
     args = [
@@ -905,12 +938,19 @@ def polish_prompt(
     explicit_path: str = "",
     model: str = "",
     timeout: int = 240,
+    response_format: str = "text",
 ) -> str:
+    if response_format == "text":
+        suffix = "\n\n只输出最终可直接用于图像生成的提示词正文。不要解释分析过程，不要输出 Markdown 标题或代码块。请组织成连续自然的一段正文，不要用空行分段，不要输出编号列表。"
+    elif response_format == "json":
+        suffix = "\n\n严格按系统要求只输出 JSON 对象；不要添加 Markdown、代码块或任何额外文字。"
+    else:
+        raise ValueError("response_format 必须是 text 或 json")
     prompt = (
         system_prompt.strip()
         + "\n\n--- 当前任务 ---\n"
         + user_text.strip()
-        + "\n\n只输出最终可直接用于图像生成的提示词正文。不要解释分析过程，不要输出 Markdown 标题或代码块。请组织成连续自然的一段正文，不要用空行分段，不要输出编号列表。"
+        + suffix
     )
     text = _exec_text(
         explicit_path=explicit_path,

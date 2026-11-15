@@ -405,7 +405,7 @@ class ConsistentUILayoutTests(unittest.TestCase):
             for prose in UIC.HELP.values():self.assertNotIn(prose,labels)
             self.assertTrue(any(x[:2]==('operator','wondful.ui_help') for x in log))
     def test_feedback_field_and_action_present_only_in_replica(self):
-        env=self.draw(T.props());ref=self.draw(T.props(workflow_mode=WF.REFERENCE))
+        env=self.draw(T.props());ref=self.draw(T.props(workflow_mode=WF.REFERENCE,ui_show_advanced=True,ui_adv_tab='MULTIVIEW'))
         self.assertFalse(any(x[:2]==('prop','replica_feedback') for x in env))
         self.assertTrue(any(x[:2]==('prop','replica_feedback') for x in ref))
         self.assertTrue(any(x[:2]==('operator','wondful.replica_refine') for x in ref))
