@@ -1,0 +1,191 @@
+{
+  "checked_date": "2026-11-15",
+  "code_commit": "d8cdba3c44230ff73d64e7b1dad02679af01b9d0",
+  "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p \"test_*.py\" -v",
+  "test_runtime": "Python 3.9; independent factory-startup Blender 5.1.0 where available; isolated temporary projects",
+  "initial_restricted_environment": {
+    "tests_run": 1107,
+    "seconds": 103.044,
+    "successful": false,
+    "summary": "FAILED (failures=3, errors=19, skipped=15)",
+    "nonpassing_tests": [
+      {
+        "outcome": "ERROR",
+        "test": "setUpClass (test_123_hull_placeholder.BlenderPlaceholderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "setUpClass (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_coast_cliffs_and_sea (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_desert_with_car_and_camera (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_interior_with_chair (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_snow_crowns_without_product (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_street_without_camera_follows_user_camera (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "setUpClass (test_125_precise_mode.BlenderPreciseTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_carrier_built_hidden (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_geometry_pass (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_interior_fallback (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_option_off_unchanged (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_precise_off_has_no_carrier (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_scene_completion_in_blockout (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_occlusion_adjust_restore_and_skip (test_130_interior_neon.BlenderCases)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_real_interior_with_chair_still_a_room (test_130_interior_neon.BlenderCases)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_street_with_completion_names_stays_outdoor (test_130_interior_neon.BlenderCases)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_untagged_interior_found_by_shape (test_130_interior_neon.BlenderCases)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_untagged_street_names_alone_not_a_room (test_130_interior_neon.BlenderCases)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_e2e (test_123_updater.BlenderUpdateE2E)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_ran (test_126_detail_blockout.BlenderDetailTest)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_rotated_curved_mesh_render_modifier_and_parent_scale (test_136_reference_geometry.EvaluatedProjectionBlenderTests)"
+      }
+    ]
+  },
+  "final_normal_blender_environment": {
+    "tests_run": 1123,
+    "seconds": 144.385,
+    "successful": false,
+    "summary": "FAILED (failures=8, errors=6, skipped=15)",
+    "nonpassing_tests": [
+      {
+        "outcome": "ERROR",
+        "test": "test_manual_size_and_cursor (test_123_hull_placeholder.BlenderPlaceholderTests)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_cached (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_cancel (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_correct (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_fail_names_stage (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "ERROR",
+        "test": "test_plain (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_ran (test_123_hull_placeholder.BlenderPlaceholderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_ran (test_123_sb_progress.OperatorStagesTest)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_coast_cliffs_and_sea (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_desert_with_car_and_camera (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_interior_with_chair (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_snow_crowns_without_product (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_street_without_camera_follows_user_camera (test_123_scene_blockout.BuilderBlenderTests)"
+      },
+      {
+        "outcome": "FAIL",
+        "test": "test_e2e (test_123_updater.BlenderUpdateE2E)"
+      }
+    ]
+  },
+  "known_failure_groups": [
+    "Missing expected Wondful scene-blockout collection in hull/builder fixtures",
+    "Progress fixture blocked by required valid product identity reference; subsequent trace keys absent",
+    "Updater isolated E2E: duplicate-copy detection/removal and completion note assertions"
+  ],
+  "visual_acceptance": false,
+  "new_external_generation_or_uploads_to_image_provider": 0,
+  "new_implementation_changes_during_archiving": false,
+  "checks": {
+    "source_snapshot_hashes": 50,
+    "image_copies_and_hashes": 14,
+    "images_decoded": 14,
+    "images_total_bytes": 20766749,
+    "max_staged_file_bytes": 2225101,
+    "git_diff_check": "passed",
+    "secret_shape_scan_candidates": 0,
+    "excluded_files_scan": "passed",
+    "repository_addon_matches_installed": {
+      "files": 87,
+      "different_files": 0
+    },
+    "original_assets_preserved": true,
+    "user_live_blender_not_operated": true
+  },
+  "status": "development snapshot; full regression and visual acceptance not passed; not a formal release"
+}

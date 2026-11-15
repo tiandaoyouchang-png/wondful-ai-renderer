@@ -1,0 +1,156 @@
+[
+  {
+    "file": "images/01-native-baseline-ai.png",
+    "source_artifact": "20261104-native-reference-e2e/outputs/01_AI原始结果.png",
+    "bytes": 2225101,
+    "sha256": "9a6c8911bffab4fd7d8ea983e884081707b40c45df4dec9a7dbe4e1701889d40",
+    "dimensions": [
+      1456,
+      816
+    ],
+    "note": "Earlier real AI image before native full-vehicle finalization; also reused by the later local replay."
+  },
+  {
+    "file": "images/02-native-baseline-composite.png",
+    "source_artifact": "20261104-native-reference-e2e/outputs/02_插件最终结果.png",
+    "bytes": 2030509,
+    "sha256": "8f32e2fc7c6af6eb8a8ecbee8eaedc8056ada46d57b8892932d46374e2ea7855",
+    "dimensions": [
+      1456,
+      816
+    ],
+    "note": "Earlier native composite; visually rejected for integration/paint/grounding."
+  },
+  {
+    "file": "images/03-neon-new-ai.png",
+    "source_artifact": "20261111-image-endpoint-fix/outputs/AI原始结果_新生成.png",
+    "bytes": 2224850,
+    "sha256": "7894520b435b4cb2eeac6faff6c17d76fb33f2dab6eaf62ddc0e9159c59b98ce",
+    "dimensions": [
+      1675,
+      939
+    ],
+    "note": "Fresh neon image returned by the repaired image endpoint."
+  },
+  {
+    "file": "images/04-neon-natural-final.png",
+    "source_artifact": "20261111-image-endpoint-fix/outputs/自然融合_新生成.png",
+    "bytes": 2115398,
+    "sha256": "714bf775a7d97381d627501fa575064f74a426bb1253ffcde09e6fb48c3629ce",
+    "dimensions": [
+      1456,
+      816
+    ],
+    "note": "Exported fresh neon result; precise identity and geometry not certified."
+  },
+  {
+    "file": "images/05-desert-baseline-ai.png",
+    "source_artifact": "20261111-desert-natural-e2e-matched-canvas/outputs/沙漠_AI原始结果.png",
+    "bytes": 1996389,
+    "sha256": "7dd1086f5f3af1166aa76b1f2b51309fb4c31f81ca9a51b9131e55ef691e4a48",
+    "dimensions": [
+      1672,
+      941
+    ],
+    "note": "Fresh desert test raw; visual acceptance failed."
+  },
+  {
+    "file": "images/06-desert-baseline-final.png",
+    "source_artifact": "20261111-desert-natural-e2e-matched-canvas/outputs/沙漠_本轮新生成.png",
+    "bytes": 1410783,
+    "sha256": "a517f835bd8a12a2a53f29e5ff5e172444df19a1f889f2d0a3f552c495c08762",
+    "dimensions": [
+      1280,
+      720
+    ],
+    "note": "Desert final; product placement and surface realism not accepted."
+  },
+  {
+    "file": "images/07-desert-model-projection.png",
+    "source_artifact": "20261111-desert-natural-e2e-matched-canvas/outputs/沙漠_本轮模型投影.png",
+    "bytes": 340092,
+    "sha256": "c633144b972decb7e0b3fe7ab55383ac3fa813edb4712878e08eb6728cb96d54",
+    "dimensions": [
+      1280,
+      720
+    ],
+    "note": "Actual 1280x720 same-camera projection used as structure guidance."
+  },
+  {
+    "file": "images/08-paint-v1-ai.png",
+    "source_artifact": "20261111-paint-realism-fix/outputs/v1-rejected/车漆候选V1_AI原始.png",
+    "bytes": 1986425,
+    "sha256": "94acc6bf74f8c51fc5a82486d856883ee4910e6475acbe31d56fec71a389b8db",
+    "dimensions": [
+      1672,
+      941
+    ],
+    "note": "Fresh paint V1 raw; rejected for graphic reflection bands."
+  },
+  {
+    "file": "images/09-paint-v1-final-rejected.png",
+    "source_artifact": "20261111-paint-realism-fix/outputs/v1-rejected/车漆候选V1_新生成.png",
+    "bytes": 1409887,
+    "sha256": "151dcfb7da1eb10a1cf328a1025297ed36a69ee182311640386acd789431a7ba",
+    "dimensions": [
+      1280,
+      720
+    ],
+    "note": "Paint V1 exported result; rejected."
+  },
+  {
+    "file": "images/10-paint-v2-ai.png",
+    "source_artifact": "20261111-paint-realism-fix/outputs/v2-accepted/车漆修复_沙漠_AI原始.png",
+    "bytes": 1951535,
+    "sha256": "dbfedc4b4c4b5cd140392896fc1926b476220d110748ae10c15ab606b4c0061b",
+    "dimensions": [
+      1672,
+      941
+    ],
+    "note": "Fresh paint V2 raw; initially paint-only pass, later rejected by user."
+  },
+  {
+    "file": "images/11-paint-v2-final-user-rejected.png",
+    "source_artifact": "20261111-paint-realism-fix/outputs/v2-accepted/车漆修复_沙漠_新生成.png",
+    "bytes": 1395423,
+    "sha256": "13585478f4958f632f5186b51555506f4f7e8eaae4d62eb0bbe6234dd361d839",
+    "dimensions": [
+      1280,
+      720
+    ],
+    "note": "Paint V2 final; current user verdict is failed paint realism/detail preservation. Original folder name does not determine acceptance."
+  },
+  {
+    "file": "images/12-native-model-2x.png",
+    "source_artifact": "20261112-reference-led-paint-audit/native-detail-2x.png",
+    "bytes": 1352625,
+    "sha256": "d1cc25bf47fd809d0b9b37ad385a86726e89a4e22989bedafb3c858a8201bbcf",
+    "dimensions": [
+      2560,
+      1440
+    ],
+    "note": "Fresh LOCAL native model render at2560x1440; not an AI generation or upscaled old projection."
+  },
+  {
+    "file": "images/13-native-front-crop.png",
+    "source_artifact": "20261112-reference-led-paint-audit/native-front-detail.png",
+    "bytes": 200782,
+    "sha256": "542ebc627d409a9e616f616330f1ee4bc543df65200bb4d7b8cef95f8b7144cb",
+    "dimensions": [
+      520,
+      390
+    ],
+    "note": "Unresampled original-pixel crop from local 2x native render."
+  },
+  {
+    "file": "images/14-native-side-crop.png",
+    "source_artifact": "20261112-reference-led-paint-audit/native-side-detail.png",
+    "bytes": 126950,
+    "sha256": "9175595cb69f322dcaf890c9cc1c04aecd9035cb5ad1cd904a9cd1f224de0228",
+    "dimensions": [
+      375,
+      325
+    ],
+    "note": "Unresampled original-pixel crop from local 2x native render."
+  }
+]
