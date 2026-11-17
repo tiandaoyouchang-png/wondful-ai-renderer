@@ -44,44 +44,54 @@ VISIBLE_IDENTITY_POLICY = (
 )
 
 PAINT_FINISH_POLICY = (
-    "仅针对涂漆/喷涂表面：Blender 模型的几何与基础色相不代表预览打光或哑光质感；"
-    "应从身份图中推断真实车漆光泽与清漆层响应，而不复制身份图的银灰偏色或摄影棚高光形状；"
-    "严格遵从用户明确指定的哑光或高光要求；不确定时不得凭空臆造金属闪粉或珠光颗粒。"
-    "图 1 旧产品的漆面颜色、高光条纹、反射形状与表面涂装都不属于环境依据，随旧产品一并舍弃；环境证据只来自天空、地面、可见建筑或光源。"
-    "按可见环境及身份漆面的反射柔化程度重建受控清漆响应；不要靠增加反射锐度或能量来制造真实感；无对应场景来源时不凭空加入棚拍硬边亮带、闭合色带或镜面镀铬。"
-    "场景天空与地面的真实反射、高光滚降须随表面曲率与视线方向连续过渡，局部 RGB 亮度随受光自然变化，而非整体重涂色相。"
-    "严禁将车身处理为单调统一的绿色色块平涂、烘焙平坦的预览着色、塑料玩具感或镜面镀铬过度饱和等投机效果；"
-    "不要强行将所有车漆一律设为高光镜面。"
+    "车漆按真实汽车清漆漆面渲染：基础色相保持 Blender 模型颜色，表面是一层光滑透明清漆。"
+    "朝上的引擎盖、车顶和肩线映出来源照片的天空颜色与亮度，朝下的门板下半部和裙边映出地面颜色，"
+    "侧面沿车身腰线有一条随曲面弯曲的地平线反射分界；太阳或主光在曲面最高点形成小而锐利的镜面高光，"
+    "掠射角处反射增强（菲涅尔），背光面保留深色但仍带环境反射。反射随曲率连续变化，亮度在同一块漆面内自然渐变。"
+    "图 2 光照参考里的反射只说明曲面走向和漆面的光泽程度，最终反射内容、颜色和光线方向以来源照片为准。"
+    "不采用来源照片中旧车的漆色或高光形状。用户明确要求哑光或缎面时按用户要求处理；未有依据时不加金属闪粉或珠光。"
+)
+
+DETAIL_FIDELITY_POLICY = (
+    "车身细节逐项保留并清晰可见：门缝和板件分缝是细而暗的连续线，门把手、充电口盖、后视镜、"
+    "前后灯组的内部灯条与透镜层次、进气口格栅、轮毂每根轮辐、刹车卡钳、轮胎胎侧、车标与车牌文字"
+    "都保持图 1 中的数量、位置、形状与比例，以照片级清晰度重新受光，不得简化、平滑、合并或删除。"
 )
 
 PROJECTED_IDENTITY_POLICY = (
-    "图 1 是原始目标画布，控制环境、光照与摄影效果；图 2 是当前相机下真实产品的独立 RGBA 投影，"
-    "替换原图中的旧产品，并控制可见几何、部件排列、位置、尺度、透视与轮廓，包括已建模的灯具内部和轮毂结构。"
-    "图 3 是完整产品身份参考，三视图或身份图只确定各部件的材质属性，不能决定车身车漆色相或任何几何；"
-    "不得用身份图或其裁切重设计投影中已建模的灯组、轮辐或其他可见部件。"
-    "车漆色相保持当前 Blender 模型，除非用户明确指定具体车漆颜色；环境只能改变受光和反射，不能给车漆重上色。"
-    "不臆造隐藏结构，不复制身份图的背景或灯光。"
-    + PAINT_FINISH_POLICY
+    "图 1 是原始来源照片，目标产品已由 Blender 按同一相机渲染并放置在最终位置：保留该产品的位置、尺度、透视、"
+    "朝向、轮廓、车轮位置与接地点，以及全部已建模部件；照片中的环境、地面、天空、光线方向、色温、曝光与镜头效果保持不变。"
+    "把图 1 中的产品重新渲染成与照片同一光照下拍摄的真实车辆：替换掉 Blender 的预览光照与阴影，使用照片的主光方向、"
+    "环境光、反射和接触阴影，轮胎压在地面上并有贴合的接触阴影。"
+    "若图 1 中新产品轮廓之外还残留旧车的任何部分（车顶、车尾、车轮、阴影或反光），将其清除并按周围环境补全背景。"
+    "图 2 是同一产品在同一相机下的独立光照参考（透明背景），用于核对几何、部件排列和漆面光泽，不决定环境或光线方向。"
+    "图 3 是完整产品身份参考，三视图或身份图只确定各部件的材质属性，不能决定车身车漆色相或任何几何；不得用身份图或其裁切重设计投影中已建模的灯组、轮辐或其他可见部件。"
+    "车漆色相保持当前 Blender 模型，除非用户明确指定具体车漆颜色。不臆造隐藏结构，不复制身份图的背景或灯光。"
+    + DETAIL_FIDELITY_POLICY + PAINT_FINISH_POLICY
 )
 PROJECTED_POLISH_SYSTEM = (
     "你是产品结构约束下的参考图编辑提示词导演。" + PROJECTED_IDENTITY_POLICY
-    + "保留完整用户需求，输出完整中文生图提示词正文。不要描述成粗模、环境白模或自动几何验收。"
+    + "保留完整用户需求，输出完整中文生图提示词正文。用正面、具体的光线与材质描述写作，"
+    "说明来源照片的主光方向、天空与地面颜色以及它们在车漆上的反射位置。不要描述成粗模、环境白模或自动几何验收。"
 )
 PROJECTED_EDIT_INSTRUCTIONS = (
     "Use image_generation exactly once to edit input 1 and return one image. "
-    "Input 1 is the original environment/lighting/photographic canvas. Input 2 is a fresh same-camera "
-    "product-only RGBA projection of the actual model: replace the source's old product with this model; "
-    "the projection controls visible geometry, part arrangement, "
-    "position, scale, perspective and silhouette, including modeled lamp internals and wheel structures. "
-    "Input 3 is complete product identity for component material properties only; identity and its spatial crops "
-    "must not redesign any visible modeled parts or change body-paint hue. Preserve only an explicit concrete user paint-colour request. "
-    "Do not invent hidden geometry or copy identity lighting/background. No mask or other tool. "
-    "Discard the old source product's paint, highlights and reflection shapes as material or lighting evidence. "
-    "Match reflection blur to visible identity finish and environment; do not invent hard-edged reflection bands or closed graphic swirls without a corresponding scene source. "
-    "For painted surfaces: model geometry/base hue do not imply preview lighting or matte finish; "
-    "infer evidenced paint gloss/clearcoat response from identity without copying silver hue or studio highlight shapes; "
-    "honor explicit user matte/gloss; do not invent unevidenced metallic flakes or pearl. "
-    "Curvature reflections and lighting rolloff vary continuously with environment; avoid flat solid fills, baked preview shading, toy plastic, or chrome over-saturation shortcuts without forcing all paint glossy."
+    "Input 1 is the original photograph with the target product already rendered into it by Blender from the same "
+    "camera: keep that product's exact position, scale, perspective, silhouette, wheel positions and ground contact, "
+    "and keep every modeled part (panel gaps, door handles, mirrors, lamp internals, grille, every wheel spoke, brake "
+    "calipers, badges and plate text) with the same count, shape and placement. Keep the photograph's environment, "
+    "light direction, colour temperature, exposure and lens effects. Re-render the product photographically under the "
+    "photograph's light: replace Blender's preview shading with the scene's key light, sky and ground reflections and a "
+    "tight contact shadow under each tyre. Remove any leftover part of the photograph's original vehicle outside the "
+    "new silhouette and restore the background there. "
+    "Input 2 is the same product alone on transparency (lighting reference for geometry and paint glossiness only, "
+    "not for environment or light direction). Input 3 is product identity for component material properties only; "
+    "it must not redesign modeled parts or change body-paint hue. Preserve only an explicit concrete user paint colour. "
+    "Body paint is glossy automotive clearcoat over the model's base hue: upward surfaces reflect the photograph's "
+    "sky, lower body sides reflect the ground, a curved horizon reflection line follows the body side, the sun gives "
+    "small sharp specular highlights, reflections strengthen at grazing angles and vary continuously with curvature. "
+    "Honour an explicit user matte/satin request; do not add unevidenced metallic flake or pearl. "
+    "Do not copy the old vehicle's paint or highlight shapes. No mask or other tool."
 )
 
 
@@ -189,9 +199,10 @@ def validate_inputs(source, identity, limit, projection=""):
         raise ValueError("当前服务商无法完整接收原图、产品结构参考和身份图。" if projection else
                          "当前服务商无法同时接收原图和产品身份图。")
     images = []
-    primary = [(source, "source_canvas", "原始目标图，编辑画布")]
+    primary = [(source, "source_canvas", "来源照片编辑画布（目标产品已按同一相机放置在最终位置）" if projection
+                else "原始目标图，编辑画布")]
     if projection:
-        primary.append((projection, "product_projection", "当前相机真实产品独立 RGBA 投影（可见几何及部件排列权威）"))
+        primary.append((projection, "product_projection", "同一相机下目标产品的独立光照参考（几何、部件排列与漆面光泽）"))
     primary.append((identity, "product", "目标产品身份图：仅核对部件材质；不改模型几何或车漆色相"))
     for path, role, label in primary:
         p = str(Path(path).expanduser().resolve())

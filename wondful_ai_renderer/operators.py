@@ -2919,7 +2919,8 @@ class WONDFUL_OT_polish_prompt(_BaseAsyncOperator):
                     identity, self._session.directory, "product_reference")
                 _validate_source_image(target_copy)
                 _validate_source_image(identity_copy)
-                self._product_projection = product_projection.capture(context, props, self._session.directory, self._source_dimensions)
+                self._product_projection = product_projection.capture(context, props, self._session.directory, self._source_dimensions,
+                                                                           source_path=target_copy)
                 from . import reference_material_plan
                 self._material_catalog = reference_material_plan.catalog(context, props)
                 validate_inputs(target_copy, identity_copy, provider.get("reference_limit", MAX_IMAGE_PATHS),
@@ -3581,6 +3582,31 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             print(f"[Wondful] 细节修复：生图编辑不可用，改用 Blender 回贴：{exc}")
             spec["edit_fn"] = None
 
+    def _source_detail_edit_fn(self, props, prefs, provider):
+        """Crop-regeneration function for the source-only 细节修复 (same rules as the camera path:
+        none when 「最多生成次数」 is 1 — then only gated small-region Blender paste)."""
+        from .result_worker import crop_regen_allowed
+        # 2026-11: opt-in. In four YU7 rounds every automatic crop regeneration was rejected by the
+        # gate (calls spent, nothing changed); the free Blender paste stays on.
+        if not bool(getattr(prefs, "source_detail_regen", False)):
+            return None
+        if not crop_regen_allowed(getattr(prefs, "alignment_max_attempts", 3)):
+            return None
+        try:
+            from .cli_transport import is_cancellation_requested
+            from .detail_refine import make_edit_fn
+            return make_edit_fn(
+                provider["id"], model=str(provider.get("model", "") or ""),
+                client_version=str(getattr(props, "codex_cli_version", "") or ""),
+                cli_path=str(provider.get("cli_path", "") or ""),
+                timeout=max(60, min(600, int(provider.get("render_timeout", 300) or 300))),
+                log_dir=str(self._session.directory), cancel_check=is_cancellation_requested,
+                direct_edit=bool(getattr(prefs, "codex_direct_edit", True)),
+                imagegen_enabled=bool(provider.get("imagegen_enabled", True)))
+        except Exception as exc:
+            print(f"[Wondful] 原图编辑细节修复：生图编辑不可用，改用 Blender 小区域回贴：{exc}")
+            return None
+
     def _apply_detail_paste(self, props, variant_final, variant_index):
         """Main-thread fallback (the worker could not read the file): 细节检查 + Blender paste of
         failed parts only — no image-model call on Blender's main thread. Returns (path, raw or None)."""
@@ -3610,8 +3636,10 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             props.last_detail_note = f"细节修复失败（已保留原图）：{str(exc)[:80]}"
             return variant_final, None
 
-    def _apply_source_detail_repair(self, context, props, image, variant_index, raw_source):
-        """Main-thread natural-fusion finalization of a source-only image; preserves fitted AI pixels and raw provider source."""
+    def _apply_source_detail_repair(self, context, props, image, variant_index, raw_source, worker=None):
+        """Main-thread finalization of a source-only image: freshness checks, then the worker's
+        silhouette check + small-part repair (``result_worker.source_detail_step``) when it ran on
+        exactly this provider image; otherwise the fitted AI pixels. The raw provider file is kept."""
         spec=self._source_repair
         from .source_reference import matches, fingerprint
         from . import product_projection, reference_material_plan
@@ -3627,11 +3655,25 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         raw_fp = fingerprint(raw_source)
         fitted_fp = fingerprint(image)
         note = '自然融合完成：保留 AI 生成的整体光影和环境融合；车灯、轮毂与标识细节待人工目视核验。'
+        final = Path(image)
+        detail_report = None
+        iou = None
+        if worker and worker.get('raw') == raw_fp:
+            iou = worker.get('iou')
+            detail_report = worker.get('report')
+            refined = worker.get('refined') or ''
+            if refined and Path(refined).is_file():
+                final = Path(refined)
+            if worker.get('note'):
+                note = '自然融合完成；' + worker['note']
         report = {
             'method': 'natural_fusion',
             'native_replacement': False,
-            'geometry_audit': False,
-            'detail_review_required': True,
+            'geometry_audit': iou is not None,
+            'silhouette_iou': iou,
+            'detail_repair': {k: v for k, v in (detail_report or {}).items() if k != 'image'} or None,
+            'detail_review_required': not (iou and iou.get('passed') and detail_report
+                                           and int(detail_report.get('passed', 0) or 0) >= int(detail_report.get('checked', 0) or 0) > 0),
             'raw_provider_image': raw_fp,
             'raw_fitted_canvas': fitted_fp,
             'material_plan': spec.get('material_plan', []),
@@ -3639,10 +3681,19 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
             'helpers_frozen': True,
             'summary': note,
         }
-        (directory/'natural-finish-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+        if report['detail_review_required'] and '人工目视核验' not in note:
+            note += '；车灯、轮毂与标识细节待人工目视核验。'
+        report['summary'] = note
+        report['placement'] = getattr(self, '_placement_report', None)
+        report['clean_plate'] = getattr(self, '_plate_report', None)
+        report['local_canvas'] = getattr(self, '_crop_report', None)
+        report['final_image'] = fingerprint(final)
+        (directory/'natural-finish-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,default=str)+'\n',encoding='utf-8')
         self._source_repair_reports[variant_index]=report
         props.last_detail_note=note
-        return Path(image),Path(raw_source)
+        if iou and iou.get('iou') is not None:
+            props.last_iou_note = '单图产品轮廓 IoU %.3f · %s' % (float(iou['iou']), iou.get('verdict') or '')
+        return final,Path(raw_source)
 
     def _identity_score(self, props, image, spec, matid, raw=None, variant_index=None):
         """1.2.1 识别分: score the raw AI image (raw=None) or the pasted one (raw given: writes the
@@ -3766,7 +3817,8 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                             restored_path,
                         ))
                     if getattr(self,'_source_only_at_start',False) and getattr(self,'_source_repair',None):
-                        variant_final,variant_raw=self._apply_source_detail_repair(context,props,variant_final,variant_index,source)
+                        variant_final,variant_raw=self._apply_source_detail_repair(context,props,variant_final,variant_index,source,
+                                                                                        worker=variant.get('source_detail'))
                     else:
                         variant_final, variant_raw = self._apply_detail_paste(props, variant_final, variant_index)
                     from .result_worker import photo_finish_step
@@ -4731,13 +4783,18 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
                 raise ValueError("产品投影在润色后发生变化，请重新生成。")
             helper_paths=product_projection.freeze_helpers(approval['projection'],self._session.directory)
             from .source_reference import fingerprint
+            # 2026-11 review: the photograph with the lit product already placed at the exact camera
+            # position is the edit canvas, so position / scale / silhouette are pinned by pixels.
+            edit_canvas = helper_paths.get('canvas')
+            if not edit_canvas:
+                raise ValueError("缺少已放置产品的来源画布，请重新点击生成并完成 AI 润色。")
             self._source_repair={'projection':projection,**helper_paths}
             self._source_repair['path_snapshots']={key:fingerprint(path) for key,path in self._source_repair.items()}
             self._source_repair['projection_record']=approval['projection']
             self._source_repair['material_plan']=approval['material_plan']
             self._source_repair['material_catalog']=approval['material_catalog']
             self._source_repair_reports={}
-            images = validate_inputs(source, product, provider.get("reference_limit", MAX_IMAGE_PATHS), projection=projection)
+            images = validate_inputs(edit_canvas, product, provider.get("reference_limit", MAX_IMAGE_PATHS), projection=projection)
             user_info = _source_user_info(props)
             original_request=approval.get('user_request','')
             if original_request and original_request not in approval['prompt'] and original_request not in user_info:
@@ -4787,33 +4844,145 @@ class WONDFUL_OT_ai_render(_BaseAsyncOperator):
         props.progress, props.eta_seconds = 0.05, int(self._estimated_total)
         _status(props, "RENDERING")
 
+        detail_helpers = {k: self._source_repair.get(k, "") for k in ("detail", "keep", "matid")}
+        detail_edit_fn = self._source_detail_edit_fn(props, prefs, provider)
+        detail_vehicle = self._detail_vehicle(props)
+
+        use_plate = (self._direct_state is not None and provider["id"] == "codex"
+                     and bool(getattr(prefs, "source_clean_plate", True)))
+        plate_long_edge = int(getattr(prefs, "long_edge", 2048) or 2048)
+        self._plate_report = {"enabled": use_plate}
+        self._placement_report = {"enabled": provider["id"] == "codex"}
+        located_box = {}
+
+        def placement_guard(cancel_check):
+            """2026-11: locate the photograph's own vehicle (one cached vision call) and stop before
+            any image edit when the current camera clearly does not put the car where it stood."""
+            if provider["id"] != "codex" or not bool(getattr(prefs, "source_placement_guard", True)):
+                return
+            from .png_io import read_png
+            from . import vehicle_locate as VL
+            try:
+                ask = VL.codex_ask_fn(model=provider["model"],
+                                      client_version=str(getattr(props, "codex_cli_version", "") or ""),
+                                      cancel_check=cancel_check)
+                located = VL.locate(source, ask)
+            except Exception as exc:
+                print(f"[Wondful] 参考图车辆定位失败，跳过对齐检查：{exc}")
+                self._placement_report.update(error=str(exc)[:200])
+                return
+            located_box.update(located)
+            check = VL.placement_check(located, read_png(detail_helpers["detail"])[..., 3])
+            self._placement_report.update(located=located, check=check)
+            if check["verdict"] == "fail":
+                raise RuntimeError(check["reason"])
+
+        def clean_plate_canvas(cancel_check):
+            """2026-11: remove the photograph's own vehicle (one masked edit, cached per photo) and
+            composite the lit product over that plate; on any failure keep the frozen canvas."""
+            if not use_plate:
+                return edit_canvas
+            try:
+                from .png_io import read_png
+                from .product_lookdev import build_canvas
+                from .source_plate import make_plate, codex_edit_fn
+                fn = codex_edit_fn(model=provider["model"], client_version=str(getattr(props, "codex_cli_version", "") or ""),
+                                   long_edge=plate_long_edge, timeout=int(provider["render_timeout"]),
+                                   log_dir=str(self._session.directory), cancel_check=cancel_check)
+                extra = None
+                if located_box.get("found"):
+                    from .vehicle_locate import old_vehicle_region
+                    extra = old_vehicle_region(located_box, (dimensions[1], dimensions[0]))
+                info = make_plate(source, read_png(detail_helpers["detail"])[..., 3], self._session.directory / "plate",
+                                  fn, cancel_check=cancel_check, extra_region=extra)
+                out = self._session.directory / "source_product_canvas_plate.png"
+                build_canvas(info["path"], projection, detail_helpers["detail"], out)
+                self._plate_report.update(info, canvas=str(out), used=True)
+                return str(out)
+            except Exception as exc:
+                print(f"[Wondful] 去车空镜失败，改用原图画布：{exc}")
+                self._plate_report.update(used=False, error=str(exc)[:200])
+                return edit_canvas
+
+        use_crop = (self._direct_state is not None and provider["id"] == "codex"
+                    and bool(getattr(prefs, "source_local_canvas", True)))
+        self._crop_report = {"enabled": use_crop}
+
+        def local_canvas(full_canvas):
+            """2026-11 局部画布: edit a 3:2 crop where the product fills ~62 % of the width, then paste
+            the result back into the photograph (the clean plate when there is one)."""
+            if not use_crop:
+                return None
+            try:
+                from .png_io import read_png
+                from .source_crop import crop_box, crop_file
+                alpha = read_png(detail_helpers["detail"])[..., 3].astype("float32") / 255.0
+                cam_box = crop_box(alpha)
+                if cam_box is None:
+                    self._crop_report.update(used=False, reason="product already fills the frame")
+                    return None
+                d = self._session.directory
+                base = self._plate_report.get("path") if self._plate_report.get("used") else source
+                # the plate/photo and the canvas have the photograph's size, the passes the camera's
+                # (same aspect, possibly another resolution)
+                sx = dimensions[0] / float(alpha.shape[1])
+                sy = dimensions[1] / float(alpha.shape[0])
+                box = (int(round(cam_box[0] * sx)), int(round(cam_box[1] * sy)),
+                       min(dimensions[0], int(round(cam_box[2] * sx))), min(dimensions[1], int(round(cam_box[3] * sy))))
+                info = {"box": box, "base": base, "size": (box[2] - box[0], box[3] - box[1]),
+                        "alpha": alpha[cam_box[1]:cam_box[3], cam_box[0]:cam_box[2]],
+                        "canvas": crop_file(full_canvas, box, d / "source_crop_canvas.png"),
+                        "projection": crop_file(projection, cam_box, d / "source_crop_projection.png", keep_alpha=True)}
+                self._crop_report.update(used=True, box=list(box))
+                return info
+            except Exception as exc:
+                print(f"[Wondful] 局部画布失败，改用整张画布：{exc}")
+                self._crop_report.update(used=False, error=str(exc)[:200])
+                return None
+
         def job():
             from .cli_transport import is_cancellation_requested
             results = []
+            placement_guard(is_cancellation_requested)
+            base_canvas = clean_plate_canvas(is_cancellation_requested)
+            edit_base, edit_projection, edit_dims = base_canvas, projection, tuple(dimensions)
+            crop = local_canvas(base_canvas)
+            if crop:
+                edit_base, edit_projection, edit_dims = crop["canvas"], crop["projection"], crop["size"]
+            refs = [edit_base, edit_projection] + [p for p, _role, _label in images][2:]
             for index in range(1, self._variant_count + 1):
                 if is_cancellation_requested():
                     raise RuntimeError("任务已取消")
                 output = str(self._session.directory / f"source_edit_{index:02d}.png")
-                args = dict(prompt=prompt, reference_paths=[p for p, _role, _label in images],
-                            output_path=output, cwd=str(self._session.directory),
+                provider_out = str(self._session.directory / f"source_edit_{index:02d}_crop.png") if crop else output
+                args = dict(prompt=prompt, reference_paths=list(refs),
+                            output_path=provider_out, cwd=str(self._session.directory),
                             explicit_path=provider["cli_path"], model=provider["model"],
-                            timeout=int(provider["render_timeout"]), edit_base_path=source,
-                            edit_mask_path="", structure_control=None, product_projection_path=projection)
+                            timeout=int(provider["render_timeout"]), edit_base_path=edit_base,
+                            edit_mask_path="", structure_control=None, product_projection_path=edit_projection)
                 if self._direct_state is not None:
                     from . import codex_direct
                     result = codex_direct.generate_with_fallback(
                         args, fallback=provider["generate"], state=self._direct_state,
-                        size=codex_direct.choose_edit_size(*dimensions, int(prefs.long_edge)),
+                        size=codex_direct.choose_edit_size(*edit_dims, int(prefs.long_edge)),
                         cancel_check=is_cancellation_requested, source_only=True)
                 else:
                     result = provider["generate"](**args, source_only=True)
                 if is_cancellation_requested():
                     raise RuntimeError("任务已取消")
-                if not Path(output).is_file() or not image_dimensions(output):
+                if not Path(provider_out).is_file() or not image_dimensions(provider_out):
                     raise RuntimeError("服务商没有返回可读取的图片。")
+                if crop:
+                    from .source_crop import paste_back
+                    self._crop_report.setdefault("pastes", []).append(
+                        paste_back(provider_out, crop["base"], crop["box"], output, product_alpha=crop["alpha"]))
                 canvas = assess_canvas(image_dimensions(output), dimensions)
                 canvas["message"] = "" if canvas.get("exact_size") else "结果将按原图比例适配，未裁切。"
                 variant = {"variant": index, "best_path": output, "best_canvas": canvas, "best_score": -1}
+                from .result_worker import source_detail_step
+                variant["source_detail"] = source_detail_step(
+                    output, index, detail_helpers, dimensions[0], dimensions[1], self._session.directory,
+                    edit_fn=detail_edit_fn, cancel_check=is_cancellation_requested, vehicle=detail_vehicle)
                 results.append(result)
                 self._completed_variants.put(variant)
             return results

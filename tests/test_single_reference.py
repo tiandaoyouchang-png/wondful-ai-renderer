@@ -266,7 +266,7 @@ class SourceTransportTests(unittest.TestCase):
         self.assertEqual(result['identity_details']['source_image_number'], 3)
         text = payload['prompt']
         self.assertIn(self.SR.PROJECTED_EDIT_INSTRUCTIONS, text)
-        self.assertIn('must not redesign any visible modeled parts', text)
+        self.assertIn('must not redesign modeled parts', text)
         self.assertEqual(text.count(self.brief), 1)
         self.assertIn('不得用身份图或其裁切重设计', text)
         for crop in result['identity_details']['crops']:
@@ -565,6 +565,9 @@ class SourceOperatorTests(unittest.TestCase):
         self.isolated_stub('appearance_lock',**{k:v for k,v in vars(real_lock).items() if not k.startswith('__')})
         real_engine=load_package_module('prompt_engine')
         self.isolated_stub('prompt_engine',**{k:v for k,v in vars(real_engine).items() if not k.startswith('__')})
+        # the real worker-side steps (source 细节修复, crop-regeneration budget); other suites stub it
+        real_worker=load_package_module('result_worker')
+        self.isolated_stub('result_worker',**{k:v for k,v in vars(real_worker).items() if not k.startswith('__')})
         self.ns.update(AntigravityNotLoggedInError=AGY.AntigravityNotLoggedInError,
                        AntigravityNotInstalledError=AGY.AntigravityNotInstalledError,
                        CodexNotLoggedInError=CC.CodexNotLoggedInError,CodexNotInstalledError=CC.CodexNotInstalledError)
@@ -579,12 +582,20 @@ class SourceOperatorTests(unittest.TestCase):
                          [[tuple(s.material.diffuse_color) for s in getattr(o,'material_slots',()) if s.material]
                           for o in collection.all_objects] if collection else None,
                          context.scene.frame_current, self.geometry_revision))
-        def capture(context, props, directory, dimensions):
-            path = Path(directory)/'product_projection.png'
+        def capture(context, props, directory, dimensions, source_path=""):
+            flat = Path(directory)/'product_projection.png'
             rgba = np.zeros((dimensions[1], dimensions[0], 4), np.uint8)
             rgba[3:-3, 5:-5] = (30, 70, 180, 255)
-            PNG.write_png(path, rgba)
-            helpers={}
+            PNG.write_png(flat, rgba)
+            # 2026-11: the AI-facing reference is the lit pass; the flat pass and the placed-product
+            # canvas travel as frozen helpers
+            path = Path(directory)/'product_lookdev.png'
+            lit = rgba.copy(); lit[3:-3, 5:-5] = (40, 120, 60, 255)
+            PNG.write_png(path, lit)
+            canvas = Path(directory)/'source_product_canvas.png'
+            PNG.write_png(canvas, np.dstack([np.full(rgba.shape[:2] + (3,), 90, np.uint8)]))
+            helpers={'detail':{'path':str(flat),'snapshot':self.sr.fingerprint(flat)},
+                     'canvas':{'path':str(canvas),'snapshot':self.sr.fingerprint(canvas)}}
             for key,name in (('keep','product_keep.png'),('matid','product_matid.png')):
                 pixels=np.zeros_like(rgba)
                 if key=='matid':pixels[rgba[:,:,3]>0]=(51,0,0,255)
@@ -594,7 +605,7 @@ class SourceOperatorTests(unittest.TestCase):
             metadata.write_text(json.dumps({'materials':[{'index':0,'name':'surface','kind':'default'}]}))
             helpers['matid_json']={'path':str(metadata),'snapshot':self.sr.fingerprint(metadata)}
             return {'path':str(path), 'snapshot':self.sr.fingerprint(path), 'signature':model_key(context,props),
-                    'dimensions':list(dimensions), 'method':'PRODUCT_ONLY_RGBA','helpers':helpers}
+                    'dimensions':list(dimensions), 'method':'PRODUCT_LIT_CANVAS','helpers':helpers}
         real_projection = load_package_module('product_projection')
         self.projection_capture = Mock(side_effect=capture)
         self.projection = self.isolated_stub('product_projection', capture=self.projection_capture,
@@ -639,6 +650,10 @@ class SourceOperatorTests(unittest.TestCase):
         d = self.root / ('session' + str(self.counter)); d.mkdir()
         return T.NS(directory=d, session_id=str(self.counter), viewport_reference=d/'camera.png',
                     prompt_file=d/'prompt.txt', output_raw=d/'raw.png', output_final=d/'final.png')
+
+    def edit_canvas_bytes(self):
+        """The placed-product canvas the provider actually edited (the fake provider echoes it)."""
+        return Path(self.provider_calls[0]['edit_base_path']).read_bytes()
 
     def provider(self,*_):
         def generate(**kwargs):
@@ -688,7 +703,7 @@ class SourceOperatorTests(unittest.TestCase):
             op._result=job();return True
         op._start_thread=start
         self.assertEqual(op.execute(self.context),{'RUNNING_MODAL'})
-        self.assertEqual(self.sent,[self.target.read_bytes(),projection,self.identity.read_bytes()])
+        self.assertEqual(self.sent,[Path(op._source_repair['canvas']).read_bytes(),projection,self.identity.read_bytes()])
         self.projection_capture.assert_called_once()
         request=self.provider_calls[0]
         self.assertTrue(request['source_only'])
@@ -1019,7 +1034,8 @@ class SourceOperatorTests(unittest.TestCase):
         op._start_thread=lambda context,job:(job(),True)[1]
         self.assertEqual(op.execute(self.context),{'RUNNING_MODAL'})
         self.assertEqual(op._camera_output_size,expected)
-        self.assertEqual(self.sent[0],jpeg.read_bytes())
+        self.assertEqual(T.package.composition.image_dimensions(self.provider_calls[0]['edit_base_path']),expected)
+        self.assertEqual(Path(self.provider_calls[0]['edit_base_path']).name,'source_product_canvas.png')
 
     def test_toggle_after_polish_cannot_silently_start_multiview_capture(self):
         self.run_polish()
@@ -1059,7 +1075,7 @@ class SourceOperatorTests(unittest.TestCase):
         self.assertEqual(self.props.compare_pair,'TARGET_RESULT')
         self.assertIn('未执行',self.props.last_iou_note)
         self.assertIn('未执行',self.props.last_score_note)
-        self.assertEqual(Path(self.props.last_export_path).read_bytes(),self.target.read_bytes())
+        self.assertEqual(Path(self.props.last_export_path).read_bytes(),self.edit_canvas_bytes())
 
     def test_model_helpers_survive_polish_generation_and_actual_local_export(self):
         ai = PNG.read_png(self.target)
@@ -1071,8 +1087,8 @@ class SourceOperatorTests(unittest.TestCase):
         MC=load_package_module('material_color')
         base_capture=self.projection_capture.side_effect
         captured={}
-        def capture(*args):
-            record=base_capture(*args)
+        def capture(*args, **kwargs):
+            record=base_capture(*args, **kwargs)
             PNG.write_png(record['path'],detail)
             ids=np.zeros_like(detail)
             for material in materials:
@@ -1090,7 +1106,7 @@ class SourceOperatorTests(unittest.TestCase):
         self.ns['load_image']=lambda path,name:T.NS(path=path)
         self.ns['export_result']=T.load('output_manager').export_result
         self.ns['enforce_aspect_ratio']=lambda src,dst,w,h:(str(shutil.copy2(src,dst)),False)
-        self.isolated_stub('result_worker',photo_finish_step=load_package_module('result_worker').photo_finish_step)
+        self.isolated_stub('result_worker',**{k:v for k,v in vars(load_package_module('result_worker')).items() if not k.startswith('__')})
         self.ns['save_metadata']=Mock()
         op=self.ns['WONDFUL_OT_ai_render']()
         def start(context,job):
@@ -1104,15 +1120,20 @@ class SourceOperatorTests(unittest.TestCase):
         report=op._source_repair_reports[1]
         self.assertEqual(report['method'], 'natural_fusion')
         self.assertFalse(report['native_replacement'])
-        self.assertFalse(report['geometry_audit'])
+        # 2026-11: the silhouette is checked against the Blender mask at fixed coordinates; this
+        # fixture's provider echoes a flat grey canvas, so the product cannot be aligned and the
+        # small-part repair is skipped instead of pasting onto the wrong place
+        self.assertTrue(report['geometry_audit'])
+        self.assertIsNotNone(report['silhouette_iou'])
+        self.assertTrue(report['detail_repair'] is None or report['detail_repair'].get('skipped'))
         self.assertTrue(report['detail_review_required'])
         self.assertEqual(report['material_plan'], [])
         self.assertFalse(report['material_plan_applied'])
         final=PNG.read_png(self.props.last_export_path)
-        np.testing.assert_array_equal(final, PNG.read_png(self.target))
-        self.assertEqual(Path(self.props.last_export_path).read_bytes(), self.target.read_bytes())
-        self.assertEqual(report['raw_provider_image']['sha256'],hashlib.sha256(self.target.read_bytes()).hexdigest())
-        self.assertEqual(report['raw_fitted_canvas']['sha256'],hashlib.sha256(self.target.read_bytes()).hexdigest())
+        np.testing.assert_array_equal(final, PNG.read_png(op._source_repair["canvas"]))
+        self.assertEqual(Path(self.props.last_export_path).read_bytes(), self.edit_canvas_bytes())
+        self.assertEqual(report['raw_provider_image']['sha256'],hashlib.sha256(self.edit_canvas_bytes()).hexdigest())
+        self.assertEqual(report['raw_fitted_canvas']['sha256'],hashlib.sha256(self.edit_canvas_bytes()).hexdigest())
         metadata_call = self.ns['save_metadata'].call_args.args[1]
         self.assertEqual(metadata_call['product_finish'], op._source_repair_reports)
         self.assertNotIn('native_product_finish', metadata_call)
@@ -1154,7 +1175,7 @@ class SourceOperatorTests(unittest.TestCase):
         raw=Path(self.provider_calls[0]['output_path'])
         self.assertEqual(op._modal_source_only(self.context,T.NS(type='TIMER')),{'CANCELLED'})
         self.ns['export_result'].assert_not_called()
-        self.assertEqual(raw.read_bytes(),self.target.read_bytes())
+        self.assertEqual(raw.read_bytes(),self.edit_canvas_bytes())
         self.assertIn('辅助文件',self.props.last_error)
 
     def test_stale_camera_model_or_paint_after_async_generation_stops_export_and_preserves_raw(self):
@@ -1208,7 +1229,7 @@ class SourceOperatorTests(unittest.TestCase):
         worker = load_package_module('result_worker')
         finish = load_package_module('photo_finish')
         finish_step = Mock(wraps=worker.photo_finish_step)
-        self.isolated_stub('result_worker', photo_finish_step=finish_step)
+        self.isolated_stub('result_worker', **{**{k:v for k,v in vars(worker).items() if not k.startswith('__')}, 'photo_finish_step': finish_step})
         with patch.object(finish, 'apply_file', side_effect=AssertionError('unexpected finish')) as apply_finish:
             self.assertEqual(op.execute(self.context), {'RUNNING_MODAL'})
             self.assertEqual(op._modal_source_only(self.context, T.NS(type='TIMER')), {'FINISHED'})
@@ -1216,7 +1237,7 @@ class SourceOperatorTests(unittest.TestCase):
         self.assertIsNone(finish_step.call_args.args[2])
         apply_finish.assert_not_called()
         self.assertEqual(self.props.photo_finish, 'STANDARD')
-        self.assertEqual(Path(self.props.last_export_path).read_bytes(), self.target.read_bytes())
+        self.assertEqual(Path(self.props.last_export_path).read_bytes(), self.edit_canvas_bytes())
 
     def test_provider_failure_stops_with_error_and_no_result(self):
         self.run_polish()

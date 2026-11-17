@@ -90,16 +90,25 @@ class TestPaintRealism(unittest.TestCase):
         prompt_text = payload.get("prompt", "")
         self.assertIn("用户明确要求哑光漆", prompt_text)
         self.assertIn("#008F3F", prompt_text)
-        self.assertTrue(
-            ("preview lighting" in prompt_text) or ("matte finish" in prompt_text)
-        )
-        self.assertIn("evidenced paint gloss/clearcoat", prompt_text)
-        self.assertIn("Curvature reflections", prompt_text)
-        for term in ["清漆层", "基础色相", "局部 RGB", "反射形状"]:
+        # 2026-11 policy v8: positive, physically described clear-coat response instead of a
+        # list of prohibitions (v7 produced flat solid paint)
+        self.assertIn("glossy automotive clearcoat", prompt_text)
+        self.assertIn("upward surfaces reflect the photograph's sky", prompt_text)
+        self.assertIn("lower body sides reflect the ground", prompt_text)
+        self.assertIn("horizon reflection line", prompt_text)
+        self.assertIn("Honour an explicit user matte/satin request", prompt_text)
+        self.assertIn("Do not copy the old vehicle's paint or highlight shapes", prompt_text)
+        for term in ["清漆", "基础色相", "地平线反射", "菲涅尔", "天空颜色"]:
             self.assertIn(term, prompt_text)
-        self.assertIn("reflection blur", prompt_text)
-        self.assertIn("hard-edged reflection bands", prompt_text)
-        self.assertIn("must not redesign any visible modeled parts", prompt_text)
+        # geometry is pinned by the placed canvas, every modeled detail kept
+        self.assertIn("already rendered into it by Blender from the same camera", prompt_text)
+        self.assertIn("every wheel spoke", prompt_text)
+        self.assertIn("must not redesign modeled parts", prompt_text)
+        self.assertIn("Remove any leftover part of the photograph's original vehicle", prompt_text)
+        for term in ["门缝", "门把手", "轮辐", "车牌文字", "不得简化"]:
+            self.assertIn(term, prompt_text)
+        # the policy text must not order a flat result through negations only
+        self.assertNotIn("严禁将车身处理为单调统一的绿色色块平涂", prompt_text)
         self.assertIn(sr.PAINT_FINISH_POLICY, sr.PROJECTED_POLISH_SYSTEM)
 
 

@@ -1178,6 +1178,11 @@ class WONDFUL_PT_main(Panel):
             action = modes.operator("wondful.set_workflow_mode", text=caption, icon=symbol,
                                     depress=(props.workflow_mode == value))
             action.next_mode = value
+        if replica and not getattr(props, "workflow_multiview", False):
+            target_row = selector.row(align=True); target_row.enabled = not busy
+            target_row.prop(props, "reference_target", expand=True)
+        from .style_render_op import style_target, ready as style_ready
+        style_mode = style_target(props)
         _draw_update_banner(layout, context)
         connection = selector.row(align=True)
         connection.label(text=provider_label, icon="LINKED")
@@ -1209,7 +1214,14 @@ class WONDFUL_PT_main(Panel):
         UIC.field(controls, props, "product_collection", "产品集合" if source_only else "车模集合", icon="OUTLINER_COLLECTION")
         UIC.field(controls, context.scene, "camera", "活动相机", icon="CAMERA_DATA")
         if source_only:
-            _hint(controls, "当前相机与真实模型唯一决定结构、车型、灯组、轮辐和车漆色相；画幅比例须匹配目标图，不生成场景粗模。", cells)
+            align = controls.row(align=True); align.scale_y = UIC.ACTION_HEIGHT
+            align.enabled = not busy and bool(props.sb_image_path) and bool(props.product_collection)
+            align.operator("wondful.align_to_reference", text="对齐到参考图", icon="CON_CAMERASOLVER")
+            flip = align.operator("wondful.align_to_reference", text="", icon="FILE_REFRESH")
+            flip.flip = True
+            if getattr(props, "alignment_message", "") and ("对齐" in props.alignment_message):
+                _note(controls, props.alignment_message, cells, "info")
+            _hint(controls, "先点「对齐到参考图」：自动让车模落在原图里那辆车的位置（右侧按钮＝车头翻转 180° 重新对齐）。", cells)
         product_item = props.product_images[0] if len(props.product_images) else None
         UIC.image_slot(controls, context, props, "PRODUCT", item=product_item,
                        title="产品身份参考（部件材质／三视图）", required=True)
@@ -1272,9 +1284,17 @@ class WONDFUL_PT_main(Panel):
                 _draw_task_progress(step5,props,cells)
                 step5.operator("wondful.cancel_task",text="取消任务",icon="CANCEL")
         else:
-            go=step5.row(align=True);go.enabled=can_generate;go.scale_y=UIC.ACTION_HEIGHT
-            go.operator("wondful.generate",text="编辑原图" if source_only else "按当前场景渲染" if replica else "生成效果图",icon="RENDER_STILL")
-            missing=("缺少身份参考" if not has_product else "未连接账号" if not connected else
+            go=step5.row(align=True);go.scale_y=UIC.ACTION_HEIGHT
+            if style_mode:
+                style_missing=style_ready(context,props)
+                go.enabled=not style_missing
+                go.operator("wondful.style_render",text="按参考风格渲染",icon="RENDER_STILL")
+                if style_missing:
+                    _note(step5,style_missing,cells,"info")
+            else:
+              go.enabled=can_generate
+              go.operator("wondful.generate",text="编辑原图" if source_only else "按当前场景渲染" if replica else "生成效果图",icon="RENDER_STILL")
+            missing=("" if style_mode else "缺少身份参考" if not has_product else "未连接账号" if not connected else
                      "未选择目标图" if source_only and not has_style else
                      ("未选择产品集合" if source_only else "未选择车模") if not structure_ready else
                      "未选择相机" if not camera else

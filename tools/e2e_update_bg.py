@@ -119,6 +119,16 @@ def main():
         '"version": (1, 2, 3)', '"version": (1, 2, 2)'), encoding="utf-8")
     ext_dirs = [r.directory for r in bpy.context.preferences.extensions.repos if getattr(r, "directory", "")
                 and str(r.directory).startswith(str(OUT))]
+    if not ext_dirs:
+        # Background --factory-startup Blender may expose no sandboxed extension repo (it depends on the
+        # Blender version / platform); register one explicitly so the extensions-dir scan is really exercised.
+        custom = OUT / "ext_repo"
+        custom.mkdir(parents=True, exist_ok=True)
+        repo = bpy.context.preferences.extensions.repos.new(
+            name="wondful_e2e_user", module="wondful_e2e_user", custom_directory=str(custom))
+        repo.use_custom_directory = True
+        ext_dirs = [r.directory for r in bpy.context.preferences.extensions.repos if getattr(r, "directory", "")
+                    and str(r.directory).startswith(str(OUT))]
     dup2 = Path(ext_dirs[0]) / "wondful_ai_renderer" if ext_dirs else OUT / "ext_fallback" / "wondful_ai_renderer"
     shutil.copytree(target, dup2, ignore=shutil.ignore_patterns("__pycache__"))
     other = target.parent / "some_other_addon"

@@ -48,7 +48,7 @@ class ReferenceRoleContractTests(unittest.TestCase):
     def test_policy_and_profile_versions_invalidate_obsolete_ai_summaries(self):
         self.assertGreaterEqual(PE.REFERENCE_POLICY_VERSION, 4)
         self.assertIn("reference-role-contract", PP.PACK_VERSION)
-        self.assertEqual(PP.REFERENCE_ROLE_POLICY_VERSION, 7)
+        self.assertEqual(PP.REFERENCE_ROLE_POLICY_VERSION, 8)
         with patch.object(PP, "REFERENCE_ROLE_POLICY_VERSION", 4):
             obsolete_key = PP.style_cache_key("same-bytes", ["same-note"], "codex", "model")
         self.assertNotEqual(obsolete_key, PP.style_cache_key("same-bytes", ["same-note"], "codex", "model"))

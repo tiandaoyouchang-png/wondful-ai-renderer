@@ -342,7 +342,9 @@ class BuilderBlenderTests(unittest.TestCase):
         return rep
 
     def common(self, rep, outdoor=True):
-        self.assertEqual(rep["collections_named"], 1)          # re-run replaced, not duplicated
+        self.assertEqual(rep["collections_named"], 2)          # re-run adds a numbered version, never deletes the old one
+        self.assertTrue(rep["old_version_kept_hidden"])
+        self.assertEqual(rep["version_numbers"], [1, 2])
         self.assertTrue(rep["rebuild_same_count"])
         self.assertTrue(rep["parent_ok"])                       # inside 环境体块 → used by clay / 多角度场景一致
         self.assertTrue(rep["found_by_massing"])
@@ -369,9 +371,9 @@ class BuilderBlenderTests(unittest.TestCase):
         self.assertIn("foliage_palm", rep["env_types"])
         self.assertIn("road", rep["env_types"])
         self.assertIn("band_dune", rep["env_types"])
-        self.assertEqual(rep["scene_camera"], "Wondful 参考相机")
+        self.assertEqual(rep["scene_camera"], "Wondful 参考相机 · 002")   # each generation owns a numbered camera
         self.assertTrue(rep["camera"]["is_scene_camera"])
-        self.assertFalse(rep["camera"]["in_blockout"])
+        self.assertTrue(rep["camera"]["in_blockout"])
         self.assertAlmostEqual(rep["camera"]["lens"], rep["info"]["lens"], places=3)
         self.assertLess(abs(rep["ground_gap"]), 0.05)            # car base on the road surface, not sunk / floating
         self.assertTrue(rep["ground_hit"].startswith("道路"))

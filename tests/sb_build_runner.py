@@ -6,6 +6,7 @@ product: none | box (a 4.6 x 1.9 x 1.5 m car-sized box named Car at (3, -2, 0.4)
 Builds the blockout with wondful_ai_renderer.scene_blockout_build (package imported from the repo), checks
 undo-free rebuild (a second build replaces the first), and dumps a summary JSON for the unittest to assert on."""
 import json
+import re
 import math
 import os
 import sys
@@ -64,10 +65,15 @@ def main():
         bpy.context.view_layer.update()
         prod_before = [list(o.matrix_world.translation) for o in (prod.all_objects if prod else [])]
         info1 = SBB.build(bpy.context, data, product_collection=prod, parent_collection=parent, set_camera=SETCAM)
-        n1 = len(bpy.data.collections[SB.COLLECTION_NAME].all_objects)
+        n1 = len(bpy.data.collections[info1["collection"]].all_objects)
         info = SBB.build(bpy.context, data, product_collection=prod, parent_collection=parent, set_camera=SETCAM)
-        coll = bpy.data.collections[SB.COLLECTION_NAME]
-        rep["collections_named"] = sum(1 for c in bpy.data.collections if c.name.startswith(SB.COLLECTION_NAME))
+        coll = bpy.data.collections[info["collection"]]
+        # Numbered, non-destructive versions: a rebuild adds a new collection and hides the older one.
+        versions = [c for c in bpy.data.collections if c.name.startswith(SB.COLLECTION_NAME)]
+        rep["collections_named"] = len(versions)
+        old = bpy.data.collections[info1["collection"]]
+        rep["old_version_kept_hidden"] = old is not coll and bool(old.hide_render) and not coll.hide_render
+        rep["version_numbers"] = [info1["version"], info["version"]]
         rep["rebuild_same_count"] = n1 == len(coll.all_objects)
         rep["info"] = info
         rep["first_blocks"] = info1["blocks"]
@@ -77,20 +83,20 @@ def main():
         roots = MS.block_roots(objs)
         rep["roots"] = len(roots)
         rep["root_hints"] = [MS.group_hint([r] + [o for o in objs if o.parent == r])[0] for r in roots]
-        rep["root_names"] = [r.name for r in roots]
-        rep["all_labelled"] = all(o.get("wondful_hint") and o.get(MS.AUTO_HINT_FLAG) for o in coll.all_objects)
+        rep["root_names"] = [re.sub(r"\.\d{3}$", "", r.name) for r in roots]   # rebuilds keep older versions, so Blender adds .00N to repeated names
+        rep["all_labelled"] = all(o.get("wondful_hint") and o.get(MS.AUTO_HINT_FLAG) for o in coll.all_objects if o.type != "CAMERA")   # the per-version reference camera lives in the collection
         rep["terrain"] = [o.name for o in coll.all_objects if o.get("wondful_terrain")]
         rep["scene_note"] = MS.scene_note_of(objs)
         rep["env_types"] = sorted({o.get("wondful_env_type", "") for o in coll.all_objects})
         rep["wrap_copies"] = sum(1 for o in coll.all_objects if o.get("wondful_sb_wrap"))
         rep["product_unmoved"] = prod_before == [list(o.matrix_world.translation) for o in (prod.all_objects if prod else [])]
         rep["user_cam_unchanged"] = user_cam_before == [list(r) for r in user_cam.matrix_world]
-        cam = bpy.data.objects.get(SB.CAMERA_NAME)
+        cam = bpy.data.objects.get(info["camera_name"]) if info.get("camera_name") else None
         rep["camera"] = None if cam is None else {"lens": cam.data.lens, "is_scene_camera": scene.camera == cam,
                                                    "loc": list(cam.matrix_world.translation),
                                                    "in_blockout": cam.name in coll.all_objects}
         rep["scene_camera"] = scene.camera.name if scene.camera else ""
-        rep["text_block"] = SB.TEXT_NAME in bpy.data.texts
+        rep["text_block"] = coll.get("wondful_sb_analysis_text") in bpy.data.texts   # per-version analysis record
         # ground under the product: distance from the product base to the top surface below it
         if prod is not None:
             pts = [o.matrix_world @ Vector(c) for o in prod.all_objects for c in o.bound_box]

@@ -124,6 +124,15 @@ def main():
         img[:45] = (120, 170, 230, 255)
         img[45:] = (190, 160, 110, 255)
         png_io.write_png(ref, img)
+        # A valid product identity reference is mandatory before any blockout build.
+        identity = os.path.join(tmp, "product_identity.png")
+        product = np.full((90, 160, 4), 255, np.uint8)
+        product[30:60, 34:126] = (140, 140, 140, 255)
+        png_io.write_png(identity, product)
+        slot = props.product_images.add()
+        slot.image = bpy.data.images.load(identity, check_existing=False)
+        slot.source_path = identity
+        props.workflow_mode = "REFERENCE"   # blockout building belongs to the 参考图复刻 workflow
         props.sb_image_path = ref
         props.sb_set_camera = True
         fixture = json.load(open(FIX, encoding="utf-8"))

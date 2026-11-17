@@ -175,6 +175,26 @@ class WONDFUL_AddonPreferences(AddonPreferences):
         max=4096,
         step=256,
     )
+    source_placement_guard: BoolProperty(
+        name="原图复刻对齐检查",
+        description="单图原图复刻前先识别参考图里原车的位置（每张参考图只识别一次），当前相机没把车模放在原车位置时直接停止，不花生图次数",
+        default=True,
+    )
+    source_clean_plate: BoolProperty(
+        name="原图复刻先去车",
+        description="单图原图复刻时先用一次局部图像编辑移除参考图里的旧车（按参考图缓存，只花一次），再放入你的车模，避免旧车残留被画进新车",
+        default=True,
+    )
+    source_local_canvas: BoolProperty(
+        name="原图复刻局部画布",
+        description="单图原图复刻时只把车附近裁成 3:2 局部送去生成（车占约六成宽度），结果贴回原图；车更大、细节和轮廓更准，局部外的像素保持原图",
+        default=True,
+    )
+    source_detail_regen: BoolProperty(
+        name="原图复刻小部件重画（额外调用）",
+        description="细节检查不合格的小部件（灯组、轮毂、车标）用额外的生图调用局部重画；默认关闭，只做不花钱的 Blender 小区域回贴",
+        default=False,
+    )
     codex_imagegen_enabled: BoolProperty(
         name="启用 Codex ImageGen（实验）",
         description="通过 ChatGPT OAuth 的 Codex 会话调用内置 image generation；当前 Codex 版本/账号可能不暴露该工具",
@@ -561,6 +581,13 @@ class WONDFUL_AISettings(PropertyGroup):
                                   ("REFERENCE", "参考图复刻", "单图：目标原图 + 当前相机真实产品投影 + 身份图 → 自动润色 → 编辑；无需场景粗模")],
         default="ENVIRONMENT", update=workflow.switch_mode)
     workflow_last_mode: StringProperty(default="ENVIRONMENT", options={"HIDDEN"})
+    # 2026-11 mode 2: 参考图复刻 either edits the reference itself (SOURCE) or renders the user's camera
+    # and car in the reference's style (CAMERA, 按参考风格渲染; no scene blockout)
+    reference_target: EnumProperty(
+        name="复刻方式",
+        items=[("SOURCE", "替换原图车辆", "保留参考图的画面，只把其中的车换成当前车模"),
+               ("CAMERA", "我的机位", "用当前相机和车模渲染，环境、光线和调色按参考图风格生成")],
+        default="SOURCE")
     workflow_drafts: StringProperty(default="{}", options={"HIDDEN"})
     # Kept for old .blend files. Generate treats it as mandatory; legacy False is ignored.
     auto_polish_on_generate: BoolProperty(name="生成前自动润色", default=True,

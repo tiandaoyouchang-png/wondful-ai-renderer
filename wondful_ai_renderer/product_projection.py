@@ -8,6 +8,8 @@ import numpy as np
 from .source_reference import fingerprint, matches
 
 GEOMETRY_TYPES = {"MESH", "CURVE", "SURFACE", "FONT", "META"}
+BASE_HELPERS = frozenset({"keep", "matid", "matid_json"})
+LIT_HELPERS = frozenset({"detail", "canvas"})
 
 
 def require_matching_aspect(source, projection):
@@ -126,7 +128,7 @@ def signature(context, props):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def capture(context, props, directory, source_dimensions):
+def capture(context, props, directory, source_dimensions, source_path=""):
     from .viewport_capture import render_detail_pass, camera_output_dimensions
     from .png_io import read_png
     require_matching_aspect(source_dimensions, camera_output_dimensions(context))
@@ -158,18 +160,49 @@ def capture(context, props, directory, source_dimensions):
         material['repair_excluded']=material['name'] in excluded
     metadata_path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
     read_helpers(path,keep_path,matid_path)
+    lookdev = None
+    if source_path:
+        lookdev = _capture_lookdev(context, props, Path(directory), source_path, path)
     if signature(context, props) != before:
         raise ValueError("产品或相机在捕获期间发生变化，请重新生成。")
-    helpers={k:{'path':str(p),'snapshot':fingerprint(p)} for k,p in
-             (('keep',keep_path),('matid',matid_path),('matid_json',metadata_path))}
-    return {"path": str(path), "snapshot": fingerprint(path), "signature": before, "helpers":helpers,
-            "dimensions": [pixels.shape[1], pixels.shape[0]], "method": "PRODUCT_ONLY_RGBA",
-            "camera": context.scene.camera.name, "collection": getattr(props.product_collection, "name", "")}
+    rows=[('keep',keep_path),('matid',matid_path),('matid_json',metadata_path)]
+    if lookdev:
+        rows += [('detail', path), ('canvas', Path(lookdev['canvas']))]
+    helpers={k:{'path':str(p),'snapshot':fingerprint(p)} for k,p in rows}
+    sent = Path(lookdev['path']) if lookdev else path
+    record = {"path": str(sent), "snapshot": fingerprint(sent), "signature": before, "helpers":helpers,
+              "dimensions": [pixels.shape[1], pixels.shape[0]],
+              "method": "PRODUCT_LIT_CANVAS" if lookdev else "PRODUCT_ONLY_RGBA",
+              "camera": context.scene.camera.name, "collection": getattr(props.product_collection, "name", "")}
+    if lookdev:
+        record["lookdev"] = {k: v for k, v in lookdev.items() if k not in {"path", "canvas"}}
+    return record
+
+
+def _capture_lookdev(context, props, directory, source_path, flat_path):
+    """Lit product pass (own materials, scene-sampled sky/ground, temporary clear coat, shadow
+    catcher) and the placed-product canvas: the photograph with that pass composited at the exact
+    camera position. Fails closed: a missing pass stops the edit instead of silently sending the
+    flat projection."""
+    from .product_lookdev import environment_colours, render_lookdev, build_canvas, LOOKDEV_VERSION
+    from .reference_collage import read_rgb
+    from .appearance_lock import collect_product_materials
+    from .workflow import isolated_capture
+    env = environment_colours(read_rgb(source_path))
+    rows = collect_product_materials([o for o in product_objects(context, props) if o.type == "MESH"])
+    look_path = directory / "product_lookdev.png"
+    info = isolated_capture(render_lookdev)(context, str(look_path), props.product_collection, env, paint_rows=rows)
+    if not info.get("ok") or not look_path.is_file():
+        raise ValueError("产品光照参考渲染失败，已停止；请检查相机和产品集合。")
+    canvas_path = directory / "source_product_canvas.png"
+    build_canvas(source_path, look_path, flat_path, canvas_path)
+    return {"path": str(look_path), "canvas": str(canvas_path), "version": LOOKDEV_VERSION,
+            "environment": env, "coated": info.get("coated", []), "sun": info.get("sun")}
 
 
 def current(context, props, record):
     try:
-        return (set(record['helpers'])=={'keep','matid','matid_json'}
+        return (set(record['helpers']) in (BASE_HELPERS, BASE_HELPERS | LIT_HELPERS)
                 and all(matches(r['snapshot'],r['path']) for r in record['helpers'].values())
                 and matches(record["snapshot"], record["path"]) and signature(context, props) == record["signature"])
     except (ValueError, OSError, RuntimeError, ReferenceError, AttributeError, TypeError, KeyError):
@@ -179,6 +212,8 @@ def current(context, props, record):
 def freeze_helpers(record, directory):
     """Copy exact approved PNG/JSON bytes; no render or format conversion."""
     names={'keep':'product_keep.png','matid':'product_matid.png','matid_json':'product_matid.png.json'}
+    if set(record.get('helpers',{}))==BASE_HELPERS|LIT_HELPERS:
+        names.update({'detail':'product_detail_pass.png','canvas':'source_product_canvas.png'})
     if set(record.get('helpers',{}))!=set(names):raise ValueError('产品细节辅助文件不完整，请重新生成并润色。')
     result={}
     for key,name in names.items():

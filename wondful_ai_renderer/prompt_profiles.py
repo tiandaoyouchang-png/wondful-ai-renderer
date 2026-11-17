@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-REFERENCE_ROLE_POLICY_VERSION = 7
+REFERENCE_ROLE_POLICY_VERSION = 8
 PACK_VERSION = "1.0.2-reference-role-contract"
 ROOT = Path(__file__).parent / "prompt_skills/wondful-render-director"
 PROFILES = {

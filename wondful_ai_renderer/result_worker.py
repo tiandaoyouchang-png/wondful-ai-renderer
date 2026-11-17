@@ -251,3 +251,62 @@ def photo_finish_step(src, dst, finish) -> dict:
     if not rep.get("applied"):
         return {"finish_report": rep}
     return {"final": str(dst), "clean": str(src), "finish_report": rep}
+
+
+SOURCE_DETAIL_MIN_IOU = 0.85   # below this the AI moved the product: a crop fix / paste would land off-target
+
+
+def source_detail_step(raw, variant_index, helpers, width, height, session_dir, edit_fn=None,
+                       cancel_check=None, on_status=None, vehicle=True) -> dict:
+    """细节修复 for the single-source edit (2026-11 review), on the worker thread.
+
+    ``helpers``: frozen paths {"detail": flat product pass (RGBA, its alpha = product mask),
+    "keep", "matid"}. The raw provider image is fitted to the source canvas, the product silhouette
+    is checked against the Blender mask at fixed coordinates (``contour_iou``), and only when the
+    product sits where the model put it are failed small parts checked and repaired
+    (``detail_refine``: crop regeneration through ``edit_fn``, else small-region Blender paste,
+    both gated). Never raises except ``Cancelled``; the main thread decides whether to use it."""
+    from .source_reference import fingerprint
+    out = {"raw": None, "fitted": "", "refined": "", "iou": None, "report": None, "note": ""}
+    try:
+        _check(cancel_check)
+        out["raw"] = fingerprint(raw)
+        fitted = Path(session_dir) / f"source_fit_{variant_index:02d}.png"
+        if not fit_to_canvas(raw, fitted, width, height):
+            out["note"] = "细节检查已跳过：结果格式无法在后台读取，保留 AI 原图"
+            return out
+        out["fitted"] = str(fitted)
+        detail = helpers.get("detail", "")
+        if not detail or not Path(detail).is_file():
+            out["note"] = "细节检查已跳过：缺少产品细节底图，保留 AI 原图"
+            return out
+        from . import contour_iou as CI
+        _check(cancel_check)
+        iou = CI.score_file(str(fitted), detail)
+        out["iou"] = {k: iou.get(k) for k in ("iou", "iou_lo", "iou_hi", "verdict", "passed", "error")}
+        value = iou.get("iou")
+        if value is None or float(value) < SOURCE_DETAIL_MIN_IOU:
+            out["note"] = (CI.summarize(iou) + "；产品位置与模型不一致，细节修复已跳过（不回贴到错误位置）")
+            return out
+        from . import detail_refine as DR
+        target = Path(session_dir) / f"source_detail_{variant_index:02d}.png"
+        keep = helpers.get("keep", "")
+        matid = helpers.get("matid", "")
+        try:
+            rep = DR.refine_file(str(fitted), detail, detail, str(target),
+                                 keep_path=keep if keep and Path(keep).is_file() else "",
+                                 matid_path=matid if matid and Path(matid).is_file() else "",
+                                 edit_fn=edit_fn, work_dir=str(session_dir), tag=f"src{variant_index:02d}",
+                                 vehicle=vehicle, on_status=on_status, cancel_check=cancel_check)
+        except DR.Cancelled as exc:
+            raise Cancelled(str(exc)) from exc
+        out["report"] = rep
+        out["note"] = CI.summarize(iou) + "；" + DR.summarize(rep)
+        if not rep.get("skipped") and target.is_file():
+            out["refined"] = str(target)
+    except Cancelled:
+        raise
+    except Exception as exc:
+        print(f"[Wondful] 原图编辑细节修复失败：{exc}")
+        out["note"] = f"细节修复失败（已保留 AI 原图）：{str(exc)[:80]}"
+    return out
