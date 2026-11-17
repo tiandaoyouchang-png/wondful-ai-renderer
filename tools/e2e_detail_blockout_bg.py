@@ -9,6 +9,7 @@ detail "" / "carrier" (+ again after removing the carrier: must be identical), o
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -72,17 +73,20 @@ def run(OPS, props, kw, limit=300):
             res = op.modal(bpy.context, FakeEvent())
             if "RUNNING_MODAL" not in res and "PASS_THROUGH" not in res and OPS._ACTIVE_OPERATOR is op:
                 OPS._ACTIVE_OPERATOR = None
-    from wondful_ai_renderer import scene_blockout as SB, detail_blockout as DB
-    coll = bpy.data.collections.get(SB.COLLECTION_NAME)
-    objs = list(coll.all_objects) if coll else []
+    from wondful_ai_renderer import detail_blockout as DB
+    coll = props.sb_active_collection
+    assert coll is not None and coll.get("wondful_sb_active") and coll.get("wondful_sb_version")
+    objs = list(coll.all_objects)
     car = [o for o in objs if o.get(DB.CARRIER_TAG)]
     inf = [o for o in objs if o.get(DB.INFER_TAG)]
     tris = 0
     for o in car:
         o.data.calc_loop_triangles()
         tris += len(o.data.loop_triangles)
-    return {"op": sorted(r), "note": props.last_sb_note, "objects": sorted(o.name for o in objs),
-            "llm_objects": sorted(o.name for o in objs if not o.get(DB.CARRIER_TAG)),
+    # Preserve every object in comparisons; only remove version/allocation suffixes.
+    name = lambda o: re.sub(r" · \d{3,}$", "", re.sub(r"\.\d{3,}$", "", o.name))
+    return {"op": sorted(r), "note": props.last_sb_note, "objects": sorted(name(o) for o in objs),
+            "llm_objects": sorted(name(o) for o in objs if not o.get(DB.CARRIER_TAG)),
             "carrier_objects": len(car), "carrier_tris": tris,
             "carrier_hidden": all(o.hide_render and o.hide_viewport for o in car),
             "far_kept": sum(int(o.get(DB.FAR_TAG, 0) or 0) for o in objs), "seconds": round(time.time() - t, 1),
@@ -116,8 +120,8 @@ def _seen(objs):
 def geometry_pass(props, prefix, detail):
     import numpy as np
     from wondful_ai_renderer.viewport_capture import render_clay_base, LAST_CLAY_INFO
-    from wondful_ai_renderer import scene_blockout as SB
-    massing = bpy.data.collections.get(SB.COLLECTION_NAME)
+    massing = props.sb_active_collection
+    assert massing is not None and massing.get("wondful_sb_active") and massing.get("wondful_sb_version")
     ok = render_clay_base(bpy.context, prefix + "_clay.png", props.product_collection, massing=massing,
                           geometry_prefix=prefix, geometry_size=(240, 135), detail=detail)
     return ok, np.load(prefix + "_pos.npy"), dict(LAST_CLAY_INFO)
@@ -155,6 +159,7 @@ def main():
         sc.camera = cam
         sc.render.resolution_x, sc.render.resolution_y = 1600, 900
         props = sc.wondful_ai
+        props.workflow_mode = "REFERENCE"
         props.product_collection = coll
         tmp = tempfile.mkdtemp()
         ref = os.path.join(tmp, "env_ref.png")
@@ -162,6 +167,14 @@ def main():
         img[:45] = (120, 170, 230, 255)
         img[45:] = (190, 160, 110, 255)
         png_io.write_png(ref, img)
+        identity = os.path.join(tmp, "product_identity.png")
+        product = np.full((90, 160, 4), 255, np.uint8)
+        product[30:60, 34:126] = (140, 140, 140, 255)
+        product[30:35, 34:126] = (185, 185, 185, 255)
+        png_io.write_png(identity, product)
+        slot = props.product_images.add()
+        slot.image = bpy.data.images.load(identity, check_existing=False)
+        slot.source_path = identity
         props.sb_image_path = ref
         props.sb_set_camera = True
         props.sb_correct = False

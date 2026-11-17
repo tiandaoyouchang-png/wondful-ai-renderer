@@ -193,7 +193,8 @@ def main():
         rep["d"] = d
 
         # e) a 场景粗模 block selected → not a placeholder
-        sb = next(o for o in bpy.data.collections[SB.COLLECTION_NAME].all_objects if o.type == "MESH")
+        sb_coll = next(c for c in bpy.data.collections if c.get("wondful_scene_blockout"))   # numbered version collection
+        sb = next(o for o in sb_coll.all_objects if o.type == "MESH")
         select_only(sb)
         rep["e"] = {"mode": MH.find_target(bpy.context, props)[0]}
         bpy.ops.wondful.massing_hull_build()

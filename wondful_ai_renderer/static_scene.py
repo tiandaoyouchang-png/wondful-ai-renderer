@@ -1,7 +1,7 @@
 """1.2.6 只做场景相关物体 · no pedestrians / other vehicles / animals (user rule 2026-10-21).
 
-User: 「不要加行人」「只做场景相关物体」. The ④ 场景粗模 and every image request keep only the static scene
-(buildings, road surface, trees, poles, signs, railings …):
+User: 「不要加行人」「只做场景相关物体」. The ④ 场景粗模 keeps static environment objects;
+image requests exclude extra actors without freezing the primary product or observed atmospheric effects:
 
 - ``strip_dynamic`` drops people / other vehicles / bicycles / animals from a ④ analysis before any block is
   built (decided by the analysis category first, then by the element's own words);
@@ -263,10 +263,11 @@ def negative_text(allow=None) -> str:
     zh = "，也不要出现".join(NEGATIVE_ZH[c] for c in cats)
     en = "; no ".join(NEGATIVE_EN[c] for c in cats)
     return (f"{MARKER}画面里任何位置都不要出现{zh}（主体产品本身除外，不要画进玻璃反射、远处或背景里）；"
-            f"只保留场景本身的静态物体：建筑、路面、树木、灯杆、招牌、护栏等。\n"
+            f"此标记仅禁止额外角色，不限制主体产品运动、快门拖影、风或扬尘；这些效果仅在需求或参考图存在时保留。\n"
             f"{MARKER_EN} Absolutely no {en} anywhere in the image (the product itself excepted; not in the "
-            f"background, the distance or reflections either); show only the static scene: buildings, road "
-            f"surface, trees, poles, signs, railings.")
+            f"background, the distance or reflections either). These legacy markers only exclude extra actors; "
+            f"preserve primary-product motion, shutter blur, wind and dust when requested or observed; "
+            f"do not invent them for a still reference.")
 
 
 def apply(prompt: str, allow=None) -> str:

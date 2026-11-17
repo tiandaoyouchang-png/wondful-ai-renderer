@@ -272,12 +272,14 @@ class WiringTests(unittest.TestCase):
         massing = ui[ui.index("def _draw_massing("):ui.index("def _draw_block_refs")]
         self.assertNotIn("scene_blockout", massing)
         main = ui.split("class WONDFUL_PT_main")[1]
-        self.assertIn('reference, tools = _step_card(layout, 2, "目标图与粗模" if replica else "环境参考"', main)
+        self.assertIn('reference, tools = _step_card(layout, 2, "复刻目标图" if replica else "环境参考"', main)
+        self.assertIn('_draw_replica_blockout(adv, context, props, busy)', main)
         self.assertIn("if replica:", main)
         self.assertEqual(ui.count('"wondful.scene_blockout_build"'), 1)
         self.assertIn('"wondful.scene_blockout_build", text="生成新粗模版本"', ui)
-        for label in ("匹配相机", "自动校正"):
+        for label in ("成功后自动匹配新参考相机", "自动校正"):
             self.assertIn(label, ui)
+        self.assertNotIn('switches.prop(props, "sb_set_camera"', main)
         props = (PKG / "properties.py").read_text(encoding="utf-8")
         self.assertIn("sb_set_camera: BoolProperty(name=\"同时设置相机\", default=True", props)
         self.assertIn("sb_correct: BoolProperty(name=\"自动校正一轮\", default=False", props)
@@ -340,7 +342,9 @@ class BuilderBlenderTests(unittest.TestCase):
         return rep
 
     def common(self, rep, outdoor=True):
-        self.assertEqual(rep["collections_named"], 1)          # re-run replaced, not duplicated
+        self.assertEqual(rep["collections_named"], 2)          # re-run adds a numbered version, never deletes the old one
+        self.assertTrue(rep["old_version_kept_hidden"])
+        self.assertEqual(rep["version_numbers"], [1, 2])
         self.assertTrue(rep["rebuild_same_count"])
         self.assertTrue(rep["parent_ok"])                       # inside 环境体块 → used by clay / 多角度场景一致
         self.assertTrue(rep["found_by_massing"])
@@ -367,9 +371,9 @@ class BuilderBlenderTests(unittest.TestCase):
         self.assertIn("foliage_palm", rep["env_types"])
         self.assertIn("road", rep["env_types"])
         self.assertIn("band_dune", rep["env_types"])
-        self.assertEqual(rep["scene_camera"], "Wondful 参考相机")
+        self.assertEqual(rep["scene_camera"], "Wondful 参考相机 · 002")   # each generation owns a numbered camera
         self.assertTrue(rep["camera"]["is_scene_camera"])
-        self.assertFalse(rep["camera"]["in_blockout"])
+        self.assertTrue(rep["camera"]["in_blockout"])
         self.assertAlmostEqual(rep["camera"]["lens"], rep["info"]["lens"], places=3)
         self.assertLess(abs(rep["ground_gap"]), 0.05)            # car base on the road surface, not sunk / floating
         self.assertTrue(rep["ground_hit"].startswith("道路"))

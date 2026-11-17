@@ -1,0 +1,305 @@
+{
+  "base_commit": "4c5d0fff681bc7cb7b2d979f5c678baeb3cbbc5e",
+  "files": [
+    {
+      "file": "tests/test_120_layers.py",
+      "bytes": 17929,
+      "sha256": "2f8f0d6810f6e92730b56047d7e7bce4e3bda46ef63d9bf139ebc9f56d8441a8",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_123_render_views.py",
+      "bytes": 7139,
+      "sha256": "47fc81fa3b517f861028548a343a3b3037ae4cce8e3f01979cb323c8b53d1f24",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_123_scene_blockout.py",
+      "bytes": 21595,
+      "sha256": "e3aed433a81bce3294054f62ce846a2d7833c79a4f5b72c907b21bf6f79aa77c",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_125_precise_mode.py",
+      "bytes": 19362,
+      "sha256": "53a4912e9c058c7cb747fcad5d4adca8fc3f1b042060b9cb46c98cefb874c01c",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_126_detail_blockout.py",
+      "bytes": 13155,
+      "sha256": "4cdd56e334c34fc8ccc556d2e84b12517286bfc6b41440072c3bc73381875cb1",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_131_no_people.py",
+      "bytes": 12404,
+      "sha256": "b61ffc9fa822651c6872744aff1258e15fcdc540f97e8fb418bd16209aa411f3",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_132_pc_feedback.py",
+      "bytes": 35169,
+      "sha256": "161c94bc5ec9c9fc72adeb1cb5085b1834fd08b938339646931dc58c45cf5f13",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_136_reference_lighting.py",
+      "bytes": 21511,
+      "sha256": "1c0dd077667338bc1c0f07d6ae89b9ff10b2d5d3f85dd9cdd1dcbfcf3a2737d1",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_317_prompt_flow.py",
+      "bytes": 5454,
+      "sha256": "e782bef64c6be6c12bbf57dfd6228cd219831880fc394cd189948c208873b75e",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_318_product_single.py",
+      "bytes": 2841,
+      "sha256": "b9c23c05695285f1b6daec08b6ee3b4e92feec9743f3ecfcc64422857efa050f",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_320_card_ui.py",
+      "bytes": 4711,
+      "sha256": "3ab741d1e3bb43c1f37d79b2b213523b8d0143dc5f8392c63ef33cb5a775d523",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_image_edit_endpoint.py",
+      "bytes": 6594,
+      "sha256": "53525205111e0c3d9038f254b02e3f5669b5cfef138e18722cebe76c47c028c3",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_mandatory_polish_flow.py",
+      "bytes": 28142,
+      "sha256": "2ebdec82abda5ff4736b8c821723da9b3c2e548cc1be6f245cf5c0324dad617f",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_native_product_finish.py",
+      "bytes": 3330,
+      "sha256": "2a18cea677bdd1c819dba662005f71cc10226ec59db4a0927582dbc0855850c8",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_paint_realism.py",
+      "bytes": 3751,
+      "sha256": "670c3406e00d0fca81eaca0697a362b891a00b6a62984a464b2f62865edb5bdb",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_polish_response_format.py",
+      "bytes": 1975,
+      "sha256": "96597557c0f29707371fff0fd1f53472f1522de5c5244c7f61402538c435cfb2",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_product_projection.py",
+      "bytes": 12702,
+      "sha256": "f6543d4a678ed4154fdfbc00f1ddca751a7c7a7917b73882f0c2a218830cce04",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_prompt_profile_atmosphere.py",
+      "bytes": 4012,
+      "sha256": "7a840d4586f3ab4b3d7ee3d6010be97c268053f5235c0824c1a8424348da40b9",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_reference_hybrid.py",
+      "bytes": 15199,
+      "sha256": "9f5ab84dfadb8582f6bfa996592b96d59209a5e9b828e3d58bf83c67ee27d27e",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_reference_material_plan.py",
+      "bytes": 7128,
+      "sha256": "1125b5afe64a922cd2f6f25d95747041f55e422658ae8c2aee828e89d44361cd",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_reference_role_contract.py",
+      "bytes": 6308,
+      "sha256": "0887b7c3c8f5996dab399cca1cf782801b2750dd7a0a73b9f0c972c7ff504c71",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_reference_safety.py",
+      "bytes": 5269,
+      "sha256": "f2544cd753488daccdd4af4ed6848a7e327d381653c4b910d2753377b8b99da3",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_replica_polish.py",
+      "bytes": 8725,
+      "sha256": "55ec3c2759928c739018d06b6f091d93477e489cfd9b55575813713b8b8cf8a6",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_single_reference.py",
+      "bytes": 94802,
+      "sha256": "bb0da0ae0b8cc9902cce66f1345f77b4d891c28fe7c4786ecdcc253adfb7b134",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_source_detail_repair.py",
+      "bytes": 2120,
+      "sha256": "2f9d21d25e915cf65572110f62718193af073805fa94431d875fc3e495a0f25f",
+      "status": "new"
+    },
+    {
+      "file": "tests/test_two_workflows.py",
+      "bytes": 33278,
+      "sha256": "da6cdd01695ca6c69e0a3330f1939ee1e9e452e31c92d8eee3d61d386b2bce10",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_ui_r4.py",
+      "bytes": 14542,
+      "sha256": "27dc7ab8ac7ac757fea0db172c804265ca7f94fee0a0ec2109b5d09599c257bd",
+      "status": "modified"
+    },
+    {
+      "file": "tests/test_ui_revision.py",
+      "bytes": 40752,
+      "sha256": "6592ae6850fb58f143eb89cca8e246f87cc977ae8a032aa85b4dfd98d82871bc",
+      "status": "modified"
+    },
+    {
+      "file": "tools/e2e_detail_blockout_bg.py",
+      "bytes": 11588,
+      "sha256": "60b5154463dacfbab430f30e850b6a928cdc4466039e2d0e3a50d7aae16da3b6",
+      "status": "modified"
+    },
+    {
+      "file": "tools/e2e_precise_bg.py",
+      "bytes": 9769,
+      "sha256": "c48b908f4a0eb3c295def79122f73ce6d4fa35b88c343d065669fbaa955324ff",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/antigravity_client.py",
+      "bytes": 50822,
+      "sha256": "324f87a2e8e1af455bffd16c33d7845f0a2b4ba169dc30537497a8a851dfffb3",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/appearance_lock.py",
+      "bytes": 11478,
+      "sha256": "d74ca415349864d73a8aa854bf38592ba128dbaac3e777c015c3de34e850e138",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/codex_client.py",
+      "bytes": 40272,
+      "sha256": "743842e9bef270778a3d370f9c379b4e731c4bfb2b08ae5a4dbb3798dc3001c1",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/codex_direct.py",
+      "bytes": 118150,
+      "sha256": "1efe081f6f45870eb27efd72e72b737f1ad3f014fd89ae711d8570437511bf85",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/multiview.py",
+      "bytes": 128131,
+      "sha256": "0fd76846b099ac2f186557265db829c00029da6888bcc1772911df410589f22e",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/native_product_finish.py",
+      "bytes": 21417,
+      "sha256": "ffddd2f2f9573f4d9c31ef007de44b4b778867fe18c2cc94a00f4d90546efd8e",
+      "status": "new"
+    },
+    {
+      "file": "wondful_ai_renderer/operators.py",
+      "bytes": 340170,
+      "sha256": "3c594bf09ea4dc9b63f7cde4fdda94424dc42ab902f95a2b50fd36e5834fb439",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/product_projection.py",
+      "bytes": 11075,
+      "sha256": "8beeac0e5e0af3ac1c8947c2b280eeda5d260dd9a4523b8e167d88e7282aaaa2",
+      "status": "new"
+    },
+    {
+      "file": "wondful_ai_renderer/prompt_engine.py",
+      "bytes": 31796,
+      "sha256": "136f024e7a4e90c44e898434cec8af68e628379530ff88fbfcd76681ba58e24e",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/prompt_profiles.py",
+      "bytes": 3926,
+      "sha256": "deccd88d6af39dfef98c4e7f05e36c63d5894c7478cd67a09f1daf937e8f5cda",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/prompt_skills/wondful-render-director/SKILL.md",
+      "bytes": 4532,
+      "sha256": "1c60426a3a959b86d97395d9e6aedb81e5cfc3d7d62116e73aae601a524fe473",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/prompt_skills/wondful-render-director/references/commercial.md",
+      "bytes": 1726,
+      "sha256": "e6ad8f75ad62fffbdaf191479e00cff125ad2d248627599d4404bb628970e204",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/properties.py",
+      "bytes": 63659,
+      "sha256": "540a243cfb003952208a3b2a3f32986e38b6e9c4e1427c6da37222c16363b28e",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/reference_material_plan.py",
+      "bytes": 9518,
+      "sha256": "3d8fccdd2f7c26601add1af934a09b141d6ac15cb27df464b72b6441e5fd01fe",
+      "status": "new"
+    },
+    {
+      "file": "wondful_ai_renderer/source_detail_repair.py",
+      "bytes": 1174,
+      "sha256": "6523b02a458bdc1070b2d9edfb57abd7b9625cbc35c53401ee64bf5359700692",
+      "status": "new"
+    },
+    {
+      "file": "wondful_ai_renderer/source_reference.py",
+      "bytes": 14331,
+      "sha256": "fa853a082180a624f0ff6b73e8d716031865da619d476bc015a78ff4cc0a73d6",
+      "status": "new"
+    },
+    {
+      "file": "wondful_ai_renderer/static_scene.py",
+      "bytes": 15939,
+      "sha256": "4a2858e0192f3780d3121021ecb7a95c6e35eb4cb09188ce34774a788b9afab0",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/ui.py",
+      "bytes": 78156,
+      "sha256": "f59785ff33a248e3196d3cd2d16da0a590b83d439fc16dd6cd3ffac63715dddf",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/ui_components.py",
+      "bytes": 10983,
+      "sha256": "8899fb0bc768758bf6fb8947db6072bcef920ddd2602a8c8f0ecab0a0e1cc16d",
+      "status": "modified"
+    },
+    {
+      "file": "wondful_ai_renderer/workflow.py",
+      "bytes": 14171,
+      "sha256": "7dad3f2ad3d188d245c7bef7ff2f8c8903879d270db0884eaf65babdfab6aeb3",
+      "status": "modified"
+    }
+  ]
+}

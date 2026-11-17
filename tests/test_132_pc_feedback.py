@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -321,11 +322,37 @@ class CodexExecCollage(unittest.TestCase):
         self.assertTrue((tmp / "reference_fit_out.json").is_file())
 
     def test_fallback_passes_bundle_roles(self):
-        src = (PKG / "codex_direct.py").read_text(encoding="utf-8")
-        i = src.index("def generate_with_fallback(")
-        body = src[i:i + 9000]
-        self.assertIn("reference_roles=roles", body)
-        self.assertIn('state["collage"]', body)
+        with tempfile.TemporaryDirectory(prefix="wondful132roles_") as folder:
+            tmp = Path(folder).resolve()
+            roles = ["camera", "product", "structure", "structure", "structure", "building", "building"]
+            refs = [png(tmp / f"input_{i}.png",160,90) for i in range(len(roles))]
+            manifest = [{"path":p,"members":[{"path":p,"role":role,"reference":i}]}
+                        for i,(p,role) in enumerate(zip(refs,roles),1)]
+            explicit = {refs[2]:("structure","专用深度控制")}
+            forwarded = {}
+            def fallback(**kwargs):
+                forwarded.update(kwargs)
+                return CC.generate_image(**kwargs)
+            def exec_turn(**kwargs):
+                Path(tmp/'out.png').write_bytes(Path(refs[0]).read_bytes())
+                return "WONDFUL_IMAGEGEN_OK"
+            state = {}
+            args = dict(prompt="preserve identity and geometry",reference_paths=refs,edit_base_path=refs[0],
+                        output_path=str(tmp/'out.png'),cwd=str(tmp),timeout=30,reference_roles=explicit)
+            with patch.object(direct,"edit_image",side_effect=direct.DirectEditError("endpoint",kind="endpoint",fatal=True)), \
+                 patch.object(CC,"_exec_turn",side_effect=exec_turn) as turn:
+                result = direct.generate_with_fallback(args,fallback=fallback,state=state,size="160x90",manifest=manifest)
+            turn.assert_called_once()
+            for path,role in zip(refs,roles):
+                self.assertEqual(forwarded['reference_roles'][path][0],role)
+            self.assertEqual(forwarded['reference_roles'][refs[2]],explicit[refs[2]])
+            self.assertEqual(turn.call_args.kwargs['image_paths'][0],refs[0])
+            self.assertLessEqual(len(turn.call_args.kwargs['image_paths']),5)
+            self.assertIn("专用深度控制",turn.call_args.kwargs['prompt'])
+            self.assertIn("【参考图拼图】",turn.call_args.kwargs['prompt'])
+            self.assertGreater(result['collage']['merged'],0)
+            self.assertEqual(state['collage'],result['collage']['merged'])
+            self.assertEqual(state['fallbacks'],1)
 
 
 class DirectCollage(DirectEditTestBase):

@@ -13,11 +13,23 @@ class CardUITests(unittest.TestCase):
 
     def test_current_cards_follow_workflow_order(self):
         draw = self.src[self.src.index("class WONDFUL_PT_main"):]
-        positions = [draw.index('_step_card(layout, 1, "车模与相机"'),
-                     draw.index('_step_card(layout, 2, "目标图与粗模" if replica else "环境参考"'),
-                     draw.index('_step_card(layout, 3, "预览与调整"', draw.index("if replica:")),
-                     draw.index('_step_card(layout,4,"渲染复刻图" if replica else "生成效果图"')]
+        tree = ast.parse(self.src)
+        panel = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "WONDFUL_PT_main")
+        method = next(n for n in panel.body if isinstance(n, ast.FunctionDef) and n.name == "_draw_main")
+        cards = sorted((n for n in ast.walk(method) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == "_step_card"
+                        and isinstance(n.args[0], ast.Name) and n.args[0].id == "layout"), key=lambda n:n.lineno)
+        first = {number:next(n for n in cards if ast.literal_eval(n.args[1]) == number) for number in (1,2,3,4)}
+        positions = [first[number].lineno for number in (1,2,3,4)]
         self.assertEqual(positions, sorted(positions))
+        for number, condition, labels in ((1, "source_only", ("产品结构与身份", "车模与相机")),
+                                          (2, "replica", ("复刻目标图", "环境参考")),
+                                          (4, "replica", ("渲染复刻图", "生成效果图"))):
+            title = first[number].args[2]
+            self.assertIsInstance(title, ast.IfExp)
+            self.assertEqual((ast.literal_eval(title.body),ast.literal_eval(title.orelse)),labels)
+            self.assertEqual(title.test.id, condition)
+        self.assertEqual(ast.literal_eval(first[3].args[2]), "需求与提示词")
         self.assertIn('action = modes.operator("wondful.set_workflow_mode"', draw)
         self.assertIn('depress=(props.workflow_mode == value)', draw)
 
@@ -30,8 +42,16 @@ class CardUITests(unittest.TestCase):
 
     def test_large_thumbnails_and_compact_actions(self):
         components = (PKG / "ui_components.py").read_text()
-        self.assertIn("row.template_icon(icon_value=icon, scale=scale)", components)
-        self.assertIn("preview_tile_count(image, fit)", components)
+        tree = ast.parse(components)
+        preview = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "preview")
+        calls = [node for node in ast.walk(preview) if isinstance(node, ast.Call)]
+        icons = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "template_icon"]
+        self.assertEqual(len(icons), 1)
+        self.assertEqual(ast.unparse(next(kw.value for kw in icons[0].keywords if kw.arg == "scale")),
+                         "preview_scale(context)")
+        cached = next(node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "icon_for_image")
+        self.assertEqual(ast.literal_eval(next(kw.value for kw in cached.keywords if kw.arg == "fit")), "seamless")
+        self.assertFalse(any(isinstance(node, (ast.For, ast.While)) for node in ast.walk(preview)))
         for icon in ("PASTEDOWN", "FILEBROWSER", "X"):
             self.assertIn(f"icon='{icon}'", components)
 

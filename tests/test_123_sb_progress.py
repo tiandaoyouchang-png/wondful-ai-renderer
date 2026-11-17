@@ -123,7 +123,7 @@ class OperatorStagesTest(unittest.TestCase):
         self.assertEqual(self._stages("plain"), ["ANALYZE", "BUILD", "CAMERA"])
         self.assertEqual((r["status"], r["final_stage"], r["failed_stage"]), ("IDLE", "DONE", ""))
         self.assertEqual(self._bar("plain"), sorted(self._bar("plain")))
-        self.assertEqual(r["camera"], "Wondful 参考相机")
+        self.assertEqual(r["camera"], "Wondful 参考相机 · 001")   # numbered per-version camera
         self.assertIn("个体块", r["note"])
         texts = [t[3] for t in r["trace"] if t[0] == "BLOCKOUT"]
         self.assertTrue(all(t.startswith("场景粗模：") and " · 已用 " in t for t in texts), texts)

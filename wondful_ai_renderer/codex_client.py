@@ -388,12 +388,19 @@ def polish_prompt(
     explicit_path: str = "",
     model: str = "",
     timeout: int = 900,
+    response_format: str = "text",
 ) -> str:
+    if response_format == "text":
+        suffix = "\n\n只输出最终可直接用于图像生成的提示词正文。不要解释分析过程，不要输出 Markdown 标题或代码块。请尽量组织成连续自然的一段正文，不要用空行分段，不要输出编号列表。"
+    elif response_format == "json":
+        suffix = "\n\n严格按系统要求只输出 JSON 对象；不要添加 Markdown、代码块或任何额外文字。"
+    else:
+        raise ValueError("response_format 必须是 text 或 json")
     prompt = (
         system_prompt.strip()
         + "\n\n--- 当前任务 ---\n"
         + user_text.strip()
-        + "\n\n只输出最终可直接用于图像生成的提示词正文。不要解释分析过程，不要输出 Markdown 标题或代码块。请尽量组织成连续自然的一段正文，不要用空行分段，不要输出编号列表。"
+        + suffix
     )
     text = _exec_turn(
         explicit_path=explicit_path,
@@ -564,11 +571,16 @@ def generate_image(
     structure_control: dict | None = None,
     reference_roles: dict | None = None,
     collage_long_edge: int = 2048,
+    original_first: bool = False,
+    source_only: bool = False,
+    camera_capture: bool = False,
+    product_projection_path: str = "",
 ) -> dict:
     """``reference_roles`` (path → (role, label)): lets the 参考图拼图 fit name every cell; unknown paths are
     classified by file name."""
     from . import static_scene as _SS
-    prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体 (no pedestrians / other vehicles / animals)
+    if not source_only:
+        prompt = _SS.apply(prompt)   # 1.2.6 只做场景相关物体
     from .reference_bundle import check_image_capacity, reference_limit_error, ReferenceLimitError, unique_paths
     session_dir = Path(cwd).resolve()
     target = Path(output_path).resolve()
@@ -582,6 +594,21 @@ def generate_image(
             raise CodexError(f"{label} 已不存在，请重新捕获结构图。")
     edit_base = str(Path(edit_base_path).resolve()) if edit_base_path and Path(edit_base_path).exists() else ""
     edit_mask = str(Path(edit_mask_path).resolve()) if edit_mask_path and Path(edit_mask_path).exists() else ""
+    if source_only:
+        from .source_reference import validate_inputs
+        if len(refs) != (3 if product_projection_path else 2) or edit_base != refs[0] or edit_mask:
+            raise CodexError("单图编辑需要原图和产品身份图，不能使用遮罩。")
+        try:
+            primary = validate_inputs(refs[0], refs[-1], 5, projection=product_projection_path)
+            if [p for p, _r, _l in primary] != refs:
+                raise ValueError("原图、产品投影和身份图顺序不正确。")
+        except (ValueError, OSError) as exc:
+            raise CodexError(str(exc)) from exc
+    if original_first:
+        base_role = (reference_roles or {}).get(edit_base, "")
+        base_role = base_role[0] if isinstance(base_role, (tuple, list)) else base_role
+        if base_role == "source_canvas":
+            edit_mask = ""
     # Keep the documented reference numbering stable: camera_reference / structure /
     # product / person / style remain first.  Edit base + mask are appended as explicit
     # editing assets so a correction pass never shifts Reference 1 away from Blender.
@@ -602,11 +629,14 @@ def generate_image(
             attached, collage_note, collage_info = _RC.fit_inputs(
                 attached, _MAXP, out_dir=str(session_dir), roles=roles, labels=labels,
                 fixed=[p for p in (refs[:1] + [edit_base, edit_mask]
-                                   + [path for path in attached if roles.get(path) == "scene_reference"]) if p],
+                                   + [path for path in attached if roles.get(path) in
+                                      {"scene_reference", "source_canvas", "product_projection"}]) if p],
                 long_edge=int(collage_long_edge or 2048),
                 tag=target.stem[-24:])
         except _RC.CollageError as exc:
             raise ReferenceLimitError(f"参考图拼图失败：{exc}") from exc
+        if original_first and collage_info.get("text_only"):
+            raise ReferenceLimitError("身份参考无法完整装入本轮图像输入，请减少参考图后再生成。")
         msg = _RC.panel_text(collage_info)
         if msg:
             print(f"[Wondful] {msg}（{collage_info['before']} → {collage_info['after']} 张图像输入）")
@@ -666,6 +696,8 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
         edit_note = """
 如果没有可用 edit base，才退回普通多参考图生成；仍必须把 camera_reference 作为最高优先级结构基准。
 """
+    if camera_capture:
+        edit_note = edit_note.replace("白模", "相机画面")
 
     task = f"""
 你是Wondful AI 渲染器的最终图像生成执行器。
@@ -677,7 +709,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 参考图顺序：
 1. Camera Base：Blender 当前 Scene Camera 的原位编辑底图，是整张画面的最高结构权威。
 2. 随后的若干附件若属于 Blender Structure Packet，则只承担各自的 Mask / Depth / Normal / Silhouette / Part-ID 结构职责。
-3. Structure Packet 后的 product 只提供产品身份与造型识别；person 提供人物身份；环境／style 提供照明及视觉语言，均不能推翻 Blender 结构。
+3. Structure Packet 后的 product／三视图只提供各部件材质属性；当前 Blender 模型决定产品几何、灯组、轮辐和车漆色相。person 提供人物身份；环境／style 提供照明及视觉语言，均不能推翻 Blender 结构或重涂车漆。
 
 {REFERENCE_LIGHTING_POLICY}
 
@@ -692,7 +724,7 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 - 使用内置 image generation 工具真正生成/编辑图片。
 - 最终只生成一张图。
 - 严格保持 Blender Camera Output 的宽高方向和构图比例。
-- 产品身份参考只决定“产品长什么样”；camera_reference + structure guide/mask 决定“产品在哪里、占多大、什么视角”。
+- 当前 Blender 模型决定“产品长什么样”、灯组、轮辐与车漆色相；产品身份图／三视图只核对部件材质。camera_reference + structure guide/mask 决定“产品在哪里、占多大、什么视角”。
 - 生成完成后，将最终位图复制或保存到这个绝对路径：
   {target}
 - 在结束前必须检查该路径确实存在且是 PNG/JPG/WEBP 位图。
@@ -701,6 +733,60 @@ Structure Packet 全部是控制数据，不是最终外观：Mask 锁 footprint
 - 只有没有暴露 image generation/image_gen 工具时，回复 `WONDFUL_IMAGEGEN_UNAVAILABLE:` 并说明原因。
 - 参数超限、配额、工具执行失败或没有位图时，回复 `WONDFUL_IMAGEGEN_ERROR:` 并保留实际原因；不能据此判断 OAuth 无效。不要假装已经生成成功。
 - 如果成功，最后只回复 `WONDFUL_IMAGEGEN_OK` 和实际文件路径。
+""".strip()
+
+    if source_only:
+        from .source_reference import PROJECTED_IDENTITY_POLICY
+        role_text = (PROJECTED_IDENTITY_POLICY if product_projection_path else
+                     "第一张附件是原始目标图和编辑画布，保留其整图氛围；第二张是目标产品身份图，只核对部件材质。\n"
+                     "当前 Blender 模型决定替换产品的几何与车漆色相；按原图环境自然融合，除明确具体用户车漆请求外不得重涂。")
+        projection_note = "不得丢弃产品投影；" if product_projection_path else ""
+        task = f"""
+你是 Wondful 原图编辑执行器。使用内置 image generation / image_gen 恰好编辑一张图片。
+{role_text}
+完整生成要求：
+{prompt.strip()}
+按顺序只使用这 {len(primary)} 张附件：{json.dumps(attached, ensure_ascii=False)}。{projection_note}不添加其他输入或遮罩。
+保存最终 PNG/JPG/WEBP 位图到：{target}。不得用代码或 Blender 伪造图像。
+工具不可用回复 WONDFUL_IMAGEGEN_UNAVAILABLE:；失败回复 WONDFUL_IMAGEGEN_ERROR: 并保留原因。
+成功回复 WONDFUL_IMAGEGEN_OK 和实际文件路径。
+""".strip()
+    elif original_first:
+        roles = {str(Path(p).resolve()): (v[0] if isinstance(v, (tuple, list)) else v)
+                 for p, v in (reference_roles or {}).items()}
+        if edit_mask:
+            roles[edit_mask] = "mask"
+        if (not attached or attached[0] != edit_base or roles.get(edit_base) not in {"source_canvas", "candidate"}
+                or not any(roles.get(p) == "source_canvas" for p in attached)
+                or not any(roles.get(p) == "product_projection" for p in attached)):
+            raise CodexError("原图编辑缺少独立的来源画布或当前产品投影角色")
+        role_note = "\n".join(f"图 {i}：{roles.get(p, '身份参考拼图')} — {p}"
+                              for i, p in enumerate(attached, 1))
+        product_structure = ""
+        if structure_control and structure_control.get("enabled"):
+            product_structure = ("仅限目标产品的局部投影数据：product_bbox_normalized = "
+                                 + str(structure_control.get("bbox_normalized", []))
+                                 + "；product_center_normalized = " + str(structure_control.get("center_normalized", []))
+                                 + "；wheel anchors = " + str(structure_control.get("wheel_points_normalized", [])))
+        task = f"""
+你是 Wondful 图像编辑执行器。使用内置 image generation / image_gen 恰好编辑一张图，第一张附件是编辑画布。
+来源图控制环境、地面、建筑、相机、构图、曝光与镜头光学效果；来源中的旧产品必须替换。
+product_projection 仅控制目标产品的局部位置、尺度、透视和轮廓，不重建其白模环境或地形。
+备用正文中的旧环境体块、地形、建筑或构图重建指令不生效，图像职责以上方实际清单为准。
+当前 Blender 投影与显式外观锁定决定目标产品造型、灯组、轮辐和车漆色相；身份图／三视图仅决定各部件材质，不锁来源图中的旧产品。
+实际图像清单优先于正文旧编号：
+{role_note}
+{product_structure}
+{('编辑候选画布，使用 Mask ' + edit_mask + '：透明区域可修复，不透明区域保持原样。') if edit_mask else '初次来源画布编辑不使用白模坐标 Mask。'}
+完整生成要求：
+{prompt.strip()}
+{collage_note}
+只使用本轮附件路径，referenced_image_paths 最多 5 个，不重复画布，不同时传 num_last_images_to_include。
+附件清单：{json.dumps(attached, ensure_ascii=False)}
+保存最终 PNG/JPG/WEBP 位图到：{target}。结束前确认文件存在。
+不使用 Python、SVG、HTML 或 Blender 伪造最终图。
+工具不可用时回复 WONDFUL_IMAGEGEN_UNAVAILABLE:；执行失败或没有位图时回复 WONDFUL_IMAGEGEN_ERROR: 并保留原因。
+成功只回复 WONDFUL_IMAGEGEN_OK 和实际文件路径。
 """.strip()
 
     tracker = ArtifactTracker(session_dir, attached)

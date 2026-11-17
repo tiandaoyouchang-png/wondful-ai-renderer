@@ -95,13 +95,14 @@ class PromptBuildTests(unittest.TestCase):
         self.assertIn("所有场景保持一致的厚清漆", prompt)
         self.assertIn("前车牌、车标", prompt)
         self.assertNotIn("保持构图不变", prompt)
-        self.assertIn("Blender 材质为准", prompt)
+        self.assertIn("Blender 当前材质提供车身车漆色相", prompt)
 
     def test_product_ref_color_source_changes_rule(self):
         text = pe.build_polish_user_text("北欧客厅", 1, 0, 1, 1280, 720, color_source="PRODUCT_REF")
-        self.assertIn("提取产品自身的配色与表面材质", text)
+        self.assertIn("兼容旧 PRODUCT_REF", text)
+        self.assertIn("绝不提取或覆盖车身车漆颜色", text)
         text = pe.build_polish_user_text("北欧客厅", 1, 0, 1, 1280, 720)
-        self.assertNotIn("提取产品自身的配色与表面材质", text)
+        self.assertNotIn("兼容旧 PRODUCT_REF", text)
 
     def test_polish_text_mentions_lock(self):
         text = pe.build_polish_user_text("茶室", 0, 0, 1, 1280, 720,

@@ -1,0 +1,116 @@
+{
+  "prepared_date": "2026-11-15",
+  "branch": "fix/wondful-render-review",
+  "current_visual_acceptance": false,
+  "latest_user_feedback": [
+    "车漆还是有点假",
+    "车身上细节少了很多"
+  ],
+  "historical_paint_v2_pass_superseded": true,
+  "historical_paint_v2_gate_scope": "subjective single-image paint-only assistant review; did not certify geometry or identity; superseded by user rejection",
+  "recent_image_request_attempts": 7,
+  "recent_images_received": 4,
+  "count_excludes_earlier_native_baseline": true,
+  "new_image_requests_during_this_upload": 0,
+  "historical_neon_test": {
+    "workflow_passed": true,
+    "identity_detail_acceptance": "partial; precise plate text, badges, lamp internals and spokes not certified",
+    "quality_requested": "high",
+    "quality_reported": "medium",
+    "size_requested": "1856x1040",
+    "size_reported": "1675x939",
+    "final_canvas": "1456x816",
+    "native_replacement": false,
+    "geometry_audit": false,
+    "new_raw_sha256": "7894520b435b4cb2eeac6faff6c17d76fb33f2dab6eaf62ddc0e9159c59b98ce"
+  },
+  "historical_desert_test": {
+    "workflow_passed": true,
+    "visual_acceptance": false,
+    "quality_requested": "high",
+    "quality_reported": "medium",
+    "size_requested": "2048x1152",
+    "size_reported": "1672x941",
+    "final_dimensions": [
+      1280,
+      720
+    ],
+    "observations": {
+      "lighting_and_ground_contact": "Warm light and contact shadow/dust are broadly coherent; no neon/rain-night carryover.",
+      "product_placement": "FAILED: output product appears higher and larger than the fresh model projection.",
+      "surface_realism": "PARTIAL: smoother/flatter green body retains a rendered appearance.",
+      "precise_identity_details": "Not certified; lamps, spokes, badge and plate text remain AI generated."
+    },
+    "projection_alpha_bbox": [
+      301,
+      353,
+      828,
+      594
+    ],
+    "output_vehicle_bbox_visual_estimate": [
+      264,
+      208,
+      918,
+      483
+    ],
+    "bbox_method": "Projection alpha >16 measured; output bbox is manual visual estimate, not segmentation or IoU.",
+    "final_equals_fitted_ai": true,
+    "automatic_retries": 0
+  },
+  "paint_v2_real_run": {
+    "workflow_passed": true,
+    "new_projection": 1,
+    "real_polish_calls": 2,
+    "image_requests": 1,
+    "images_received": 1,
+    "automatic_retries": 0,
+    "quality_requested": "high",
+    "quality_reported": "medium",
+    "size_reported": "1672x941",
+    "final_dimensions": [
+      1280,
+      720
+    ],
+    "native_replacement": false,
+    "material_plan_applied": false,
+    "final_equals_fitted_AI": true,
+    "raw_sidecar_equals_new_provider_raw": true,
+    "role_policy_version": 7
+  },
+  "native_local_audit": {
+    "dimensions": [
+      2560,
+      1440
+    ],
+    "render_result": "{'detail': True, 'keep': False, 'matid': False, 'keep_slots': 0, 'engine': 'CYCLES', 'glass_slots': 0, 'matte_slots': 0, 'geometry': True, 'geometry_seconds': 0.6}",
+    "render_resolution_restored": true,
+    "sha_before": "6ebb43ae74133f92b6d4aee177644fc1dad9028665ff7b4b5e69de3fbe5db9e2",
+    "sha_after": "6ebb43ae74133f92b6d4aee177644fc1dad9028665ff7b4b5e69de3fbe5db9e2",
+    "sha_equal": true,
+    "state_digest_before": "a3dc346bda11fc42cbbfa5416ce4bb48bb87c44691276ba2d8355d532837a348",
+    "state_digest_after": "a3dc346bda11fc42cbbfa5416ce4bb48bb87c44691276ba2d8355d532837a348",
+    "state_equal": true
+  },
+  "official_comparison": {
+    "version": "1.2.4",
+    "release_zip_sha256": "88580c1c8306d3ea50bc12968ad6ac949abda2cbf4bc5a5835bb204b97506f2b",
+    "restoration_implemented": false
+  },
+  "repository_matches_installed_package": {
+    "files": 87,
+    "different_files": 0,
+    "checked_during_upload": true
+  },
+  "preserved_local_replay": {
+    "new_provider_calls": 0,
+    "not_a_new_generation": true,
+    "raw_and_final_sha256": "9a6c8911bffab4fd7d8ea983e884081707b40c45df4dec9a7dbe4e1701889d40"
+  },
+  "excluded": [
+    "credentials",
+    "provider request/base64 dumps",
+    "caches and temporary configs",
+    "blend project files",
+    "third-party downloaded reference photographs"
+  ]
+}

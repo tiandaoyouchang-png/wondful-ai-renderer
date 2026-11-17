@@ -15,6 +15,7 @@ Same harness as tools/sb_progress_bg.py (fake analysis = fixture JSON; modal loo
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -65,10 +66,14 @@ def patch(OPS):
 
 
 def camera_values():
-    from wondful_ai_renderer import scene_blockout as SB
-    txt = bpy.data.texts.get(SB.TEXT_NAME)
-    cam = json.loads(txt.as_string()).get("camera", {}) if txt else {}
-    c = bpy.context.scene.camera
+    sc = bpy.context.scene
+    coll = sc.wondful_ai.sb_active_collection
+    assert coll is not None and coll.get("wondful_sb_active") and coll.get("wondful_sb_version")
+    txt = bpy.data.texts.get(coll["wondful_sb_analysis_text"])
+    assert txt is not None
+    cam = json.loads(txt.as_string())["camera"]
+    c = sc.camera
+    assert c is not None and c.get("wondful_sb_version") == coll["wondful_sb_version"]
     out = {k: round(float(cam.get(k, 0)), 3) for k in ("height_m", "pitch_deg", "roll_deg", "hfov_deg")}
     if c is not None and c.type == "CAMERA":
         out["lens"] = round(c.data.lens, 3)
@@ -97,9 +102,11 @@ def run(OPS, props, kw, calls, limit=600):
                 OPS._ACTIVE_OPERATOR = None
         sample()
     mine = calls[n0:]
-    from wondful_ai_renderer import scene_blockout as SB
-    coll = bpy.data.collections.get(SB.COLLECTION_NAME)
-    objs = sorted(o.name for o in coll.all_objects) if coll else []
+    coll = props.sb_active_collection
+    assert coll is not None and coll.get("wondful_sb_active") and coll.get("wondful_sb_version")
+    # Compare generated object identities across retained versions, ignoring
+    # only Blender's allocation suffix and the explicit camera version suffix.
+    objs = sorted(re.sub(r" · \d{3,}$", "", re.sub(r"\.\d{3,}$", "", o.name)) for o in coll.all_objects)
     return {"op": sorted(r), "trace": seen, "note": props.last_sb_note, "status": props.status,
             "failed_stage": props.sb_failed_stage, "final_stage": props.sb_stage,
             "camera_values": camera_values(), "objects": objs, "calls": len(mine),
@@ -140,6 +147,7 @@ def main():
         sc.camera = cam
         sc.render.resolution_x, sc.render.resolution_y = 1600, 900
         props = sc.wondful_ai
+        props.workflow_mode = "REFERENCE"
         props.product_collection = coll
         tmp = tempfile.mkdtemp()
         ref = os.path.join(tmp, "env_ref.png")
@@ -147,6 +155,14 @@ def main():
         img[:45] = (120, 170, 230, 255)
         img[45:] = (190, 160, 110, 255)
         png_io.write_png(ref, img)
+        identity = os.path.join(tmp, "product_identity.png")
+        product = np.full((90, 160, 4), 255, np.uint8)
+        product[30:60, 34:126] = (140, 140, 140, 255)
+        product[30:35, 34:126] = (185, 185, 185, 255)
+        png_io.write_png(identity, product)
+        slot = props.product_images.add()
+        slot.image = bpy.data.images.load(identity, check_existing=False)
+        slot.source_path = identity
         props.sb_image_path = ref
         props.sb_set_camera = True
         props.sb_correct = False

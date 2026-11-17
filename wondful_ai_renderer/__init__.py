@@ -83,7 +83,7 @@ from .operators import (
 )
 from .properties import WONDFUL_AISettings, WONDFUL_AddonPreferences, WONDFUL_PromptLine, WONDFUL_ReferenceItem, WONDFUL_ModelItem, WONDFUL_MVCameraItem, sync_prompt_editor
 from .ui import WONDFUL_PT_main, WONDFUL_UL_prompt_lines, WONDFUL_UL_reference_items, WONDFUL_UL_render_views
-from . import update_ops, ui_actions
+from . import update_ops, ui_actions, style_render_op, camera_align_op
 
 
 CLASSES = (
@@ -153,6 +153,8 @@ CLASSES = (
     WONDFUL_PT_compare_workspace,
     *update_ops.CLASSES,
     *ui_actions.CLASSES,
+    *style_render_op.CLASSES,
+    *camera_align_op.CLASSES,
     WONDFUL_PT_main,
 )
 

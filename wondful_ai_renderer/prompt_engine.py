@@ -2,22 +2,22 @@ from __future__ import annotations
 
 from .composition import canvas_contract
 
-REFERENCE_POLICY_VERSION = 2
+REFERENCE_POLICY_VERSION = 4
 
 PRODUCT_REFERENCE_RULE = (
-    "仅参考产品身份与造型识别细节，例如轮廓、前脸、灯组形状、轮毂和部件特征；"
-    "不提取产品图的材质、配色、灯光、高光、反射、阴影、曝光、色温或背景。"
-    "造型识别不得改变 Blender 已确定的几何、构图和相机。"
+    "产品身份图或三视图只用于确定各部件的材质属性；不提取其车漆颜色、灯光、高光、反射、阴影、曝光、色温或背景。"
+    "Blender 当前模型唯一决定产品几何、车型造型、灯组内部和轮辐结构，以及车身车漆色相。"
+    "环境只改变受光和反射，不能改变固有车漆色相；只有用户明确指定具体车漆颜色时才可覆盖。"
 )
 PRODUCT_REFERENCE_RULE_WITH_COLOR = (
-    "参考产品身份与造型识别细节，并提取产品自身的配色与表面材质（例如漆面颜色、织物、皮革、金属、木纹）；"
+    "兼容旧 PRODUCT_REF 设置：产品身份图或三视图仍只确定各部件材质属性，绝不提取或覆盖车身车漆颜色。"
     "不提取产品图的灯光、高光位置、反射亮条、阴影、曝光、色温或背景。"
-    "造型识别不得改变 Blender 已确定的几何、构图和相机。"
+    "Blender 当前模型唯一决定产品几何、灯组内部、轮辐结构和车漆色相；只有用户明确指定具体车漆颜色时才可覆盖。"
 )
 
 THREE_VIEW_NOTE = (
     "产品参考图可能是三视图（同一产品的正面／侧面／背面拼在一张图里）："
-    "把各分格当作同一个产品的不同角度来理解造型，不要把拼版、分格线、标注文字或多个产品画进结果。"
+    "把各分格当作同一产品的部件材质样本；不得从中理解或改写造型，不要把拼版、分格线、标注文字或多个产品画进结果。"
 )
 
 
@@ -34,22 +34,22 @@ ENVIRONMENT_REFERENCE_RULE = (
 )
 REFERENCE_LIGHTING_POLICY = (
     "【参考职责与受光规则】\n"
-    "产品图只用于产品身份与造型识别，不提供任何材质、配色或打光依据。"
+    "三视图／产品身份图只用于各部件材质属性，不提供车漆颜色、几何或打光依据。"
     "产品光照必须由当前环境／风格参考图推导，包含主光方向、色温、软硬、"
     "亮暗分布、环境反射、高光形态和接触阴影，使产品与环境具有一致的受光关系。"
     "不得保留或照搬产品图原有的棚拍光、轮廓光、反射亮条、阴影、曝光或背景；"
     "也不得把 Blender Camera Base 的临时照明或结构控制图的明暗当作最终打光。"
     "环境参考存在时，正文或旧 AI 提示词中与该环境冲突的产品打光描述必须重建。"
     "没有环境参考时，使用用户文字中的灯光要求；未指定时采用自然中性的统一环境光，"
-    "仍不得借用产品图打光。材质与配色依据用户文字和环境／风格要求确定，不从产品图提取。"
-    "逐图说明只能在各自类别职责内收窄参考范围，不能把产品图升级为灯光或材质参考。"
+    "仍不得借用产品图打光。车漆色相依据当前 Blender 模型，只有用户明确指定具体颜色时可覆盖；材质属性可由三视图逐部件核对。"
+    "逐图说明只能在各自类别职责内收窄参考范围，不能把产品图升级为车漆、几何或打光参考。"
 )
 
 
 _COLOR_POLICY = {
-    "BLENDER": "产品配色与材质以【产品外观锁定】中的 Blender 材质为准；环境只改变它的受光、反射与阴影，不改变固有色。",
-    "PRODUCT_REF": "例外：本次产品配色与表面材质允许从产品参考图提取，但仍不得提取产品图的打光、阴影、曝光或背景。",
-    "TEXT": "",
+    "BLENDER": "车身车漆色相以【产品外观锁定】中的 Blender 当前材质为准；环境只改变受光、反射与阴影，不改变固有色。",
+    "PRODUCT_REF": "兼容旧 PRODUCT_REF：三视图只补充各部件材质属性，绝不允许参考图重涂车身车漆色相。",
+    "TEXT": "车身车漆色相仍以 Blender 当前模型为准；只有用户明确指定具体车漆颜色时才可覆盖。",
 }
 
 
@@ -74,8 +74,8 @@ BASE_SYSTEM_PROMPT = r"""
 必须遵守：
 1. 不要在最终提示词中描述或约束构图、机位、焦段、裁切、主体二维位置、大小、角度、前后关系、遮挡、bbox、轮心坐标、地平线、消失点、画幅比例等 Structure 信息。
 2. 不要输出“严格保持构图”“不要重新构图”“禁止 zoom / pan / crop”“保持 Reference 1 位置”等结构性负面约束。结构由 Blender Structure Packet 本身提供，不靠文字重复约束。
-3. 产品参考图只提供产品身份和造型识别细节，绝不提供材质、配色与打光。人物图提供人物身份等信息；环境／风格图提供环境受光、材质表现、色调、摄影和氛围。任何参考图都不能接管 Blender 构图。
-4. 每张图的“参考什么”只在本类别职责内生效；冲突内容必须忽略，不能用产品图的逐图说明引入灯光、材质或配色。
+3. 当前 Blender 模型决定产品几何、车型造型、灯组、轮辐与车身车漆色相；产品身份图／三视图只提供各部件材质属性。人物图提供人物身份；环境／风格图提供整图环境受光、色调、摄影和氛围。任何参考图都不能接管 Blender 构图。
+4. 每张图的“参考什么”只在本类别职责内生效；冲突内容必须忽略，不能用产品图重写几何、车漆颜色或打光。
 5. Blender Camera Base 可以帮助理解当前场景是什么，但不要把它的空间结构翻译成文字提示词。
 6. 如果旧提示词中残留 2.x / 3.0 早期版本生成的构图锁定、坐标、相机、bbox、轮心、裁切、透视等文字，必须在本次润色中删除。
 
@@ -91,6 +91,26 @@ BASE_SYSTEM_PROMPT = r"""
 
 输出只给最终提示词正文，不解释分析过程或参考职责，不输出 Markdown 标题、编号、项目符号或代码块；尽量写成连续自然的一段正文。产品受光描述须来自环境参考的实际光照分析。
 """.strip() + "\n\n" + REFERENCE_LIGHTING_POLICY
+
+REFERENCE_ATMOSPHERE_POLICY = (
+    "【原始目标图外观优先】原始目标图是环境、相机、曝光与成像氛围的依据；白模仅控制目标产品的局部投影与几何。"
+    "具体描述并匹配产品相对背景的曝光、暗部与亮部各自的面积占比、阴影覆盖、负补光、局部反差和高光面积；"
+    "固有色和材质类别不变，但呈现亮度与饱和度必须随环境受光，不因产品展示而自动提亮暗部或增加补光。"
+    "区分主体运动、相机追随的方向性快门拖影与景深虚化，匹配实际可见的类型、方向和主观强度；"
+    "在白模投影不变的前提下保留这些成像效果，不把强烈动感改成静止或仅用浅景深替代。"
+    "空气、雾尘、扬尘、辉光和颗粒只按原图实际有无、浓度、覆盖范围与受光表现还原，"
+    "不统一稀释雾尘、压低反差或把曝光改成明亮通透。白天保持白天，静止保持静止，"
+    "没有的运动、尘雾或光效不要添加。几何风格与镜头成像分别判断，风格化几何也可以保留原图的摄影光学。"
+    "这些观察优先于通用的柔化、克制、增亮、细节清晰或画风模板；不得借此移动相机、改变产品轮廓、身份或固有色。"
+)
+
+REPLICA_POLISH_SYSTEM_PROMPT = r"""
+你是 Wondful AI 渲染器的参考图复刻提示词导演。你会收到：原始目标图、当前白模粗模预览，以及产品身份参考图。
+
+原始目标图定义必须保留的环境、相机与视觉意图：仅限本图实际可见的机位感、静止或运动状态、景深或模糊、环境纵深、照明、色调、材质、氛围和镜头成像语言。不要臆造未出现的运动、机位感、空气效果或时段。白模粗模预览仅控制目标产品的局部几何、透视、尺度和位置；不以粗模重建环境，也不要为了参考图里的另一辆车而改动真实产品身份。
+
+输出一段可直接用于生图的中文 Appearance Prompt。自然保留原图的视觉意图和摄影语言，保留用户手写需求与产品身份；不要输出坐标、bbox、尺寸或要求改变白模几何的指令。不要解释分析过程、不要标题或列表。
+""".strip() + "\n\n" + REFERENCE_LIGHTING_POLICY + "\n\n" + REFERENCE_ATMOSPHERE_POLICY
 
 
 
@@ -137,7 +157,7 @@ def _is_structure_clause(clause: str) -> bool:
     return not has_appearance
 
 
-def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
+def sanitize_appearance_prompt_report(text: str, *, preserve_visual_intent: bool = False) -> tuple[str, list[str]]:
     """Return (clean_prompt, removed_fragments) for an Appearance prompt."""
     import re
 
@@ -152,9 +172,29 @@ def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
             continue
         end = sentence[-1] if sentence[-1] in "。！？!?;；" else ""
         body = sentence[:-1] if end else sentence
-        clauses = [c for c in re.split(r"(?<=[，,、])", body) if c.strip()]
-        good = [c for c in clauses if not _is_structure_clause(c)]
-        removed.extend(c.strip("，,、 ") for c in clauses if _is_structure_clause(c))
+        # A bbox list is one control clause, including its internal commas.
+        separator = r"(?<=[，,、])(?![^\[\]]*\])" if preserve_visual_intent else r"(?<=[，,、])"
+        clauses = [c for c in re.split(separator, body) if c.strip()]
+        def keep(clause):
+            if preserve_visual_intent and re.search(
+                r"(?:^|[^a-z])(?:x|y|z)\s*=|bbox|坐标|轮心|重新构图|重新取景|裁切|裁剪|"
+                r"\b(?:move|reposition|reframe|crop|zoom|pan)\b|"
+                r"(?:移动|挪动|调整|改变|重设|切换).{0,8}(?:相机|机位|镜头|构图|焦段|位置|尺度)|"
+                r"(?:相机|机位|镜头).{0,8}(?:移动|挪动|改为|改成|拉近|拉远|抬高|降低)",
+                clause, re.IGNORECASE,
+            ):
+                return False
+            if not _is_structure_clause(clause):
+                return True
+            # Replica prompts legitimately describe the visual language present
+            # in the supplied target.  The white blockout remains the geometry
+            # authority; do not erase that visual intent while cleaning legacy
+            # generic composition instructions.
+            visual = ("机位", "俯拍", "仰拍", "平视", "鸟瞰", "倾斜", "俯仰", "滚转",
+                      "静态", "静止", "跟拍", "运动", "模糊", "焦段", "长焦", "广角", "透视", "景深")
+            return preserve_visual_intent and any(word in clause for word in visual)
+        good = [c for c in clauses if keep(c)]
+        removed.extend(c.strip("，,、 ") for c in clauses if not keep(c))
         if len(good) == len(clauses):
             kept.append(sentence)
         elif good:
@@ -163,14 +203,14 @@ def sanitize_appearance_prompt_report(text: str) -> tuple[str, list[str]]:
     return "".join(kept).strip(), [r for r in removed if r]
 
 
-def sanitize_appearance_prompt(text: str) -> str:
+def sanitize_appearance_prompt(text: str, *, preserve_visual_intent: bool = False) -> str:
     """Remove structure-control clauses from an Appearance prompt.
 
     Deterministic guard after AI polish and again before final render. Since
     3.1.7 it removes clauses, not whole sentences, and keeps clauses that are
     about light, colour or material even if they mention 位置/透视/地平线.
     """
-    return sanitize_appearance_prompt_report(text)[0]
+    return sanitize_appearance_prompt_report(text, preserve_visual_intent=preserve_visual_intent)[0]
 
 STYLE_ANALYSIS_SYSTEM_PROMPT = r"""
 你是 Wondful AI 渲染器的视觉风格分析器。你只负责读取本轮提供的环境／风格参考图，提取可迁移到其他构图中的视觉语言。必须实际观察当前图片，不得沿用此前会话、首次上传图片或旧提示词中的风格记忆。
@@ -182,27 +222,34 @@ STYLE_ANALYSIS_SYSTEM_PROMPT = r"""
 输出一段紧凑、明确、可直接嵌入最终图像生成提示词的中文风格摘要，不要解释分析过程。
 """.strip()
 
+SOURCE_STYLE_ANALYSIS_SYSTEM_PROMPT = r"""
+你是 Wondful 原图编辑的独立风格分析器。只看本轮原始来源图，反推出整张图的环境、光线、曝光、色调、氛围、摄影和后期语言；不得复制来源图中旧产品的车型、产品几何、灯组、轮辐、Logo、材质或车漆颜色。最终合并时，整图氛围来自该摘要，当前 Blender 模型决定目标产品几何和车漆色相，三视图／身份图只决定各部件材质属性。环境反射可以改变车漆的可见反射，不能改变其固有色。输出一段紧凑中文风格摘要，不解释过程。
+""".strip()
+
 
 PRODUCT_ANALYSIS_SYSTEM_PROMPT = r"""
 你是 Wondful AI 渲染器的产品外观分析器。只看本轮附带的产品参考图（可能是三视图：同一产品的多个角度拼在一张图里），
 为“产品外观锁定”写两项内容：
-1. appearance：产品表面质感，一句中文短语串，例如汽车写“厚清漆车漆，长而柔的渐变高光，哑光黑饰条，熏黑玻璃”，家具写“细纹理亚麻织物，哑光胡桃木框架，拉丝黄铜脚套”。
-   描述材质与表面处理（光泽度、清漆、拉丝、磨砂、织物纹理等）。不写产品照片自己的打光、背景、阴影、曝光，也不写构图与相机。
-2. details：生成时绝对不能丢失或改形的身份细节，3 到 8 项名词短语，例如汽车的车标、前车牌、贯穿式日行灯、五辐轮毂，或家具的品牌铭牌、扶手缝线、椅背拉扣、金属脚套。
-   只列图中确实可见的部件，不猜测。
+1. appearance：各非车漆部件的表面质感，一句中文短语串，例如“哑光黑饰条，熏黑玻璃，拉丝金属铭牌，轮胎橡胶纹理”。
+   描述材质与表面处理（光泽度、清漆、拉丝、磨砂、织物纹理等）。车身车漆颜色和车漆表面基线来自当前 Blender 模型，不得从本图推断或覆盖；不写产品照片自己的打光、背景、阴影、曝光，也不写构图与相机。
+2. details：仅列可由材质区分的可见部件，3 到 8 项名词短语，例如车标金属表面、前车牌材质、日行灯透镜、轮毂涂层，或家具的品牌铭牌、扶手缝线材质、椅背面料、金属脚套。
+   不把这些项目当作几何或结构指令；灯组布局、轮辐数量和任何造型由当前 Blender 模型决定。
 只输出一个 JSON 对象，不要任何解释：{"appearance": "...", "details": ["...", "..."]}
 """.strip()
 
 
 def product_analysis_user_text(color_source: str = "BLENDER", note: str = "") -> str:
-    if color_source == "PRODUCT_REF":
-        color = "本次配色来源是产品参考图：appearance 里要写出产品各部分的固有色（例如“珍珠白车身，黑色车顶”或“米白色坐垫，深棕色木框”）。"
-    else:
-        color = "本次配色来源不是产品参考图：appearance 只写质感与表面处理，不写任何颜色。"
+    color = "只写各部件材质与表面处理，不写或推断车身车漆颜色；车漆色相由当前 Blender 模型决定，除非用户明确指定具体颜色。"
     text = "请分析附带的产品参考图，填写产品外观锁定。" + color
     if (note or "").strip():
-        text += "\n用户对这张图的造型重点说明：" + note.strip()
+        text += "\n用户对这张图的部件材质重点说明：" + note.strip()
     return text
+
+
+def product_analysis_cache_key(fingerprint, note: str = "") -> str:
+    """Role-versioned key for product material autofill; callers retain manual drafts."""
+    import hashlib
+    return hashlib.sha256((str(REFERENCE_POLICY_VERSION) + "\n" + str(fingerprint) + "\n" + (note or "").strip()).encode("utf-8")).hexdigest()
 
 
 def parse_product_analysis(text: str) -> tuple[str, list[str]]:
@@ -288,13 +335,24 @@ def build_polish_user_text(
     color_source: str = "BLENDER",
     appearance_lock: str = "",
     identity_items: list[str] | None = None,
+    workflow_mode: str = "ENVIRONMENT",
+    replica_target_count: int = 0,
+    replica_preview_count: int = 0,
 ) -> str:
     # width/height are intentionally not translated into the visible prompt.
     # Geometry / framing comes from Camera Base + Structure Packet, not text.
+    reference_mode = workflow_mode == "REFERENCE"
     refs = [
         "Reference 1 = Blender Camera Base：只用于理解当前场景语义；它的 Camera / Composition / Geometry / Position / Scale / Occlusion 全部由后续 Structure Packet 直接控制，不要把这些结构信息写进最终提示词。"
-    ] if include_camera else []
-    idx = 2 if include_camera else 1
+    ] if include_camera and not reference_mode else []
+    idx = 2 if refs else 1
+    if reference_mode:
+        if replica_target_count:
+            refs.append(f"Reference {idx} = 复刻原始目标图：只提取本图实际可见的视觉意图（例如画面确有的机位感、静止或运动状态、环境纵深、光线、气氛与镜头成像语言）；不得臆造未出现的特征、复制其中车辆身份或用文字改写白模决定的几何。")
+            idx += replica_target_count
+        if replica_preview_count:
+            refs.append(f"Reference {idx} = 当前白模粗模预览：仅控制目标产品局部几何、透视、遮挡和尺度；不覆盖来源图的环境、相机与曝光。")
+            idx += replica_preview_count
     idx = _append_reference_group(
         refs,
         idx,
@@ -342,7 +400,9 @@ def build_polish_user_text(
         + (user_prompt.strip() or "生成高品质商业视觉画面。")
         + _lock_note_for_polish(appearance_lock, identity_items)
         + "\n\n" + reference_lighting_policy(color_source)
-        + "\n\n请直接输出最终 Appearance Prompt。不要加入任何构图或几何约束；Structure 全部交给 Blender 参考图与 Structure Packet。"
+        + ("\n\n" + REFERENCE_ATMOSPHERE_POLICY if reference_mode else "")
+        + ("\n\n请直接输出最终复刻 Appearance Prompt。保留原始目标图实际可见的环境、相机、光线、场景氛围、静止或运动状态与镜头成像语言；白模粗模预览仅控制目标产品局部投影，不重建环境。"
+           if reference_mode else "\n\n请直接输出最终 Appearance Prompt。不要加入任何构图或几何约束；Structure 全部交给 Blender 参考图与 Structure Packet。")
     )
 
 
@@ -363,6 +423,7 @@ def build_render_prompt(
     color_source: str = "BLENDER",
     appearance_lock: str = "",
     identity_items: list[str] | None = None,
+    workflow_mode: str = "ENVIRONMENT",
 ) -> str:
     """Build an appearance-only generation instruction.
 
@@ -371,7 +432,9 @@ def build_render_prompt(
     attached raster means. Actual composition comes from the rasters themselves.
     """
     mapping = [
-        "Reference 1 = Blender Camera Base：结构源图。其空间关系直接作为生成基础，不从文字提示词推导构图。"
+        ("Reference 1 = Blender Camera Base：目标产品局部投影依据，不接管来源图的环境、相机或曝光。"
+         if workflow_mode == "REFERENCE" else
+         "Reference 1 = Blender Camera Base：结构源图。其空间关系直接作为生成基础，不从文字提示词推导构图。")
     ]
     idx = 2
     packet = structure_packet or {}
@@ -416,10 +479,12 @@ def build_render_prompt(
     _append_reference_group(
         mapping,
         idx,
-        "环境／风格参考图",
+        "原始复刻目标图" if workflow_mode == "REFERENCE" else "环境／风格参考图",
         style_count,
-        ENVIRONMENT_REFERENCE_RULE,
-        "辅助环境参考：" + ENVIRONMENT_REFERENCE_RULE,
+        ("保留该图环境、相机、曝光和摄影语言；目标产品局部投影由白模控制，旧产品身份不保留。"
+         if workflow_mode == "REFERENCE" else ENVIRONMENT_REFERENCE_RULE),
+        ("辅助原始复刻目标图：补充本图实际可见的环境与成像；不得改变目标产品局部投影。"
+         if workflow_mode == "REFERENCE" else "辅助环境参考：" + ENVIRONMENT_REFERENCE_RULE),
         instructions=style_instructions,
     )
 
@@ -429,6 +494,9 @@ def build_render_prompt(
         "任务：只做 Appearance Re-render。构图与几何完全由已附带的 Blender Camera Base / Structure Packet 决定；"
         "不要从下方文字中寻找或生成任何新的构图方案。下方正文只控制材质、灯光、色调、身份、风格、环境质感与后期。"
     )
+    if workflow_mode == "REFERENCE":
+        appearance_rule = ("任务：在原始来源画布上替换目标产品，保留来源环境、相机、曝光与镜头成像。"
+                           "白模仅控制目标产品局部投影；不按环境体块或地形粗模重建场景。实际附件角色清单决定图像顺序。")
     control_color_rule = (
         "结构控制图仅用于条件控制：不要把 Mask 的黑白、Depth 的灰度、Normal 的 RGB、Part ID 的伪彩色、Silhouette 的线条复制成最终视觉元素。"
     )
@@ -438,10 +506,11 @@ def build_render_prompt(
         canvas_contract(width, height, target_size),
         "\n".join(mapping),
         appearance_lock.strip(),
-        sanitize_appearance_prompt(polished_prompt),
+        sanitize_appearance_prompt(polished_prompt, preserve_visual_intent=workflow_mode == "REFERENCE"),
         identity_block(list(identity_items or [])),
         control_color_rule,
         reference_lighting_policy(color_source),
+        REFERENCE_ATMOSPHERE_POLICY if workflow_mode == "REFERENCE" else "",
     ]
     return "\n\n".join(b for b in blocks if b)
 

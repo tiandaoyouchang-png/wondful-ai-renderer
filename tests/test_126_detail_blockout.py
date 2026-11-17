@@ -237,9 +237,14 @@ class BlenderDetailTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         out = Path(tempfile.mkdtemp()) / "detail.json"
+        env = os.environ.copy()
+        for kind in ("SCRIPTS", "CONFIG", "EXTENSIONS"):
+            directory = out.parent / kind.lower()
+            directory.mkdir()
+            env["BLENDER_USER_" + kind] = str(directory)
         subprocess.run([BLENDER, "-b", "--factory-startup", "--python", str(ROOT / "tools" / "e2e_detail_blockout_bg.py"),
                         "--", "repo", str(ROOT / "tests" / "fixtures" / "scene_blockout" / "street_v4.json"), str(out)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900, env=env)
         cls.rep = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else {"error": "no report"}
 
     def test_ran(self):

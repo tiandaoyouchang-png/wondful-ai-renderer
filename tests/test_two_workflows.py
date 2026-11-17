@@ -128,6 +128,9 @@ def function_namespace(*names, classes=()):
            "Operator": Operator, "_BaseAsyncOperator": Operator, "Path": Path,
            "json": json, "hashlib": __import__("hashlib"), "time": __import__("time"),
            "MAX_PRODUCT_REFERENCES": 1, "_ACTIVE_LOCK": NS(locked=lambda: False),
+           "_SOURCE_POLISH_APPROVAL": {},
+           "_MULTIVIEW_POLISH_APPROVAL": {},
+           "_scene_token": lambda scene: scene.as_pointer() if hasattr(scene, "as_pointer") else id(scene),
            "StringProperty": lambda **kw: kw.get("default", "")}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(PKG / "operators.py"), "exec"), env)
     return env
@@ -187,7 +190,8 @@ OPS.update(bpy=bpy, image_filepath=lambda image: getattr(image, "filepath", "") 
            needs_reference_policy_refresh=lambda p: False,
            prompt_profiles=NS(needs_target_refresh=lambda p,pref: False),
            _product_autofill_key=lambda *a: "",
-           _load_reference_image=lambda path:NS(size=(160,90)))
+           _load_reference_image=lambda path:NS(size=(160,90)),
+           _validate_source_image=lambda path:None)
 
 
 class WorkflowStateTests(unittest.TestCase):
@@ -227,11 +231,11 @@ class WorkflowStateTests(unittest.TestCase):
         self.assertEqual(WF.render_text(p,True),"current brief")
     def test_blank_prompt_has_safe_mode_specific_default(self):
         self.assertIn("当前相机",WF.render_text(props()))
-        self.assertIn("已确认",WF.render_text(props(workflow_mode=WF.REFERENCE)))
-    def test_optional_polish_is_off_by_default_even_with_stale_style(self):
+        self.assertIn("目标图",WF.render_text(props(workflow_mode=WF.REFERENCE)))
+    def test_generate_always_polishes_even_with_legacy_flags_disabled(self):
         p=props(style_prompt_dirty=True,prompt="",style_images=[1])
-        self.assertFalse(OPS["generate_needs_polish"](p,NS()))
-    def test_auto_polish_remains_explicitly_available(self):
+        self.assertTrue(OPS["generate_needs_polish"](p,NS()))
+    def test_legacy_auto_polish_flag_does_not_change_generate_flow(self):
         self.assertTrue(OPS["generate_needs_polish"](props(auto_polish_on_generate=True),NS()))
 
 
@@ -241,7 +245,7 @@ class ReferenceAndGuardTests(unittest.TestCase):
         self.target=Path(self.tmp.name)/"target.png";self.target.write_bytes(b"target-image-bytes")
     def ready(self):
         return props(workflow_mode=WF.REFERENCE,sb_image_path=str(self.target),
-                     sb_built_target_hash=WF.file_hash(self.target),replica_reviewed=True)
+                     sb_built_target_hash=WF.file_hash(self.target),replica_reviewed=True,workflow_multiview=True)
     def check(self,p,**kw):
         args=dict(has_camera=True,has_product=True,has_blockout=True,target_path=str(self.target),source_ok=True)
         args.update(kw);return WF.preflight(p,**args)
@@ -266,7 +270,7 @@ class ReferenceAndGuardTests(unittest.TestCase):
         self.assertEqual(OPS["_reference_paths"](p)["style"],["environment.png"])
         self.assertEqual(OPS["_sb_reference"](p),("",""))
         p.workflow_mode=WF.REFERENCE
-        self.assertEqual(OPS["_reference_paths"](p)["style"],[str(self.target)])
+        self.assertEqual(OPS["_reference_paths"](p)["style"],[str(self.target.resolve())])
         self.assertEqual(len(OPS["_reference_instructions"](p)["style"]),1)
         p.sb_image_path=""
         self.assertEqual(OPS["_reference_paths"](p)["style"],[])
@@ -279,9 +283,20 @@ class ReferenceAndGuardTests(unittest.TestCase):
         block=Collection("Owned",[obj],tags={"wondful_scene_blockout":1,
             "wondful_sb_reference_image":str(self.target),"wondful_sb_reference_sha256":WF.file_hash(self.target)})
         c.scene.collection.children_recursive.append(block);p.massing_collection=block
-        self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],str(self.target))
+        self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],str(self.target.resolve()))
         self.target.write_bytes(b"changed")
         self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],"")
+    def test_prepared_snapshot_may_differ_from_valid_original_target(self):
+        p=self.ready();c=context(p);obj=Item("shell")
+        snapshot=Path(self.tmp.name)/"prepared.png";snapshot.write_bytes(b"resized-and-reencoded-png")
+        block=Collection("Owned",[obj],tags={"wondful_scene_blockout":1,
+            "wondful_sb_reference_image":str(snapshot),"wondful_sb_reference_sha256":WF.file_hash(snapshot),
+            "wondful_sb_original_sha256":WF.file_hash(self.target)})
+        c.scene.collection.children_recursive.append(block);p.massing_collection=block
+        self.assertEqual(OPS["_sb_generation_reference"](c,p)[0],str(snapshot.resolve()))
+        self.assertEqual(OPS["workflow_preflight"](c,p),"")
+        self.target.write_bytes(b"replaced-original")
+        self.assertIn("不一致",OPS["workflow_preflight"](c,p))
     def test_environment_generation_never_uses_replica_view_list(self):
         p=props(workflow_multiview=True);c=context(p)
         other=Item("Other",kind="CAMERA");c.scene.objects.append(other);p.mv_cameras=[NS(camera=other,enabled=True)]
@@ -292,17 +307,18 @@ class ReferenceAndGuardTests(unittest.TestCase):
             self.assertIs(original,c.scene.camera)
     def test_reference_multiview_requires_explicit_toggle(self):
         p=self.ready();c=context(p)
+        p.workflow_multiview=False
         p.mv_cameras=[NS(camera=c.scene.camera,enabled=True)]
         with patch.object(MV,"scene_blockout_exists",return_value=True):
             self.assertEqual(OPS["generate_views"](c,p),[])
             p.workflow_multiview=True
             self.assertEqual(OPS["generate_views"](c,p),[c.scene.camera])
-    def test_generate_dispatches_without_polish_or_camera_change(self):
+    def test_generate_dispatches_mandatory_polish_without_camera_change(self):
         p=props(prompt="manual",style_prompt_dirty=True);c=context(p);calls=[];original=c.scene.camera
         bpy.ops=NS(wondful=NS(ai_render=lambda *a: calls.append("render") or {"FINISHED"},
                               polish_prompt=lambda *a: calls.append("polish") or {"FINISHED"}))
         op=OPS["WONDFUL_OT_generate"]()
-        self.assertEqual(op.execute(c),{"FINISHED"});self.assertEqual(calls,["render"])
+        self.assertEqual(op.execute(c),{"FINISHED"});self.assertEqual(calls,["polish"])
         self.assertIs(original,c.scene.camera);self.assertEqual(p.prompt,"manual")
     def test_replica_rejection_happens_before_any_provider_call(self):
         p=props(workflow_mode=WF.REFERENCE);c=context(p)
@@ -408,6 +424,7 @@ def ui_module():
     stub("prompt_engine",needs_reference_policy_refresh=lambda p:False)
     stub("viewport_capture",camera_output_dimensions=lambda context:(1600,900))
     stub("operators",generate_needs_polish=OPS["generate_needs_polish"],
+         generate_views=OPS["generate_views"],
          _reference_paths=OPS["_reference_paths"],provider_variant_cap=lambda p:2 if p=="antigravity" else 4,
          render_variant_count=lambda p,props:min(int(props.render_count),2 if p=="antigravity" else 4),
          views_plan=lambda p:{},keep_exact_state=lambda c,p:([],0))
@@ -431,11 +448,11 @@ class UILayoutContractTests(unittest.TestCase):
         self.assertFalse(any(x[0]=="prop" and x[1]=="sb_image_path" for x in env))
         self.assertFalse(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in env))
         self.assertTrue(any(x[:2]==("operator","wondful.target_load") for x in ref))
-        self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in ref))
+        self.assertFalse(any(x[0]=="operator" and x[1]=="wondful.scene_blockout_build" for x in ref))
         for calls in (env, ref):
             self.assertEqual(sum(x[:2] == ("operator", "wondful.set_workflow_mode") for x in calls), 2)
         for calls in (env,ref):
-            for prop in ("product_collection","camera","output_directory","long_edge","render_count"):
+            for prop in ("output_directory","long_edge","render_count"):
                 self.assertTrue(any(x[0]=="prop" and x[1]==prop for x in calls),prop)
             self.assertTrue(any(x[0]=="operator" and x[1]=="wondful.polish_prompt" for x in calls))
     def test_replica_render_no_longer_requires_review_in_ui(self):
@@ -456,7 +473,7 @@ class UILayoutContractTests(unittest.TestCase):
                             self.draw(p);scenarios+=1
         self.assertEqual(scenarios,56)
     def test_preview_is_available_before_final_result(self):
-        p=props(workflow_mode=WF.REFERENCE,sb_reference_image=FakeImage("Target"),sb_preview_image=FakeImage("Blockout"))
+        p=props(workflow_mode=WF.REFERENCE,ui_show_advanced=True,ui_adv_tab="MULTIVIEW",sb_reference_image=FakeImage("Target"),sb_preview_image=FakeImage("Blockout"))
         calls=self.draw(p)
         self.assertTrue(any(x[:2]==("operator","wondful.open_compare_workspace") for x in calls))
         self.assertIsNone(p.result_image)
@@ -502,7 +519,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp)/"target.png";target.write_bytes(b"target")
             digest=WF.file_hash(target)
-            p=props(workflow_mode=WF.REFERENCE,sb_image_path=str(target),sb_built_target_hash=digest,replica_reviewed=True)
+            p=props(workflow_mode=WF.REFERENCE,sb_image_path=str(target),sb_built_target_hash=digest,replica_reviewed=True,workflow_multiview=True)
             c=context(p);obj=Item("shell")
             block=Collection("Owned",[obj],tags={"wondful_scene_blockout":1,
                 "wondful_sb_reference_image":str(target),"wondful_sb_reference_sha256":digest,
@@ -516,7 +533,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
     def test_legacy_blockout_requires_explicit_rebuild_not_silent_reuse(self):
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp)/"target.png";target.write_bytes(b"target")
-            p=props(workflow_mode=WF.REFERENCE,sb_image_path=str(target),sb_built_target_hash=WF.file_hash(target),replica_reviewed=True)
+            p=props(workflow_mode=WF.REFERENCE,sb_image_path=str(target),sb_built_target_hash=WF.file_hash(target),replica_reviewed=True,workflow_multiview=True)
             c=context(p);block=Collection("Legacy",[Item("shell")],tags={"wondful_scene_blockout":1,
                 "wondful_sb_reference_image":str(target),"wondful_sb_reference_sha256":WF.file_hash(target)})
             p.massing_collection=block;c.scene.collection.children_recursive.append(block)

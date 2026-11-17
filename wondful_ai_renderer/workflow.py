@@ -1,7 +1,7 @@
 """Explicit workflows and reversible capture isolation; no network or import-time bpy.
 
-ENVIRONMENT keeps the user's camera and appearance references. REFERENCE uses an
-explicit target, a valid blockout, and that target's appearance. Switching mode
+ENVIRONMENT keeps the user's camera and appearance references. REFERENCE edits an
+explicit target, with an optional multiview blockout. Switching mode
 never changes cameras, geometry, materials, lights or visibility.
 """
 from contextlib import contextmanager
@@ -14,7 +14,7 @@ ENVIRONMENT = "ENVIRONMENT"
 REFERENCE = "REFERENCE"
 BUILD_ID = "two-workflows-ui-r4"
 BUSY = {"POLISHING", "RENDERING", "AUTHENTICATING", "BLOCKOUT", "CHECKING", "AUTOFILLING", "CLASSIFYING", "REFRESHING_MODELS"}
-DRAFT_FIELDS = ("prompt", "scene_brief", "scene_brief_used", "prompt_source", "last_ai_prompt",
+DRAFT_FIELDS = ("prompt", "scene_brief", "scene_brief_used", "prompt_source", "last_ai_prompt", "prompt_reference_input_key",
                 "prompt_style_fingerprint", "prompt_style_revision", "prompt_reference_policy_version",
                 "style_prompt_dirty", "style_sync_initialized", "style_summary_cache",
                 "style_summary_cache_key", "prompt_profile_version", "prompt_target_provider",
@@ -28,6 +28,36 @@ def mode(props):
 
 def is_reference(props):
     return mode(props) == REFERENCE
+
+
+def source_only(props):
+    """Single reference edits use the original canvas and a real product projection."""
+    return is_reference(props) and not bool(getattr(props, "workflow_multiview", False))
+
+
+def source_slots(props):
+    """Identify the selected slots as well as their paths and image datablocks."""
+    def pointer(value):
+        if value is None:
+            return None
+        try:
+            return value.as_pointer() if hasattr(value, "as_pointer") else id(value)
+        except ReferenceError:
+            return None
+
+    def image_key(image):
+        if image is None:
+            return None
+        try:
+            return (pointer(image), str(getattr(image, "filepath_raw", "") or ""),
+                    str(getattr(image, "filepath", "") or ""), tuple(getattr(image, "size", ())))
+        except (AttributeError, TypeError, ReferenceError):
+            return None
+
+    items = getattr(props, "product_images", ())
+    item = items[0] if items else None
+    return ((str(getattr(props, "sb_image_path", "") or ""), image_key(getattr(props, "sb_reference_image", None))),
+            (pointer(item), str(getattr(item, "source_path", "") or ""), image_key(getattr(item, "image", None))))
 
 
 def reference_revision(props):
@@ -75,7 +105,7 @@ def switch_mode(props, context=None):
         props.pending_generate = False
         props.views_plan = ""
         if hasattr(props, "compare_pair"):
-            props.compare_pair = "TARGET_BLOCKOUT" if new == REFERENCE else "CAMERA_RESULT"
+            props.compare_pair = ("TARGET_RESULT" if source_only(props) else "TARGET_BLOCKOUT") if new == REFERENCE else "CAMERA_RESULT"
             props.compare_mode = "SPLIT"
         props.prompt_notice = "已切换到" + label(new) + "；相机和场景未改动"
     finally:
@@ -129,13 +159,19 @@ def identity_available(props):
         return False
 
 
-def identity_path(props, *, resolve=None, packed_export=None):
+def identity_path(props, *, resolve=None, packed_export=None, strict_source=False):
     """Only the actual first identity slot is authoritative; no second-slot fallback."""
     if not identity_available(props):
         return ""
     item = props.product_images[0]
     image = item.image
     resolve = resolve or (lambda p: str(Path(p).expanduser()))
+    if strict_source and getattr(item, "source_path", ""):
+        try:
+            path = Path(resolve(item.source_path))
+            return str(path) if path.is_file() and path.stat().st_size > 0 else ""
+        except (OSError, ValueError):
+            return ""
     for raw in (getattr(item, "source_path", ""), getattr(image, "filepath_raw", ""), getattr(image, "filepath", "")):
         if not raw:
             continue
@@ -163,7 +199,8 @@ def render_text(props, references_changed=False):
     changed_brief = brief != str(getattr(props, "scene_brief_used", "") or "").strip()
     if prompt and not (ai and prompt == ai and (references_changed or changed_brief)):
         return prompt
-    return brief or ("按已确认的相机与粗模复刻目标参考图的环境材质和光照，保留真实车模。"
+    return brief or ("保留目标图的场景、构图和光照，替换为身份参考中的产品。" if source_only(props) else
+                     "按已确认的相机与粗模复刻目标参考图的环境材质和光照，保留真实车模。"
                      if is_reference(props) else "按当前相机渲染真实车模，参考环境图的材质、光照和氛围。")
 
 
@@ -171,13 +208,21 @@ def contract(props):
     common = ("产品几何、比例、灯组和轮毂以当前真实车模为准；参考图中的另一辆车不提供产品身份。"
               "车漆基础配色保留，受光、反射与接地阴影按目标环境重新匹配。")
     if is_reference(props):
-        return ("【参考图复刻】当前相机底图与已确认粗模是最终构图和遮挡依据；目标图提供场景结构意图、材质与光照。"
-                "不为匹配参考车型而拉伸车模，不在生图阶段重新移动相机。" + common)
+        return ("【参考图复刻】当前相机底图与已确认粗模是最终构图和遮挡依据；原始目标图只提供其中实际可见的光线、场景气氛、"
+                "静止或运动状态与镜头成像语言。不得臆造未出现的特征，不为匹配参考车型而拉伸车模，也不在生图阶段重新移动相机。" + common)
     return ("【环境参考渲染】只使用用户当前相机决定视角、主体位置和大小；环境图只提供环境风格、材质与光照，"
             "不得照搬其中的机位或车辆位置；不引用任何旧复刻粗模或其分析。" + common)
 
 
 def preflight(props, *, has_camera, has_product, has_blockout, target_path="", source_ok=True, identity_ok=None):
+    if source_only(props):
+        if not (identity_available(props) if identity_ok is None else identity_ok):
+            return "请先添加有效的产品身份参考图"
+        if not has_product:
+            return "请先选择产品集合，单图复刻需要真实产品结构参考"
+        if not has_camera:
+            return "请先选择活动相机，单图复刻需要同机位产品结构参考"
+        return "" if file_hash(target_path) else "请先选择有效的复刻目标图"
     if not has_product:
         return "请先选择车模所在的产品集合"
     if not (identity_available(props) if identity_ok is None else identity_ok):

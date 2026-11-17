@@ -5,7 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 
-PACK_VERSION = "1.0.0"
+REFERENCE_ROLE_POLICY_VERSION = 8
+PACK_VERSION = "1.0.2-reference-role-contract"
 ROOT = Path(__file__).parent / "prompt_skills/wondful-render-director"
 PROFILES = {
     "codex": ("openai-image", "OpenAI ImageGen / Codex"),
@@ -78,4 +79,4 @@ def render_brief(text, value):
 
 
 def style_cache_key(fingerprint, instructions, value, agent_model=""):
-    return hashlib.sha256(json.dumps([fingerprint, list(instructions or []), target_key(value, agent_model)], ensure_ascii=False).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([REFERENCE_ROLE_POLICY_VERSION, fingerprint, list(instructions or []), target_key(value, agent_model)], ensure_ascii=False).encode()).hexdigest()
